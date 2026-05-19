@@ -23,6 +23,10 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
               ".tif", ".tiff", ".heic", ".heif"}
 DEFAULT_INPUT = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
 DEFAULT_OUTPUT = Path.home() / "Pictures" / "sorted_all_pictures" / "_nudity_review"
+EXCLUDED_DIRS = {
+    "_possible_nudity",
+    "_uncertain_nudity",
+}
 
 EXPLICIT_CLASSES = {
     "FEMALE_BREAST_EXPOSED",
@@ -37,7 +41,11 @@ def iter_images(root: Path) -> list[Path]:
     out: list[Path] = []
     if not root.exists():
         return out
-    for dirpath, _dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            d for d in dirnames
+            if not d.startswith(".") and d.casefold() not in EXCLUDED_DIRS
+        ]
         base = Path(dirpath)
         for filename in filenames:
             p = base / filename

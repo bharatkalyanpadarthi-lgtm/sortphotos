@@ -11,6 +11,7 @@ Run:
     python face.py finish      # finalize labels you already entered
     python face.py status      # quick dashboard
     python face.py refs        # rebuild optional Face References DB
+    python face.py nudity      # scan sorted people folders for nudity
     python face.py health      # validate cache and duplicate status
 """
 
@@ -78,6 +79,22 @@ ACTIONS = [
         "label": "Status Dashboard",
         "desc": "Quick counts for organized photos, pending labels, duplicates, and ready-to-delete",
         "script": "status_report.py",
+    },
+    {
+        "key": "nudity",
+        "aliases": ["nudity-check", "scan-nudity"],
+        "label": "Run Nudity Check",
+        "desc": "Scan all sorted person folders and move flagged images into each person's nudity subfolders",
+        "steps": [
+            {
+                "script": "separate_nudity_review.py",
+                "args": ["--apply", "--quiet"],
+            },
+            {
+                "script": "place_nudity_inside_person_folders.py",
+                "args": ["--apply", "--remove-review-copies", "--quiet"],
+            },
+        ],
     },
     {
         "key": "rebuild-id",
