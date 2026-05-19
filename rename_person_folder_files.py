@@ -29,7 +29,13 @@ def iter_images(person_dir: Path) -> list[Path]:
             p = base / filename
             if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
                 out.append(p)
-    return sorted(out, key=lambda p: str(p.relative_to(person_dir)).lower())
+    return sorted(
+        out,
+        key=lambda p: (
+            len(p.relative_to(person_dir).parts),
+            str(p.relative_to(person_dir)).lower(),
+        ),
+    )
 
 
 def clean_prefix(folder_name: str) -> str:

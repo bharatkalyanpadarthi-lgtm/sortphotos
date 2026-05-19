@@ -12,6 +12,7 @@ Run:
     python face.py status      # quick dashboard
     python face.py refs        # rebuild optional Face References DB
     python face.py nudity      # scan sorted people folders for nudity
+    python face.py rename      # name/number files inside person folders
     python face.py health      # validate cache and duplicate status
 """
 
@@ -95,6 +96,14 @@ ACTIONS = [
                 "args": ["--apply", "--remove-review-copies", "--quiet"],
             },
         ],
+    },
+    {
+        "key": "rename",
+        "aliases": ["number", "number-files", "rename-files"],
+        "label": "Rename Person Files",
+        "desc": "Name and number images inside sorted person folders as Person_001, Person_002, etc.",
+        "script": "rename_person_folder_files.py",
+        "args": ["--apply", "--quiet"],
     },
     {
         "key": "rebuild-id",
