@@ -1,0 +1,20 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+
+# Local/runtime state
+.env
+*.log
+*.tmp
+*.bak
+
+# Generated local data should stay out of git
+face_clusters/
+photos_by_person/
+sorted_all_pictures/
+_source_review/
+ready_to_delete/
+duplicate_to_review/
+junk_to_review/
+_nudity_review/
