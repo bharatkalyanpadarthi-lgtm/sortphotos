@@ -28,7 +28,7 @@ ACTIONS = [
         "key": "process",
         "aliases": ["process-new", "process-move", "sort"],
         "label": "Process New Photos",
-        "desc": "Fast daily run: scan only ~/Pictures/To Process, organize known people, then empty scanned inbox files to ready_to_delete",
+        "desc": "Fast daily run: scan ~/Pictures/To Process, organize known people, run nudity placement, then empty scanned inbox files",
         "script": "sort_photos.py",
         "args": [
             str(Path.home() / "Pictures" / "To Process"),
@@ -44,7 +44,7 @@ ACTIONS = [
         "key": "process-all",
         "aliases": ["scan-all-pictures"],
         "label": "Process All Pictures",
-        "desc": "Full scan of ~/Pictures. Slower; use only when old source folders must be swept again",
+        "desc": "Full scan of ~/Pictures with nudity placement. Slower; use only when old source folders must be swept again",
         "script": "sort_photos.py",
         "args": [
             "--unattended",
