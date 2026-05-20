@@ -144,7 +144,7 @@ UNATTENDED_FINISH_KNOWN = False
 SOURCE_ARCHIVE_DIR_NAME = "organized_sources"
 SCANNED_SOURCE_ARCHIVE_DIR_NAME = "ready_to_delete/scanned_sources"
 INTAKE_DUPLICATE_ARCHIVE_DIR_NAME = "ready_to_delete/intake_duplicates"
-INTAKE_NEAR_VISUAL_REVIEW_DIR_NAME = "duplicate_to_review/intake_near_visual"
+INTAKE_NEAR_VISUAL_REVIEW_DIR_NAME = "_near_visual_review"
 
 GOOGLE_LENS_URL = "https://lens.google.com/"
 LENS_SEARCH_CROP_SIZE = 512
@@ -2031,18 +2031,21 @@ def archive_intake_duplicates(sources: Iterable[Path],
     return moved
 
 
-def archive_intake_near_visual_review(sources: Iterable[Path],
-                                      input_dir: Path,
+def archive_intake_near_visual_review(matches: Iterable[tuple[Path, Path]],
                                       output_dir: Path) -> int:
-    archive_root = output_dir / "_source_review" / INTAKE_NEAR_VISUAL_REVIEW_DIR_NAME
     moved = 0
-    input_dir = input_dir.resolve()
     output_dir = output_dir.resolve()
-    for src in sorted(set(sources), key=lambda p: str(p).lower()):
+    people_dir = (output_dir / "photos_by_person").resolve()
+    seen: set[Path] = set()
+    for src, matched_existing in sorted(matches, key=lambda pair: str(pair[0]).lower()):
+        if src in seen:
+            continue
+        seen.add(src)
         if not src.exists():
             continue
         try:
             resolved = src.resolve()
+            matched_resolved = matched_existing.resolve()
         except OSError:
             continue
         try:
@@ -2051,10 +2054,15 @@ def archive_intake_near_visual_review(sources: Iterable[Path],
         except ValueError:
             pass
         try:
-            rel = resolved.relative_to(input_dir)
+            matched_rel = matched_resolved.relative_to(people_dir)
         except ValueError:
-            rel = Path(resolved.name)
-        dest = unique_path(archive_root / rel)
+            log.warning("Near-visual match is not inside person folders: %s",
+                        matched_existing)
+            continue
+        if len(matched_rel.parts) < 2:
+            continue
+        person_dir = people_dir / matched_rel.parts[0]
+        dest = unique_path(person_dir / INTAKE_NEAR_VISUAL_REVIEW_DIR_NAME / resolved.name)
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             shutil.move(str(resolved), str(dest))
@@ -2090,7 +2098,8 @@ def load_fingerprint_cache() -> dict:
 
 def save_fingerprint_cache(data: dict) -> None:
     FINGERPRINT_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = FINGERPRINT_CACHE_FILE.with_suffix(FINGERPRINT_CACHE_FILE.suffix + ".tmp")
+    tmp = FINGERPRINT_CACHE_FILE.with_suffix(
+        FINGERPRINT_CACHE_FILE.suffix + f".{os.getpid()}.tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f)
     tmp.replace(FINGERPRINT_CACHE_FILE)
@@ -2149,7 +2158,7 @@ def image_duplicate_fingerprint(
 
 
 def filter_existing_person_duplicates(images: list[Path],
-                                      output_dir: Path) -> tuple[list[Path], list[Path], list[Path]]:
+                                      output_dir: Path) -> tuple[list[Path], list[Path], list[tuple[Path, Path]]]:
     people_dir = output_dir / "photos_by_person"
     if not images or not people_dir.exists():
         return images, [], []
@@ -2180,7 +2189,7 @@ def filter_existing_person_duplicates(images: list[Path],
 
     kept: list[Path] = []
     safe_duplicates: list[Path] = []
-    near_visual_review: list[Path] = []
+    near_visual_review: list[tuple[Path, Path]] = []
     counts = {"exact_file": 0, "same_pixels": 0, "near_visual": 0, "errors": 0}
 
     log.info("Intake duplicate check: checking %d incoming image(s).", len(images))
@@ -2192,22 +2201,24 @@ def filter_existing_person_duplicates(images: list[Path],
             continue
         file_hash, pixel_hash, phash, ratio = fp
         duplicate_kind: str | None = None
+        duplicate_match: Path | None = None
         if file_hash in exact:
             duplicate_kind = "exact_file"
         elif pixel_hash in pixels:
             duplicate_kind = "same_pixels"
         else:
-            for existing_phash, existing_ratio, _existing_path in phashes:
+            for existing_phash, existing_ratio, existing_path in phashes:
                 if abs(ratio - existing_ratio) > 0.08:
                     continue
                 if hamming_int(phash, existing_phash) <= INTAKE_DUP_PHASH_THRESHOLD:
                     duplicate_kind = "near_visual"
+                    duplicate_match = existing_path
                     break
 
         if duplicate_kind is None:
             kept.append(path)
-        elif duplicate_kind == "near_visual":
-            near_visual_review.append(path)
+        elif duplicate_kind == "near_visual" and duplicate_match is not None:
+            near_visual_review.append((path, duplicate_match))
             counts[duplicate_kind] += 1
         else:
             safe_duplicates.append(path)
@@ -2902,7 +2913,7 @@ def main() -> int:
              len(images) - len(new_images), len(cached_records), len(new_images))
 
     intake_duplicates: list[Path] = []
-    intake_near_visual: list[Path] = []
+    intake_near_visual: list[tuple[Path, Path]] = []
     if new_images:
         new_images, intake_duplicates, intake_near_visual = filter_existing_person_duplicates(
             new_images, output_dir)
@@ -2917,10 +2928,11 @@ def main() -> int:
                      len(intake_duplicates))
         if intake_near_visual:
             moved = archive_intake_near_visual_review(
-                intake_near_visual, input_dir, output_dir)
-            log.info("Moved %d near-visual intake candidate(s) to review: %s",
+                intake_near_visual, output_dir)
+            log.info("Moved %d near-visual intake candidate(s) into matched "
+                     "person-folder review subfolders named %s.",
                      moved,
-                     output_dir / "_source_review" / INTAKE_NEAR_VISUAL_REVIEW_DIR_NAME)
+                     INTAKE_NEAR_VISUAL_REVIEW_DIR_NAME)
         if intake_duplicates or intake_near_visual:
             log.info("New / changed images after intake duplicate check: %d.",
                      len(new_images))
