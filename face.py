@@ -38,7 +38,8 @@ ACTIONS = [
             "--archive-organized-sources",
             "--archive-sources-to-ready-delete",
             "--archive-scanned-sources",
-            "--detect-workers", "2",
+            "--batch-size", "50",
+            "--detect-workers", "1",
         ],
     },
     {
@@ -51,7 +52,8 @@ ACTIONS = [
             "--unattended",
             "--archive-organized-sources",
             "--archive-sources-to-ready-delete",
-            "--detect-workers", "2",
+            "--batch-size", "50",
+            "--detect-workers", "1",
         ],
     },
     {

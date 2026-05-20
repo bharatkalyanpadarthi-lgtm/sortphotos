@@ -70,7 +70,7 @@ CACHE_VERSION  = 2
 LABEL_STATE_VERSION = 1
 IDENTITY_DB_VERSION = 1
 
-BATCH_SIZE = 500
+BATCH_SIZE = 50
 DETECT_WORKERS = 1
 LABEL_SAVE_EVERY = 10   # save labeling state every N labels applied
 
@@ -2469,7 +2469,8 @@ def main() -> int:
                         help="Fast resume mode: no AI, no close-pair review, and only show clusters with at least 5 faces.")
     parser.add_argument("--scan-all-dirs", action="store_true",
                         help="Do not skip folders named sorted/photos_by_person/face_clusters. Use only for importing old outputs.")
-    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE,
+                        help="Images per detection subprocess. Default 50 keeps macOS memory stable.")
     parser.add_argument("--detect-workers", type=int, default=DETECT_WORKERS,
                         help="Run this many detection subprocess batches in parallel. Use 1 for safest memory use; 2 can be faster on large CPU-only scans.")
     parser.add_argument("--det-size", type=int, default=DET_SIZE[0],
