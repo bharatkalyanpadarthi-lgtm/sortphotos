@@ -167,6 +167,7 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
               ".tif", ".tiff", ".heic", ".heif"}
 INVALID_NAME_CHARS = '/\\:*?"<>|'
 DEFAULT_EXCLUDED_SCAN_DIRS = {
+    "Celebrities",
     "_nudity_review",
     "_source_review",
     "duplicate_to_review",
