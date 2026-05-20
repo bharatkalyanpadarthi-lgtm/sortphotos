@@ -67,9 +67,11 @@ AI_CACHE_FILE  = CACHE_DIR / "ai_suggestions.json"
 LABEL_STATE_FILE = CACHE_DIR / "labeling_state.pkl"
 IDENTITY_DB_FILE = CACHE_DIR / "person_identity_db.pkl"
 REFERENCE_CENTROIDS_FILE = CACHE_DIR / "reference_centroids.pkl"
+FINGERPRINT_CACHE_FILE = CACHE_DIR / "advanced_duplicate_fingerprints.json"
 CACHE_VERSION  = 2
 LABEL_STATE_VERSION = 1
 IDENTITY_DB_VERSION = 1
+FINGERPRINT_CACHE_VERSION = 1
 
 BATCH_SIZE = 50
 DETECT_WORKERS = 1
@@ -142,6 +144,7 @@ UNATTENDED_FINISH_KNOWN = False
 SOURCE_ARCHIVE_DIR_NAME = "organized_sources"
 SCANNED_SOURCE_ARCHIVE_DIR_NAME = "ready_to_delete/scanned_sources"
 INTAKE_DUPLICATE_ARCHIVE_DIR_NAME = "ready_to_delete/intake_duplicates"
+INTAKE_NEAR_VISUAL_REVIEW_DIR_NAME = "duplicate_to_review/intake_near_visual"
 
 GOOGLE_LENS_URL = "https://lens.google.com/"
 LENS_SEARCH_CROP_SIZE = 512
@@ -2028,39 +2031,143 @@ def archive_intake_duplicates(sources: Iterable[Path],
     return moved
 
 
-def image_duplicate_fingerprint(path: Path) -> tuple[str, str, int, float] | None:
+def archive_intake_near_visual_review(sources: Iterable[Path],
+                                      input_dir: Path,
+                                      output_dir: Path) -> int:
+    archive_root = output_dir / "_source_review" / INTAKE_NEAR_VISUAL_REVIEW_DIR_NAME
+    moved = 0
+    input_dir = input_dir.resolve()
+    output_dir = output_dir.resolve()
+    for src in sorted(set(sources), key=lambda p: str(p).lower()):
+        if not src.exists():
+            continue
+        try:
+            resolved = src.resolve()
+        except OSError:
+            continue
+        try:
+            resolved.relative_to(output_dir)
+            continue
+        except ValueError:
+            pass
+        try:
+            rel = resolved.relative_to(input_dir)
+        except ValueError:
+            rel = Path(resolved.name)
+        dest = unique_path(archive_root / rel)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.move(str(resolved), str(dest))
+            moved += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("Could not archive near-visual intake candidate %s: %s",
+                        resolved, e)
+    return moved
+
+
+def _fingerprint_signature(path: Path) -> dict[str, int | float | str]:
+    st = path.stat()
+    return {
+        "mtime": float(st.st_mtime),
+        "size": int(st.st_size),
+        "path": str(path),
+    }
+
+
+def load_fingerprint_cache() -> dict:
+    if not FINGERPRINT_CACHE_FILE.exists():
+        return {"version": FINGERPRINT_CACHE_VERSION, "entries": {}}
     try:
+        with FINGERPRINT_CACHE_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("version") != FINGERPRINT_CACHE_VERSION:
+            return {"version": FINGERPRINT_CACHE_VERSION, "entries": {}}
+        data.setdefault("entries", {})
+        return data
+    except Exception:
+        return {"version": FINGERPRINT_CACHE_VERSION, "entries": {}}
+
+
+def save_fingerprint_cache(data: dict) -> None:
+    FINGERPRINT_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = FINGERPRINT_CACHE_FILE.with_suffix(FINGERPRINT_CACHE_FILE.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f)
+    tmp.replace(FINGERPRINT_CACHE_FILE)
+
+
+def image_duplicate_fingerprint(
+    path: Path,
+    cache_entries: dict | None = None,
+    stats: Counter | None = None,
+) -> tuple[str, str, int, float] | None:
+    try:
+        sig = _fingerprint_signature(path)
+        path_key = str(path)
+        if cache_entries is not None:
+            cached = cache_entries.get(path_key)
+            if cached and cached.get("signature") == sig:
+                try:
+                    file_hash = str(cached["sha256"])
+                    pixel_hash = str(cached["pixel_sha256"])
+                    phash = int(str(cached["phash"]), 16)
+                    width = int(cached["width"])
+                    height = int(cached["height"])
+                    if stats is not None:
+                        stats["cache_hits"] += 1
+                    return file_hash, pixel_hash, phash, width / max(1, height)
+                except Exception:
+                    pass
+        if stats is not None:
+            stats["cache_misses"] += 1
         file_hash = sha256_file(path)
         img = imread_unicode(path)
         if img is None:
+            if stats is not None:
+                stats["decode_errors"] += 1
             return None
         h, w = img.shape[:2]
         ratio = w / max(1, h)
         pixel_hash = decoded_pixel_sha256(img)
         phash = phash_to_int(perceptual_hash(img))
+        if cache_entries is not None:
+            cache_entries[path_key] = {
+                "signature": sig,
+                "size_bytes": int(sig["size"]),
+                "width": w,
+                "height": h,
+                "sha256": file_hash,
+                "pixel_sha256": pixel_hash,
+                "phash": f"{phash:016x}",
+            }
         return file_hash, pixel_hash, phash, ratio
     except Exception as exc:  # noqa: BLE001
+        if stats is not None:
+            stats["errors"] += 1
         log.debug("Could not fingerprint %s: %s", path, exc)
         return None
 
 
 def filter_existing_person_duplicates(images: list[Path],
-                                      output_dir: Path) -> tuple[list[Path], list[Path]]:
+                                      output_dir: Path) -> tuple[list[Path], list[Path], list[Path]]:
     people_dir = output_dir / "photos_by_person"
     if not images or not people_dir.exists():
-        return images, []
+        return images, [], []
 
     person_images = list(iter_images(people_dir, excluded_dir_names=set()))
     if not person_images:
-        return images, []
+        return images, [], []
 
     log.info("Intake duplicate check: indexing %d existing person-folder image(s).",
              len(person_images))
+    fp_cache = load_fingerprint_cache()
+    entries = fp_cache.setdefault("entries", {})
+    stats: Counter = Counter()
     exact: dict[str, Path] = {}
     pixels: dict[str, Path] = {}
     phashes: list[tuple[int, float, Path]] = []
     for i, path in enumerate(person_images, start=1):
-        fp = image_duplicate_fingerprint(path)
+        fp = image_duplicate_fingerprint(path, entries, stats)
         if fp is None:
             continue
         file_hash, pixel_hash, phash, ratio = fp
@@ -2072,11 +2179,13 @@ def filter_existing_person_duplicates(images: list[Path],
                      i, len(person_images))
 
     kept: list[Path] = []
-    duplicates: list[Path] = []
+    safe_duplicates: list[Path] = []
+    near_visual_review: list[Path] = []
     counts = {"exact_file": 0, "same_pixels": 0, "near_visual": 0, "errors": 0}
 
-    for path in images:
-        fp = image_duplicate_fingerprint(path)
+    log.info("Intake duplicate check: checking %d incoming image(s).", len(images))
+    for i, path in enumerate(images, start=1):
+        fp = image_duplicate_fingerprint(path, entries, stats)
         if fp is None:
             counts["errors"] += 1
             kept.append(path)
@@ -2097,18 +2206,32 @@ def filter_existing_person_duplicates(images: list[Path],
 
         if duplicate_kind is None:
             kept.append(path)
-        else:
-            duplicates.append(path)
+        elif duplicate_kind == "near_visual":
+            near_visual_review.append(path)
             counts[duplicate_kind] += 1
+        else:
+            safe_duplicates.append(path)
+            counts[duplicate_kind] += 1
+        if i % 500 == 0 or i == len(images):
+            log.info("Intake duplicate check: checked %d/%d incoming image(s).",
+                     i, len(images))
 
-    if duplicates:
-        log.info("Intake duplicate check skipped %d already-sorted image(s): "
-                 "exact=%d, same-pixel=%d, near-visual=%d, errors=%d.",
-                 len(duplicates), counts["exact_file"], counts["same_pixels"],
-                 counts["near_visual"], counts["errors"])
+    save_fingerprint_cache(fp_cache)
+    log.info("Intake duplicate fingerprint cache: hits=%d, misses=%d, "
+             "decode_errors=%d, errors=%d.",
+             stats["cache_hits"], stats["cache_misses"],
+             stats["decode_errors"], stats["errors"])
+
+    if safe_duplicates or near_visual_review:
+        log.info("Intake duplicate check found %d safe duplicate(s) and %d "
+                 "near-visual review candidate(s): exact=%d, same-pixel=%d, "
+                 "near-visual=%d, errors=%d.",
+                 len(safe_duplicates), len(near_visual_review),
+                 counts["exact_file"], counts["same_pixels"], counts["near_visual"],
+                 counts["errors"])
     else:
         log.info("Intake duplicate check: no incoming images already exist in person folders.")
-    return kept, duplicates
+    return kept, safe_duplicates, near_visual_review
 
 
 def organize_originals(records: list[FaceRecord],
@@ -2779,8 +2902,10 @@ def main() -> int:
              len(images) - len(new_images), len(cached_records), len(new_images))
 
     intake_duplicates: list[Path] = []
+    intake_near_visual: list[Path] = []
     if new_images:
-        new_images, intake_duplicates = filter_existing_person_duplicates(new_images, output_dir)
+        new_images, intake_duplicates, intake_near_visual = filter_existing_person_duplicates(
+            new_images, output_dir)
         if intake_duplicates and ARCHIVE_SCANNED_SOURCES:
             moved = archive_intake_duplicates(intake_duplicates, input_dir, output_dir)
             log.info("Archived %d intake duplicate source image(s) to %s",
@@ -2790,7 +2915,13 @@ def main() -> int:
             log.info("Detected %d intake duplicate image(s); leaving sources in place "
                      "because --archive-scanned-sources is not enabled.",
                      len(intake_duplicates))
-        if intake_duplicates:
+        if intake_near_visual:
+            moved = archive_intake_near_visual_review(
+                intake_near_visual, input_dir, output_dir)
+            log.info("Moved %d near-visual intake candidate(s) to review: %s",
+                     moved,
+                     output_dir / "_source_review" / INTAKE_NEAR_VISUAL_REVIEW_DIR_NAME)
+        if intake_duplicates or intake_near_visual:
             log.info("New / changed images after intake duplicate check: %d.",
                      len(new_images))
 

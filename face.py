@@ -13,6 +13,7 @@ Run:
     python face.py refs        # rebuild optional Face References DB
     python face.py nudity      # scan sorted people folders for nudity
     python face.py rename      # name/number files inside person folders
+    python face.py backup-review # back up _source_review to external drive
     python face.py health      # validate cache and duplicate status
 """
 
@@ -106,6 +107,13 @@ ACTIONS = [
         "desc": "Name and number images inside sorted person folders as Person_001, Person_002, etc.",
         "script": "rename_person_folder_files.py",
         "args": ["--apply", "--quiet"],
+    },
+    {
+        "key": "backup-review",
+        "aliases": ["backup", "backup-source-review"],
+        "label": "Backup Source Review",
+        "desc": "Sync _source_review to /Volumes/Photos & Videos  Backup and verify counts",
+        "script": "backup_source_review.py",
     },
     {
         "key": "rebuild-id",
