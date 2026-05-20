@@ -36,6 +36,7 @@ import argparse
 import base64
 import csv
 import gc
+import hashlib
 import json
 import logging
 import os
@@ -100,6 +101,7 @@ REVIEW_CLOSE_PAIRS_DIST   = 0.46   # lowered from 0.50 — fewer review prompts.
 SHARPNESS_BLUR_THRESHOLD = 0.0
 
 PHASH_THRESHOLD = 8
+INTAKE_DUP_PHASH_THRESHOLD = 5
 DUPLICATES_DIR  = "_duplicates"
 BLURRED_DIR     = "_blurred"
 
@@ -139,6 +141,7 @@ ARCHIVE_SCANNED_SOURCES = False
 UNATTENDED_FINISH_KNOWN = False
 SOURCE_ARCHIVE_DIR_NAME = "organized_sources"
 SCANNED_SOURCE_ARCHIVE_DIR_NAME = "ready_to_delete/scanned_sources"
+INTAKE_DUPLICATE_ARCHIVE_DIR_NAME = "ready_to_delete/intake_duplicates"
 
 GOOGLE_LENS_URL = "https://lens.google.com/"
 LENS_SEARCH_CROP_SIZE = 512
@@ -355,8 +358,34 @@ def perceptual_hash(bgr: np.ndarray, hash_size: int = 8) -> np.ndarray:
     return dct_low > median
 
 
+def phash_to_int(bits: np.ndarray) -> int:
+    value = 0
+    for bit in bits.flatten():
+        value = (value << 1) | int(bool(bit))
+    return value
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def decoded_pixel_sha256(img: np.ndarray) -> str:
+    h = hashlib.sha256()
+    h.update(str(img.shape).encode("ascii"))
+    h.update(np.ascontiguousarray(img).tobytes())
+    return h.hexdigest()
+
+
 def hamming(a: np.ndarray, b: np.ndarray) -> int:
     return int(np.count_nonzero(a != b))
+
+
+def hamming_int(a: int, b: int) -> int:
+    return int((a ^ b).bit_count())
 
 
 def sanitize_name(name: str) -> str:
@@ -1966,6 +1995,122 @@ def archive_scanned_sources(sources: Iterable[Path],
     return moved
 
 
+def archive_intake_duplicates(sources: Iterable[Path],
+                              input_dir: Path,
+                              output_dir: Path) -> int:
+    archive_root = output_dir / "_source_review" / INTAKE_DUPLICATE_ARCHIVE_DIR_NAME
+    moved = 0
+    input_dir = input_dir.resolve()
+    output_dir = output_dir.resolve()
+    for src in sorted(set(sources), key=lambda p: str(p).lower()):
+        if not src.exists():
+            continue
+        try:
+            resolved = src.resolve()
+        except OSError:
+            continue
+        try:
+            resolved.relative_to(output_dir)
+            continue
+        except ValueError:
+            pass
+        try:
+            rel = resolved.relative_to(input_dir)
+        except ValueError:
+            rel = Path(resolved.name)
+        dest = unique_path(archive_root / rel)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.move(str(resolved), str(dest))
+            moved += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("Could not archive intake duplicate %s: %s", resolved, e)
+    return moved
+
+
+def image_duplicate_fingerprint(path: Path) -> tuple[str, str, int, float] | None:
+    try:
+        file_hash = sha256_file(path)
+        img = imread_unicode(path)
+        if img is None:
+            return None
+        h, w = img.shape[:2]
+        ratio = w / max(1, h)
+        pixel_hash = decoded_pixel_sha256(img)
+        phash = phash_to_int(perceptual_hash(img))
+        return file_hash, pixel_hash, phash, ratio
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Could not fingerprint %s: %s", path, exc)
+        return None
+
+
+def filter_existing_person_duplicates(images: list[Path],
+                                      output_dir: Path) -> tuple[list[Path], list[Path]]:
+    people_dir = output_dir / "photos_by_person"
+    if not images or not people_dir.exists():
+        return images, []
+
+    person_images = list(iter_images(people_dir, excluded_dir_names=set()))
+    if not person_images:
+        return images, []
+
+    log.info("Intake duplicate check: indexing %d existing person-folder image(s).",
+             len(person_images))
+    exact: dict[str, Path] = {}
+    pixels: dict[str, Path] = {}
+    phashes: list[tuple[int, float, Path]] = []
+    for i, path in enumerate(person_images, start=1):
+        fp = image_duplicate_fingerprint(path)
+        if fp is None:
+            continue
+        file_hash, pixel_hash, phash, ratio = fp
+        exact.setdefault(file_hash, path)
+        pixels.setdefault(pixel_hash, path)
+        phashes.append((phash, ratio, path))
+        if i % 1000 == 0:
+            log.info("Intake duplicate check: indexed %d/%d existing image(s).",
+                     i, len(person_images))
+
+    kept: list[Path] = []
+    duplicates: list[Path] = []
+    counts = {"exact_file": 0, "same_pixels": 0, "near_visual": 0, "errors": 0}
+
+    for path in images:
+        fp = image_duplicate_fingerprint(path)
+        if fp is None:
+            counts["errors"] += 1
+            kept.append(path)
+            continue
+        file_hash, pixel_hash, phash, ratio = fp
+        duplicate_kind: str | None = None
+        if file_hash in exact:
+            duplicate_kind = "exact_file"
+        elif pixel_hash in pixels:
+            duplicate_kind = "same_pixels"
+        else:
+            for existing_phash, existing_ratio, _existing_path in phashes:
+                if abs(ratio - existing_ratio) > 0.08:
+                    continue
+                if hamming_int(phash, existing_phash) <= INTAKE_DUP_PHASH_THRESHOLD:
+                    duplicate_kind = "near_visual"
+                    break
+
+        if duplicate_kind is None:
+            kept.append(path)
+        else:
+            duplicates.append(path)
+            counts[duplicate_kind] += 1
+
+    if duplicates:
+        log.info("Intake duplicate check skipped %d already-sorted image(s): "
+                 "exact=%d, same-pixel=%d, near-visual=%d, errors=%d.",
+                 len(duplicates), counts["exact_file"], counts["same_pixels"],
+                 counts["near_visual"], counts["errors"])
+    else:
+        log.info("Intake duplicate check: no incoming images already exist in person folders.")
+    return kept, duplicates
+
+
 def organize_originals(records: list[FaceRecord],
                        name_map: dict[int, str],
                        originals_dir: Path,
@@ -2632,6 +2777,22 @@ def main() -> int:
 
     log.info("Cache hit: %d images (%d faces). New / changed: %d images.",
              len(images) - len(new_images), len(cached_records), len(new_images))
+
+    intake_duplicates: list[Path] = []
+    if new_images:
+        new_images, intake_duplicates = filter_existing_person_duplicates(new_images, output_dir)
+        if intake_duplicates and ARCHIVE_SCANNED_SOURCES:
+            moved = archive_intake_duplicates(intake_duplicates, input_dir, output_dir)
+            log.info("Archived %d intake duplicate source image(s) to %s",
+                     moved,
+                     output_dir / "_source_review" / INTAKE_DUPLICATE_ARCHIVE_DIR_NAME)
+        elif intake_duplicates:
+            log.info("Detected %d intake duplicate image(s); leaving sources in place "
+                     "because --archive-scanned-sources is not enabled.",
+                     len(intake_duplicates))
+        if intake_duplicates:
+            log.info("New / changed images after intake duplicate check: %d.",
+                     len(new_images))
 
     new_records: list[FaceRecord] = []
     if new_images:
