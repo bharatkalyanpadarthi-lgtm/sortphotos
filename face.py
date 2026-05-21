@@ -148,8 +148,9 @@ ACTIONS = [
         "key": "backup-review",
         "aliases": ["backup", "backup-source-review"],
         "label": "Backup Source Review",
-        "desc": "Sync _source_review to /Volumes/Photos & Videos  Backup and verify counts",
+        "desc": "Mirror _source_review to external drive, verify, then ask before deleting local copy",
         "script": "backup_source_review.py",
+        "args": ["--mirror-destination", "--checksum-verify", "--ask-delete-local"],
     },
     {
         "key": "duplicate-review",

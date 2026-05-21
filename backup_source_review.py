@@ -2,8 +2,9 @@
 """
 Back up sorted_all_pictures/_source_review to the external photo backup drive.
 
-Default behavior copies/syncs and verifies file counts. It does not delete local
-files unless --delete-local is supplied.
+Default behavior copies/syncs and verifies file counts. The guided cleanup mode
+also runs checksum verification and asks you to type "yes" before deleting the
+local _source_review folder.
 """
 
 from __future__ import annotations
@@ -62,14 +63,42 @@ def checksum_verify(source: Path, dest: Path) -> list[str]:
     return lines
 
 
+def is_dangerous_path(source: Path, dest: Path) -> bool:
+    source = source.resolve()
+    dest = dest.resolve()
+    if source == dest:
+        return True
+    try:
+        dest.relative_to(source)
+        return True
+    except ValueError:
+        return False
+
+
+def confirm_delete_local(source: Path, dest: Path) -> bool:
+    print()
+    print("Backup is verified.")
+    print(f"Local folder to delete: {source}")
+    print(f"Verified backup folder: {dest}")
+    print()
+    ans = input("Type yes to delete the local _source_review now: ").strip()
+    return ans == "yes"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--dest-root", type=Path, default=DEFAULT_DEST_ROOT)
+    parser.add_argument("--mirror-destination", action="store_true",
+                        help="Use rsync --delete so destination exactly mirrors local _source_review.")
     parser.add_argument("--checksum-verify", action="store_true",
                         help="Run rsync checksum dry-run after copy. Slower but stronger.")
+    parser.add_argument("--ask-delete-local", action="store_true",
+                        help="After successful verification, ask whether to delete local _source_review.")
     parser.add_argument("--delete-local", action="store_true",
-                        help="Delete local _source_review only after checksum verification passes.")
+                        help="Delete local _source_review after verification. Requires typing yes unless --yes is supplied.")
+    parser.add_argument("--yes", action="store_true",
+                        help="With --delete-local, skip the interactive yes prompt.")
     args = parser.parse_args()
 
     source = args.source.expanduser().resolve()
@@ -82,6 +111,9 @@ def main() -> int:
     if not dest_root.parent.exists():
         print(f"ERROR: external drive path not found: {dest_root.parent}")
         return 1
+    if is_dangerous_path(source, dest):
+        print("ERROR: destination must not be the same as, or inside, the local source folder.")
+        return 1
 
     dest.mkdir(parents=True, exist_ok=True)
 
@@ -93,9 +125,10 @@ def main() -> int:
         "rsync",
         "-ah",
         "--progress",
-        f"{source}/",
-        f"{dest}/",
     ]
+    if args.mirror_destination:
+        cmd.append("--delete")
+    cmd.extend([f"{source}/", f"{dest}/"])
     result = subprocess.run(cmd, check=False)
     if result.returncode != 0:
         print(f"ERROR: rsync failed with exit code {result.returncode}")
@@ -116,9 +149,13 @@ def main() -> int:
     if source_count != dest_count:
         print("ERROR: file counts do not match. Do not delete local source.")
         return 2
+    if source_size != dest_size:
+        print("ERROR: folder sizes do not match. Do not delete local source.")
+        return 2
 
     verify_lines: list[str] = []
-    if args.checksum_verify or args.delete_local:
+    need_checksum = args.checksum_verify or args.ask_delete_local or args.delete_local
+    if need_checksum:
         print()
         print("Running checksum dry-run verification...")
         verify_lines = checksum_verify(source, dest)
@@ -131,12 +168,22 @@ def main() -> int:
             return 3
         print("Checksum verification passed.")
 
-    if args.delete_local:
+    should_delete = False
+    if args.ask_delete_local or args.delete_local:
+        if args.yes and args.delete_local:
+            should_delete = True
+        else:
+            should_delete = confirm_delete_local(source, dest)
+
+    if should_delete:
         print()
         print(f"Deleting local source: {source}")
         shutil.rmtree(source)
         source.mkdir(parents=True, exist_ok=True)
         print("Local _source_review recreated empty for future pipeline runs.")
+    elif args.ask_delete_local or args.delete_local:
+        print()
+        print("Local _source_review was kept.")
 
     print()
     print("Backup complete.")
