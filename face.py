@@ -17,6 +17,7 @@ Run:
     python face.py nudity      # scan sorted people folders for nudity
     python face.py rename      # name/number files inside person folders
     python face.py all-views   # build all/all nude hardlink views in each person folder
+    python face.py structure   # audit/repair canonical person folder structure
     python face.py cleanup-empty # move empty person folders to ready_to_delete
     python face.py smart-albums # create hardlinked smart album views
     python face.py people-cleanup # apply reusable person-folder merge/rename/remove rules
@@ -134,6 +135,13 @@ ACTIONS = [
         "desc": "Create hardlinked all/ and all/nude views inside each person folder",
         "script": "build_all_person_views.py",
         "args": ["--apply", "--quiet"],
+    },
+    {
+        "key": "structure",
+        "aliases": ["structure-audit", "structure-repair", "layout", "organize-structure"],
+        "label": "Person Folder Structure",
+        "desc": "Audit person folders; add --apply to migrate photos/photos_nude/review layout",
+        "script": "person_structure.py",
     },
     {
         "key": "cleanup-empty",

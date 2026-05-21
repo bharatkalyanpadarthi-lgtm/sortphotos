@@ -5,9 +5,9 @@ Move NudeNet-flagged originals into subfolders inside each person folder.
 Reads a nudity review CSV produced by separate_nudity_review.py and moves:
   photos_by_person/<person>/<file>
 to:
-  photos_by_person/<person>/_possible_nudity/<file>
+  photos_by_person/<person>/photos_nude/<file>
 or:
-  photos_by_person/<person>/_uncertain_nudity/<file>
+  photos_by_person/<person>/review/uncertain_nudity/<file>
 
 Default is dry-run. Use --apply to move files.
 """
@@ -45,9 +45,9 @@ def latest_report(review_dir: Path) -> Path | None:
 
 def target_subdir(category: str) -> str | None:
     if category == "possible_nudity":
-        return "_possible_nudity"
+        return "photos_nude"
     if category == "uncertain":
-        return "_uncertain_nudity"
+        return "review/uncertain_nudity"
     return None
 
 
@@ -101,7 +101,10 @@ def main() -> int:
             if len(parts) < 2:
                 skipped += 1
                 continue
-            if parts[1] in {"_possible_nudity", "_uncertain_nudity"}:
+            if parts[1] in {"photos_nude", "_possible_nudity", "_uncertain_nudity"}:
+                skipped += 1
+                continue
+            if len(parts) >= 3 and parts[1] == "review" and parts[2] == "uncertain_nudity":
                 skipped += 1
                 continue
             person_dir = people_root / parts[0]

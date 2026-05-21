@@ -117,7 +117,7 @@ def category_label(rel: Path) -> str:
     if not rel.parts:
         return "photo"
     first = rel.parts[0]
-    if first == "_possible_nudity":
+    if first in {"photos_nude", "_possible_nudity"}:
         return "nudity_possible"
     if first == "_uncertain_nudity":
         return "nudity_uncertain"
@@ -125,6 +125,16 @@ def category_label(rel: Path) -> str:
         return "near_visual_review"
     if first == "_duplicates":
         return "duplicate_review"
+    if first == "review" and len(rel.parts) > 1:
+        if rel.parts[1] == "duplicates":
+            return "duplicate_review"
+        if rel.parts[1] == "near_visual":
+            return "near_visual_review"
+        if rel.parts[1] == "uncertain_nudity":
+            return "nudity_uncertain"
+        return "review"
+    if first == "photos":
+        return "photo"
     if first.startswith("_"):
         return "review"
     return "photo"

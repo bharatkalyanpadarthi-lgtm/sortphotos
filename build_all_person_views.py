@@ -34,8 +34,9 @@ VIEW_DIR = "all"
 NUDE_DIR = "nude"
 BEST_DIR = "best"
 QUALITY_DIR = "by_quality"
-SKIP_DIRS = {VIEW_DIR, "_smart_albums", "_duplicates", "_near_visual_review"}
-NUDE_SOURCE_DIRS = {"_possible_nudity", "_uncertain_nudity"}
+SKIP_DIRS = {VIEW_DIR, "_smart_albums", "_duplicates", "_near_visual_review", "review"}
+NUDE_SOURCE_DIRS = {"photos_nude", "_possible_nudity", "_uncertain_nudity"}
+NUDE_REVIEW_PARTS = {("review", "uncertain_nudity")}
 QUALITY_ORDER = {"q_high": 0, "q_good": 1, "q_review": 2, "q_unknown": 3}
 
 
@@ -127,7 +128,11 @@ def category_rank(path: Path, person_dir: Path) -> tuple[int, str]:
 
 def is_nude_source(path: Path, person_dir: Path) -> bool:
     rel = path.relative_to(person_dir)
-    return bool(rel.parts and rel.parts[0] in NUDE_SOURCE_DIRS)
+    if not rel.parts:
+        return False
+    if rel.parts[0] in NUDE_SOURCE_DIRS:
+        return True
+    return tuple(rel.parts[:2]) in NUDE_REVIEW_PARTS
 
 
 def hardlink_or_symlink(src: Path, dest: Path, apply: bool) -> bool:
@@ -226,15 +231,17 @@ def build_for_person(person_dir: Path, apply: bool, best_count: int) -> ViewStat
             digest = sha256_file(src)
         except OSError:
             continue
+        nude = is_nude_source(src, person_dir)
         if digest in seen_all:
             stats.duplicates_skipped += 1
         else:
             seen_all.add(digest)
             unique_sources.append((src, digest))
-            dest = unique_dest(view_dir / src.name)
-            if hardlink_or_symlink(src, dest, apply):
-                stats.all_links += 1
-        if is_nude_source(src, person_dir):
+            if not nude:
+                dest = unique_dest(view_dir / src.name)
+                if hardlink_or_symlink(src, dest, apply):
+                    stats.all_links += 1
+        if nude:
             if digest in seen_nude:
                 continue
             seen_nude.add(digest)
@@ -242,7 +249,12 @@ def build_for_person(person_dir: Path, apply: bool, best_count: int) -> ViewStat
             if hardlink_or_symlink(src, dest, apply):
                 stats.nude_links += 1
 
-    for src, digest in sorted(unique_sources, key=lambda item: best_rank(item[0], person_dir))[:best_count]:
+    safe_sources = [
+        (src, digest) for src, digest in unique_sources
+        if not is_nude_source(src, person_dir)
+    ]
+
+    for src, digest in sorted(safe_sources, key=lambda item: best_rank(item[0], person_dir))[:best_count]:
         if digest in seen_best:
             continue
         seen_best.add(digest)
@@ -250,7 +262,7 @@ def build_for_person(person_dir: Path, apply: bool, best_count: int) -> ViewStat
         if hardlink_or_symlink(src, dest, apply):
             stats.best_links += 1
 
-    for src, digest in unique_sources:
+    for src, digest in safe_sources:
         label = quality_dir_name(quality_label(src))
         key = (label, digest)
         if key in seen_quality:

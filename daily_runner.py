@@ -38,7 +38,7 @@ VIDEO_EXTS = {
     ".3g2", ".3gp", ".avi", ".m4v", ".mkv", ".mov", ".mp4",
     ".mpeg", ".mpg", ".mts", ".m2ts", ".webm", ".wmv",
 }
-SMART_DIRS = {"all", "_smart_albums", "_duplicates", "_near_visual_review"}
+SMART_DIRS = {"all", "_smart_albums", "_duplicates", "_near_visual_review", "review"}
 
 
 def run_id() -> str:
@@ -239,7 +239,7 @@ def memory_profile() -> dict:
 
 def destructive_step_names() -> set[str]:
     return {
-        "process", "nudity-scan", "nudity-place", "rename",
+        "process", "nudity-scan", "nudity-place", "structure", "rename",
         "exact-dedupe", "advanced-dedupe", "cleanup-empty", "all-views", "smart-albums",
     }
 
@@ -310,6 +310,8 @@ def step_list(batch_size: int) -> list[dict]:
          "cmd": [py, str(SCRIPT_DIR / "separate_nudity_review.py"), "--apply", "--quiet"], "heavy": True},
         {"name": "nudity-place", "desc": "Move nudity into person folders",
          "cmd": [py, str(SCRIPT_DIR / "place_nudity_inside_person_folders.py"), "--apply", "--remove-review-copies", "--quiet"]},
+        {"name": "structure", "desc": "Normalize person folder structure",
+         "cmd": [py, str(SCRIPT_DIR / "person_structure.py"), "--apply", "--quiet"]},
         {"name": "rename", "desc": "Normalize person filenames",
          "cmd": [py, str(SCRIPT_DIR / "rename_person_folder_files.py"), "--apply", "--quiet"]},
         {"name": "exact-dedupe", "desc": "Move exact person-folder duplicates",

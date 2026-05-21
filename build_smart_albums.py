@@ -55,13 +55,17 @@ EXCLUDED_DIRS = {
     "all",
     SMART_DIR,
     "_duplicates",
+    "_near_visual_review",
     "_blurred",
+    "review",
 }
 NUDITY_DIRS = {
+    "photos_nude": "nudity_possible",
     "_possible_nudity": "nudity_possible",
     "_uncertain_nudity": "nudity_uncertain",
 }
 NUDITY_NESTED_DIRS = {
+    "photos_nude": "_nudity_possible",
     "_possible_nudity": "_nudity_possible",
     "_uncertain_nudity": "_nudity_uncertain",
 }
@@ -215,7 +219,7 @@ def save_smart_state(path: Path, data: dict) -> None:
 def path_nudity_status(rel: Path) -> str:
     if not rel.parts:
         return ""
-    if rel.parts[0] == "_possible_nudity":
+    if rel.parts[0] in {"photos_nude", "_possible_nudity"}:
         return "possible"
     if rel.parts[0] == "_uncertain_nudity":
         return "uncertain"
@@ -788,6 +792,8 @@ def nudity_nested_dir(info: ImageInfo) -> str | None:
 
 def visible_rel_name(rel: Path) -> Path:
     if rel.parts and rel.parts[0] in NUDITY_NESTED_DIRS and len(rel.parts) > 1:
+        return Path(*rel.parts[1:])
+    if rel.parts and rel.parts[0] == "photos" and len(rel.parts) > 1:
         return Path(*rel.parts[1:])
     return rel
 
@@ -1545,9 +1551,6 @@ def build_for_person(person_dir: Path,
     if apply:
         clear_smart_albums(person_dir)
     album_root = person_dir / SMART_DIR
-    if apply:
-        for folder in AI_VIDEO_REFERENCE_FOLDERS:
-            (album_root / folder).mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, str]] = []
 
     best = sorted(infos, key=lambda i: (-i.quality, -i.width * i.height, str(i.rel).lower()))
@@ -1739,8 +1742,9 @@ def main() -> int:
         build_dirs = []
         people_state = smart_state.setdefault("people", {})
         current_keys = {str(person_dir.resolve()) for person_dir in dirs}
-        for stale_key in [key for key in people_state if key not in current_keys]:
-            del people_state[stale_key]
+        if args.person is None:
+            for stale_key in [key for key in people_state if key not in current_keys]:
+                del people_state[stale_key]
         for person_dir in dirs:
             key = str(person_dir.resolve())
             sig = person_content_signature(person_dir)

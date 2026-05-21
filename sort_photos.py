@@ -114,8 +114,12 @@ SHARPNESS_BLUR_THRESHOLD = 0.0
 
 PHASH_THRESHOLD = 8
 INTAKE_DUP_PHASH_THRESHOLD = 5
-DUPLICATES_DIR  = "_duplicates"
+DUPLICATES_DIR  = "review/duplicates"
+LEGACY_DUPLICATES_DIR = "_duplicates"
 BLURRED_DIR     = "_blurred"
+PERSON_PHOTOS_DIR = "photos"
+PERSON_NUDE_DIR = "photos_nude"
+PERSON_REVIEW_DIR = "review"
 
 INTERACTIVE_LABELING = True
 DEDUP_DUPLICATES     = True
@@ -130,8 +134,8 @@ INCLUDE_UNKNOWN = True
 
 NUDITY_THRESHOLD = 0.35
 NUDITY_UNCERTAIN_THRESHOLD = 0.20
-NUDITY_POSSIBLE_DIR = "_possible_nudity"
-NUDITY_UNCERTAIN_DIR = "_uncertain_nudity"
+NUDITY_POSSIBLE_DIR = PERSON_NUDE_DIR
+NUDITY_UNCERTAIN_DIR = f"{PERSON_REVIEW_DIR}/uncertain_nudity"
 NUDITY_EXPLICIT_CLASSES = {
     "FEMALE_BREAST_EXPOSED",
     "FEMALE_GENITALIA_EXPOSED",
@@ -155,7 +159,7 @@ ASSUME_MERGE_EXISTING_OUTPUT = False
 SOURCE_ARCHIVE_DIR_NAME = "organized_sources"
 SCANNED_SOURCE_ARCHIVE_DIR_NAME = "ready_to_delete/scanned_sources"
 INTAKE_DUPLICATE_ARCHIVE_DIR_NAME = "ready_to_delete/intake_duplicates"
-INTAKE_NEAR_VISUAL_REVIEW_DIR_NAME = "_near_visual_review"
+INTAKE_NEAR_VISUAL_REVIEW_DIR_NAME = f"{PERSON_REVIEW_DIR}/near_visual"
 
 GOOGLE_LENS_URL = "https://lens.google.com/"
 LENS_SEARCH_CROP_SIZE = 512
@@ -208,6 +212,7 @@ ALWAYS_EXCLUDED_SCAN_DIRS = {
     "_duplicates",
     "_near_visual_review",
     "_smart_albums",
+    "review",
     "videos",
 }
 
@@ -593,7 +598,16 @@ def maybe_move_to_nudity_subfolder(path: Path, person_dir: Path) -> tuple[Path, 
     detector = _get_nudity_detector()
     if detector is None or not path.exists():
         return path, None
-    if NUDITY_POSSIBLE_DIR in path.parts or NUDITY_UNCERTAIN_DIR in path.parts:
+    try:
+        rel_parts = path.relative_to(person_dir).parts
+    except ValueError:
+        rel_parts = path.parts
+    if (
+        PERSON_NUDE_DIR in rel_parts
+        or (len(rel_parts) >= 2 and rel_parts[0] == PERSON_REVIEW_DIR and rel_parts[1] == "uncertain_nudity")
+        or "_possible_nudity" in rel_parts
+        or "_uncertain_nudity" in rel_parts
+    ):
         return path, None
     try:
         detections = detector.detect(str(path))
@@ -758,7 +772,7 @@ def build_identity_db_from_person_folders(people_dir: Path,
         embs: list[np.ndarray] = []
         images = [
             p for p in iter_images(person_dir, excluded_dir_names=set())
-            if not any(part in {DUPLICATES_DIR, BLURRED_DIR} for part in p.relative_to(person_dir).parts[:-1])
+            if not any(part in {LEGACY_DUPLICATES_DIR, BLURRED_DIR, PERSON_REVIEW_DIR, "all", "_smart_albums"} for part in p.relative_to(person_dir).parts[:-1])
         ]
         images = sorted(images, key=lambda p: (len(p.relative_to(person_dir).parts), str(p).lower()))
         if IDENTITY_MAX_IMAGES_PER_PERSON > 0:
@@ -2407,9 +2421,9 @@ def organize_originals(records: list[FaceRecord],
         for (person, kind), items in tqdm(sorted(buckets.items()),
                                            desc="Copying originals", unit="bucket"):
             if kind == "sharp":
-                base_dir = originals_dir / person
+                base_dir = originals_dir / person / PERSON_PHOTOS_DIR
             else:
-                base_dir = originals_dir / person / BLURRED_DIR
+                base_dir = originals_dir / person / PERSON_PHOTOS_DIR / BLURRED_DIR
             person_dir = originals_dir / person
             base_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2450,7 +2464,7 @@ def organize_originals(records: list[FaceRecord],
                     pending_writes = 0
 
             if dup_map:
-                dup_dir = base_dir / DUPLICATES_DIR
+                dup_dir = person_dir / DUPLICATES_DIR
                 dup_dir.mkdir(parents=True, exist_ok=True)
                 for src in dup_map:
                     key = f"{person}||{src}||{kind}||dup"

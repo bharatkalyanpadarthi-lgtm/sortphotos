@@ -35,7 +35,13 @@ VIDEO_EXTS = {
     ".3g2", ".3gp", ".avi", ".m4v", ".mkv", ".mov", ".mp4",
     ".mpeg", ".mpg", ".mts", ".m2ts", ".webm", ".wmv",
 }
-EXCLUDED_DIRS = {"all", "_duplicates", "_near_visual_review", "_smart_albums"}
+EXCLUDED_DIRS = {
+    "all",
+    "_duplicates",
+    "_near_visual_review",
+    "_smart_albums",
+    "review",
+}
 
 
 def count_images(root: Path) -> int:
