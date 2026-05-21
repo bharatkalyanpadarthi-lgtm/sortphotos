@@ -38,6 +38,7 @@ from sklearn.cluster import DBSCAN
 
 DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
 DEFAULT_NUDITY_CACHE = Path.home() / ".face_sort_cache" / "smart_album_nudity_cache.json"
+DEFAULT_NUDITY_OVERRIDES = Path.home() / ".face_sort_cache" / "smart_album_nudity_overrides.json"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
 SMART_DIR = "_smart_albums"
 EXCLUDED_DIRS = {
@@ -98,6 +99,24 @@ def load_nudity_cache(path: Path) -> dict:
     except Exception:
         pass
     return {"version": 1, "items": {}}
+
+
+def load_nudity_overrides(path: Path) -> dict[str, str]:
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("version") != 1:
+            return {}
+        items = data.get("items", {})
+        if not isinstance(items, dict):
+            return {}
+        return {
+            str(Path(k).expanduser().resolve()): str(v)
+            for k, v in items.items()
+            if str(v) in {"safe", "possible", "uncertain"}
+        }
+    except Exception:
+        return {}
 
 
 def save_nudity_cache(path: Path, data: dict) -> None:
@@ -309,6 +328,7 @@ def load_infos(person_dir: Path) -> list[ImageInfo]:
 def annotate_nudity(infos: list[ImageInfo],
                     detector,
                     cache: dict,
+                    overrides: dict[str, str],
                     batch_size: int) -> int:
     if detector is None:
         return 0
@@ -317,6 +337,17 @@ def annotate_nudity(infos: list[ImageInfo],
     changed = 0
 
     for info in infos:
+        override = overrides.get(str(info.path.resolve()))
+        if override == "safe":
+            info.nudity_status = ""
+            info.nudity_class = "manual_safe"
+            info.nudity_score = 0.0
+            continue
+        if override in {"possible", "uncertain"}:
+            info.nudity_status = override
+            info.nudity_class = "manual_override"
+            info.nudity_score = 1.0
+            continue
         if info.nudity_status:
             continue
         key = str(info.path)
@@ -639,10 +670,17 @@ def build_for_person(person_dir: Path,
                      max_scene_group: int,
                      detector,
                      nudity_cache: dict,
+                     nudity_overrides: dict[str, str],
                      nudity_batch_size: int,
                      quiet: bool) -> dict[str, int]:
     infos = load_infos(person_dir)
-    nudity_scanned = annotate_nudity(infos, detector, nudity_cache, nudity_batch_size)
+    nudity_scanned = annotate_nudity(
+        infos,
+        detector,
+        nudity_cache,
+        nudity_overrides,
+        nudity_batch_size,
+    )
     stats = {
         "images": len(infos),
         "links": 0,
@@ -778,6 +816,8 @@ def main() -> int:
                         help="Batch size for cached NudeNet smart-album classification. Default 8.")
     parser.add_argument("--nudity-cache", type=Path, default=DEFAULT_NUDITY_CACHE,
                         help=f"Nudity classification cache. Default: {DEFAULT_NUDITY_CACHE}")
+    parser.add_argument("--nudity-overrides", type=Path, default=DEFAULT_NUDITY_OVERRIDES,
+                        help=f"Manual nudity overrides JSON. Default: {DEFAULT_NUDITY_OVERRIDES}")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -803,6 +843,7 @@ def main() -> int:
     }
     detector = None
     nudity_cache = {"version": 1, "items": {}}
+    nudity_overrides = load_nudity_overrides(args.nudity_overrides.expanduser())
     if not args.no_detect_nudity:
         detector = load_nudity_detector()
         if detector is None:
@@ -820,6 +861,7 @@ def main() -> int:
             max_scene_group=max(3, int(args.max_scene_group)),
             detector=detector,
             nudity_cache=nudity_cache,
+            nudity_overrides=nudity_overrides,
             nudity_batch_size=max(1, int(args.nudity_batch_size)),
             quiet=args.quiet,
         )
