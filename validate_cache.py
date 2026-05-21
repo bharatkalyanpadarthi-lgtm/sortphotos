@@ -187,6 +187,16 @@ def check_signatures_vs_faces(cache: CacheState, report: Report) -> None:
     sig_paths = set(cache.file_signatures.keys())
     face_paths = {f.src_str for f in cache.faces if f.src_str}
 
+    if not sig_paths and not face_paths:
+        report.add(
+            "WARNING",
+            "empty_face_cache",
+            detail=(
+                "cache is loadable but contains no processed files or faces; "
+                "old sources will be re-detected if introduced again"
+            ),
+        )
+
     only_in_sigs = sig_paths - face_paths
     only_in_faces = face_paths - sig_paths
 

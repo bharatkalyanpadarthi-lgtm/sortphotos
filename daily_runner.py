@@ -244,6 +244,11 @@ def destructive_step_names() -> set[str]:
     }
 
 
+def empty_inbox_skippable_step_names() -> set[str]:
+    """Steps that have nothing useful to do when the intake folder is empty."""
+    return {"process"}
+
+
 def cleanup_holding_count() -> int:
     return count_files(SOURCE_REVIEW)
 
@@ -393,7 +398,7 @@ def print_dry_run(steps: list[dict], before: dict, profile: dict,
     print(f"Pre-cleanup backup prompt:  {'yes' if backup_prompt else 'no'}")
     print()
     print("Steps that would run")
-    skip_when_empty = destructive_step_names()
+    skip_when_empty = empty_inbox_skippable_step_names()
     for index, step in enumerate(steps, start=1):
         would_skip = empty_inbox and not full_maintenance and step["name"] in skip_when_empty
         status = "skip: empty inbox" if would_skip else "run"
@@ -470,7 +475,7 @@ def main() -> int:
         int(before.get("to_process_images", 0)) == 0
         and int(before.get("to_process_videos", 0)) == 0
     )
-    skip_when_empty = destructive_step_names()
+    skip_when_empty = empty_inbox_skippable_step_names()
     will_run_destructive = any(
         not (empty_inbox and not args.full_maintenance and step["name"] in skip_when_empty)
         and step["name"] in destructive_step_names()

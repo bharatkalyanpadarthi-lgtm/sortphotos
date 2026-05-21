@@ -119,6 +119,18 @@ def reference_count() -> int:
         return 0
 
 
+def face_cache_summary() -> dict[str, int]:
+    try:
+        cache = sort_photos.load_cache()
+    except Exception:
+        return {"files": 0, "faces": 0, "labeled": 0}
+    return {
+        "files": len(getattr(cache, "file_signatures", {})),
+        "faces": len(getattr(cache, "faces", [])),
+        "labeled": sum(1 for face in getattr(cache, "faces", []) if getattr(face, "label", None)),
+    }
+
+
 def labeling_summary() -> dict[str, int]:
     state = sort_photos.load_labeling_state()
     if state is None:
@@ -218,6 +230,7 @@ def main() -> int:
     labels = labeling_summary()
     adv = advanced_report_summary()
     align = identity_alignment()
+    face_cache = face_cache_summary()
 
     print("Photo Pipeline Status")
     print("=" * 60)
@@ -228,6 +241,11 @@ def main() -> int:
     print(f"Known identities DB:    {identity_count()} people")
     print(f"Identity drift:         {align['stale']} stale / {align['missing']} missing")
     print(f"Reference identities:   {reference_count()} people")
+    print(
+        "Face cache:             "
+        f"{face_cache['files']} files / {face_cache['faces']} faces / "
+        f"{face_cache['labeled']} labeled"
+    )
     print(f"To Process images:      {count_images(TO_PROCESS)} ({human_size(size_bytes(TO_PROCESS))})")
     print(f"To Process videos:      {count_videos(TO_PROCESS)}")
     print()

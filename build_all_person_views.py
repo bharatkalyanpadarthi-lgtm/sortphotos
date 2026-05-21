@@ -34,7 +34,7 @@ VIEW_DIR = "all"
 NUDE_DIR = "nude"
 BEST_DIR = "best"
 QUALITY_DIR = "by_quality"
-SKIP_DIRS = {VIEW_DIR, "_smart_albums"}
+SKIP_DIRS = {VIEW_DIR, "_smart_albums", "_duplicates", "_near_visual_review"}
 NUDE_SOURCE_DIRS = {"_possible_nudity", "_uncertain_nudity"}
 QUALITY_ORDER = {"q_high": 0, "q_good": 1, "q_review": 2, "q_unknown": 3}
 

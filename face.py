@@ -8,7 +8,7 @@ Run:
     python face.py             # show compact menu
     python face.py daily       # full daily end-to-end workflow
     python face.py dry-run     # preview daily workflow without moving files
-    python face.py process     # recommended inbox-only unattended workflow
+    python face.py process     # alias for daily; kept for muscle memory
     python face.py review      # optional: label only larger unknown clusters
     python face.py finish      # finalize labels you already entered
     python face.py status      # quick dashboard
@@ -57,18 +57,8 @@ ACTIONS = [
         "key": "process",
         "aliases": ["process-new", "process-move", "sort"],
         "label": "Process New Photos",
-        "desc": "Fast daily run: scan ~/Pictures/To Process, organize known people, run nudity placement, then empty scanned inbox files",
-        "script": "sort_photos.py",
-        "args": [
-            str(Path.home() / "Pictures" / "To Process"),
-            str(Path.home() / "Pictures" / "sorted_all_pictures"),
-            "--unattended",
-            "--archive-organized-sources",
-            "--archive-sources-to-ready-delete",
-            "--archive-scanned-sources",
-            "--batch-size", "50",
-            "--detect-workers", "1",
-        ],
+        "desc": "Alias for Daily End-to-End Run so new-photo processing always uses the safe full workflow",
+        "script": "daily_runner.py",
     },
     {
         "key": "process-all",
