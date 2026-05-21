@@ -48,7 +48,7 @@ DEFAULT_NUDITY_OVERRIDES = Path.home() / ".face_sort_cache" / "smart_album_nudit
 DEFAULT_FRAMING_CACHE = Path.home() / ".face_sort_cache" / "smart_album_framing_cache.json"
 DEFAULT_SMART_STATE = Path.home() / ".face_sort_cache" / "smart_album_person_state.json"
 FRAMING_CACHE_VERSION = 2
-SMART_ALBUM_LOGIC_VERSION = 7
+SMART_ALBUM_LOGIC_VERSION = 8
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
 SMART_DIR = "_smart_albums"
 EXCLUDED_DIRS = {
@@ -105,6 +105,10 @@ class ImageInfo:
     scene: np.ndarray
     context_hue: float
     context_sat: float
+    clothing_hue: float
+    clothing_sat: float
+    clothing_value: float
+    clothing_skin_ratio: float
     sharpness: float
     brightness: float
     contrast: float
@@ -223,6 +227,8 @@ def path_nudity_status(rel: Path) -> str:
         return "possible"
     if rel.parts[0] == "_uncertain_nudity":
         return "uncertain"
+    if len(rel.parts) >= 2 and rel.parts[0] == "review" and rel.parts[1] == "uncertain_nudity":
+        return "uncertain"
     return ""
 
 
@@ -323,6 +329,33 @@ def center_color_context(img: np.ndarray) -> np.ndarray:
     y1, y2 = int(h * 0.18), int(h * 0.88)
     mask[y1:y2, x1:x2] = 255
     return _masked_hsv_hist(img, mask)
+
+
+def clothing_context_hsv(img: np.ndarray) -> tuple[float, float, float, float]:
+    """Approximate outfit color from the lower/central body region.
+
+    This is intentionally heuristic. It gives useful "likely outfit" folders
+    without adding a large vision-language model dependency.
+    """
+    h, w = img.shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+    x1, x2 = int(w * 0.18), int(w * 0.82)
+    y1, y2 = int(h * 0.34), int(h * 0.94)
+    mask[y1:y2, x1:x2] = 255
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    selected = hsv[mask > 0]
+    if selected.size == 0:
+        return 0.0, 0.0, 0.0, 0.0
+    hue = float(np.median(selected[:, 0]))
+    sat = float(np.median(selected[:, 1]))
+    val = float(np.median(selected[:, 2]))
+    skin_like = (
+        (selected[:, 0] >= 0) & (selected[:, 0] <= 28)
+        & (selected[:, 1] >= 35) & (selected[:, 1] <= 180)
+        & (selected[:, 2] >= 55)
+    )
+    skin_ratio = float(np.mean(skin_like)) if selected.size else 0.0
+    return hue, sat, val, skin_ratio
 
 
 def layout_context(img: np.ndarray) -> np.ndarray:
@@ -595,6 +628,7 @@ def load_infos(person_dir: Path) -> list[ImageInfo]:
         center_color = center_color_context(img)
         layout = layout_context(img)
         hue, sat = context_hsv(img)
+        clothing_hue, clothing_sat, clothing_value, clothing_skin_ratio = clothing_context_hsv(img)
         infos.append(ImageInfo(
             path=path,
             rel=path.relative_to(person_dir),
@@ -606,6 +640,10 @@ def load_infos(person_dir: Path) -> list[ImageInfo]:
             scene=scene_context(border_color, center_color, layout, largest_face_ratio, 0.5, 0.5, w, h),
             context_hue=hue,
             context_sat=sat,
+            clothing_hue=clothing_hue,
+            clothing_sat=clothing_sat,
+            clothing_value=clothing_value,
+            clothing_skin_ratio=clothing_skin_ratio,
             sharpness=sharp,
             brightness=brightness,
             contrast=contrast,
@@ -1154,6 +1192,87 @@ def quality_album_names(info: ImageInfo) -> list[str]:
     return names
 
 
+def color_bucket_from_hsv(hue: float, sat: float, value: float) -> str:
+    if value < 55:
+        return "black_or_very_dark"
+    if sat < 28 and value > 188:
+        return "white_or_light"
+    if sat < 36:
+        return "neutral_gray_beige"
+    if hue < 10 or hue >= 168:
+        return "red"
+    if hue < 24:
+        return "orange"
+    if hue < 38:
+        return "yellow_gold"
+    if hue < 80:
+        return "green"
+    if hue < 112:
+        return "blue"
+    if hue < 145:
+        return "purple"
+    return "pink_magenta"
+
+
+def outfit_visibility(info: ImageInfo) -> str:
+    framing = shot_framing(info)
+    if framing in {"full_body", "waist_up"}:
+        return "outfit_visible"
+    if framing == "chest_up":
+        return "partial_outfit_visible"
+    return "outfit_unclear_closeup"
+
+
+def likely_saree_or_draped_ethnic(info: ImageInfo) -> bool:
+    """Broad saree/draped-ethnic hint using only local pixel/face features."""
+    framing = shot_framing(info)
+    if framing not in {"full_body", "waist_up", "chest_up"}:
+        return False
+    if info.face_count > 3:
+        return False
+    colorful_fabric = info.clothing_sat >= 58 and info.clothing_value >= 62
+    warm_or_rich_color = (
+        info.clothing_hue < 38
+        or 70 <= info.clothing_hue < 112
+        or info.clothing_hue >= 145
+    )
+    body_visible = info.largest_face_ratio <= 0.10 or info.face_height_ratio <= 0.36
+    # Saree photos often show a large draped garment region plus some skin/arm
+    # area. Keep this broad and put it under "likely" rather than exact.
+    return colorful_fabric and warm_or_rich_color and body_visible and info.clothing_skin_ratio >= 0.035
+
+
+def likely_western_or_modern(info: ImageInfo) -> bool:
+    if outfit_visibility(info) == "outfit_unclear_closeup":
+        return False
+    if likely_saree_or_draped_ethnic(info):
+        return False
+    return info.clothing_sat < 58 or info.clothing_skin_ratio < 0.035
+
+
+def outfit_album_names(info: ImageInfo) -> list[str]:
+    names: list[str] = []
+    visibility = outfit_visibility(info)
+    color = color_bucket_from_hsv(info.clothing_hue, info.clothing_sat, info.clothing_value)
+
+    names.append(f"08_outfit/00_visibility/{visibility}")
+    names.append(f"08_outfit/10_by_outfit_color/{color}")
+
+    if likely_saree_or_draped_ethnic(info):
+        names.append("08_outfit/01_likely_saree_or_draped_ethnic")
+    elif likely_western_or_modern(info):
+        names.append("08_outfit/03_likely_western_or_modern")
+    else:
+        names.append("08_outfit/90_outfit_uncertain")
+
+    if info.clothing_sat >= 78 and info.clothing_value >= 70:
+        names.append("08_outfit/11_colorful_outfits")
+    elif info.clothing_sat <= 36:
+        names.append("08_outfit/12_neutral_or_plain_outfits")
+
+    return sorted(set(names))
+
+
 def estimated_eye_line_y(info: ImageInfo) -> float:
     return float(info.face_center_y - (info.face_height_ratio * 0.16))
 
@@ -1344,16 +1463,16 @@ def face_framing_album_names(info: ImageInfo) -> list[str]:
         aspect >= 2.8
         and (info.face_count == 0 or info.face_count >= 3 or info.largest_face_ratio < 0.025)
     ):
-        return ["03_face_framing/90_review/contact_sheet_or_collage"]
+        return ["03_face_framing/90_not_ideal_for_ai_video/contact_sheet_or_collage"]
     if info.face_count == 0:
-        return ["03_face_framing/90_review/face_detection_uncertain"]
+        return ["03_face_framing/90_not_ideal_for_ai_video/face_detection_uncertain"]
 
     names: list[str] = []
     if info.face_count >= 8 and info.largest_face_ratio < 0.025:
-        names.append("03_face_framing/90_review/contact_sheet_or_collage")
+        names.append("03_face_framing/90_not_ideal_for_ai_video/contact_sheet_or_collage")
         return names
     if info.face_count >= 3:
-        names.append("03_face_framing/90_review/multi_face_or_group_photo")
+        names.append("03_face_framing/90_not_ideal_for_ai_video/multi_face_or_group_photo")
 
     ratio = info.largest_face_ratio
     face_height = info.face_height_ratio
@@ -1387,6 +1506,8 @@ def face_framing_album_names(info: ImageInfo) -> list[str]:
 
     if front and ratio >= 0.035:
         names.append("03_face_framing/01_front_facing_straight_on")
+        if centered and eye_level and is_reference_quality(info, min_score=0.52):
+            names.append("03_face_framing/00_clear_straight_face_best")
     if three_quarter and ratio >= 0.025:
         names.append("03_face_framing/02_three_quarter_view")
     if eye_level and ratio >= 0.025:
@@ -1408,15 +1529,15 @@ def face_framing_album_names(info: ImageInfo) -> list[str]:
         names.append("03_face_framing/00_best_ai_video_candidates")
 
     if side_profile:
-        names.append("03_face_framing/90_review/side_profile_or_extreme_angle")
+        names.append("03_face_framing/90_not_ideal_for_ai_video/side_profile_or_extreme_angle")
     if info.face_count <= 2 and ratio >= 0.025 and not centered:
-        names.append("03_face_framing/90_review/off_center_subject")
+        names.append("03_face_framing/90_not_ideal_for_ai_video/off_center_subject")
     if abs(info.face_roll) >= 32.0:
-        names.append("03_face_framing/90_review/strongly_tilted_or_rotated")
+        names.append("03_face_framing/90_not_ideal_for_ai_video/strongly_tilted_or_rotated")
     elif abs(info.face_roll) >= 14.0:
-        names.append("03_face_framing/90_review/tilted_face")
+        names.append("03_face_framing/90_not_ideal_for_ai_video/tilted_face")
     if not names:
-        names.append("03_face_framing/90_review/needs_manual_angle_review")
+        names.append("03_face_framing/90_not_ideal_for_ai_video/needs_manual_angle_review")
     return names
 
 
@@ -1487,6 +1608,12 @@ def manifest_row(info: ImageInfo, album: str, link: Path) -> dict[str, str]:
         "nudity_status": info.nudity_status,
         "nudity_class": info.nudity_class,
         "nudity_score": f"{info.nudity_score:.3f}",
+        "outfit_color": color_bucket_from_hsv(info.clothing_hue, info.clothing_sat, info.clothing_value),
+        "outfit_visibility": outfit_visibility(info),
+        "clothing_hue": f"{info.clothing_hue:.1f}",
+        "clothing_sat": f"{info.clothing_sat:.1f}",
+        "clothing_value": f"{info.clothing_value:.1f}",
+        "clothing_skin_ratio": f"{info.clothing_skin_ratio:.3f}",
     }
 
 
@@ -1526,6 +1653,8 @@ def build_for_person(person_dir: Path,
                      framing_cache_path: Path | None,
                      quiet: bool) -> dict[str, int]:
     infos = load_infos(person_dir)
+    if apply:
+        clear_smart_albums(person_dir)
     framing_scanned = annotate_framing(infos, framing_app, framing_cache, framing_cache_path, quiet)
     nudity_scanned = annotate_nudity(
         infos,
@@ -1545,11 +1674,10 @@ def build_for_person(person_dir: Path,
         "face_uncertain": 0,
         "nudity_scanned": nudity_scanned,
         "nudity_images": sum(1 for i in infos if i.nudity_status),
+        "outfit_links": 0,
     }
     if not infos:
         return stats
-    if apply:
-        clear_smart_albums(person_dir)
     album_root = person_dir / SMART_DIR
     rows: list[dict[str, str]] = []
 
@@ -1589,10 +1717,13 @@ def build_for_person(person_dir: Path,
                 stats["review_links"] += 1
         for album_name in face_framing_album_names(info):
             stats["links"] += link_single(info, album_root, album_name, apply, rows)
-            if album_name == "03_face_framing/90_review/face_detection_uncertain":
+            if album_name == "03_face_framing/90_not_ideal_for_ai_video/face_detection_uncertain":
                 stats["face_uncertain"] += 1
             if album_name.startswith("07_review_needed/"):
                 stats["review_links"] += 1
+        for album_name in outfit_album_names(info):
+            stats["links"] += link_single(info, album_root, album_name, apply, rows)
+            stats["outfit_links"] += 1
 
     visual_groups = group_visual_similar(infos, visual_threshold, min_group)
     for idx, group in confidence_numbered(visual_groups):
@@ -1646,6 +1777,12 @@ def build_for_person(person_dir: Path,
                 "nudity_status",
                 "nudity_class",
                 "nudity_score",
+                "outfit_color",
+                "outfit_visibility",
+                "clothing_hue",
+                "clothing_sat",
+                "clothing_value",
+                "clothing_skin_ratio",
             ])
             writer.writeheader()
             writer.writerows(rows)
@@ -1656,7 +1793,7 @@ def build_for_person(person_dir: Path,
               f"best={stats['best_links']:<3} review={stats['review_links']:<4} "
               f"face_uncertain={stats['face_uncertain']:<4} framing_scan={stats['framing_scanned']:<4} "
               f"nudity={stats['nudity_images']:<4} nudity_scan={stats['nudity_scanned']:<4} "
-              f"links={stats['links']}", flush=True)
+              f"outfit_links={stats['outfit_links']:<4} links={stats['links']}", flush=True)
     return stats
 
 
@@ -1733,6 +1870,7 @@ def main() -> int:
         "face_uncertain": 0,
         "nudity_scanned": 0,
         "nudity_images": 0,
+        "outfit_links": 0,
     }
     smart_state = load_smart_state(args.smart_state.expanduser()) if args.incremental and args.apply else None
     signatures: dict[str, dict[str, int | str]] = {}
@@ -1751,7 +1889,8 @@ def main() -> int:
             signatures[key] = sig
             existing = people_state.get(key, {})
             manifest = person_dir / SMART_DIR / "_smart_album_index.csv"
-            if existing.get("signature") == sig and manifest.exists():
+            source_count = int(sig.get("count", 0) or 0)
+            if existing.get("signature") == sig and (manifest.exists() or source_count == 0):
                 skipped_count += 1
             else:
                 build_dirs.append(person_dir)
@@ -1841,6 +1980,7 @@ def main() -> int:
     print(f"Framing newly scanned: {total['framing_scanned']}")
     print(f"Nudity images:       {total['nudity_images']}")
     print(f"Nudity newly scanned:{total['nudity_scanned']}")
+    print(f"Outfit album links:  {total['outfit_links']}")
     print(f"Visual groups:       {total['visual_groups']}")
     print(f"Same-scene groups:   {total['scene_groups']}")
     print(f"Smart album links:   {total['links']}")
