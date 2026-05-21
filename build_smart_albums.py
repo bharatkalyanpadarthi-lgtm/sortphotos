@@ -12,7 +12,7 @@ The script keeps original images where they are and creates hardlinked views:
       04_visual_similar/001_12_photos_portrait_from_Anushka_023/
       05_same_scene/001_18_photos_scene_from_Anushka_041/
       06_nudity/possible/visual_similar/001_05_photos_portrait_from_Anushka_087/
-      07_review_needed/blurry/
+      07_review_needed/small/
 
 Hardlinks do not duplicate file contents on disk. If a hardlink cannot be
 created, the script falls back to a symlink.
@@ -361,9 +361,8 @@ def quality_album_names(info: ImageInfo) -> list[str]:
     min_dim = min(info.width, info.height)
     if info.quality >= 0.68 and pixels >= 800_000:
         names.append("01_quality/sharp_large")
-    if info.sharpness < 45.0:
-        names.append("01_quality/blurry")
-        names.append("07_review_needed/blurry")
+    if info.sharpness < 25.0:
+        names.append("01_quality/low_sharpness_score")
     if min_dim < 450 or pixels < 350_000:
         names.append("01_quality/small")
         names.append("07_review_needed/small")
