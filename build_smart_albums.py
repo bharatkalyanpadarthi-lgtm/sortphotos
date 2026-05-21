@@ -9,10 +9,10 @@ The script keeps original images where they are and creates hardlinked views:
       01_quality/large_high_score/
       02_format/portrait/
       03_face_framing/closeup_face/
-      04_visual_similar/001_12_photos_portrait_from_Anushka_023/
+      04_visual_similar/high_confidence/001_12_photos_portrait_from_Anushka_023/
           _nudity_possible/
-      05_same_scene/001_18_photos_scene_from_Anushka_041/
-      06_nudity/possible/visual_similar/001_05_photos_portrait_from_Anushka_087/
+      05_same_scene/high_confidence/001_18_photos_balanced_light_green_portrait_upper_body_from_Anushka_041/
+      06_nudity/possible/visual_similar/high_confidence/001_05_photos_portrait_from_Anushka_087/
       07_review_needed/small/
 
 Hardlinks do not duplicate file contents on disk. If a hardlink cannot be
@@ -48,7 +48,7 @@ DEFAULT_NUDITY_OVERRIDES = Path.home() / ".face_sort_cache" / "smart_album_nudit
 DEFAULT_FRAMING_CACHE = Path.home() / ".face_sort_cache" / "smart_album_framing_cache.json"
 DEFAULT_SMART_STATE = Path.home() / ".face_sort_cache" / "smart_album_person_state.json"
 FRAMING_CACHE_VERSION = 2
-SMART_ALBUM_LOGIC_VERSION = 5
+SMART_ALBUM_LOGIC_VERSION = 7
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
 SMART_DIR = "_smart_albums"
 EXCLUDED_DIRS = {
@@ -96,6 +96,10 @@ class ImageInfo:
     height: int
     phash: int
     color: np.ndarray
+    center_color: np.ndarray
+    scene: np.ndarray
+    context_hue: float
+    context_sat: float
     sharpness: float
     brightness: float
     contrast: float
@@ -112,6 +116,13 @@ class ImageInfo:
     nudity_status: str = ""
     nudity_class: str = ""
     nudity_score: float = 0.0
+
+
+@dataclass
+class SmartGroup:
+    items: list[ImageInfo]
+    confidence: str
+    label: str
 
 
 def load_face_cascade() -> cv2.CascadeClassifier | None:
@@ -281,6 +292,13 @@ def phash64(img: np.ndarray) -> int:
     return value
 
 
+def _masked_hsv_hist(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv], [0, 1, 2], mask, [8, 4, 4], [0, 180, 0, 256, 0, 256])
+    hist = cv2.normalize(hist, hist).flatten().astype(np.float32)
+    return hist
+
+
 def color_context(img: np.ndarray) -> np.ndarray:
     h, w = img.shape[:2]
     # Border-weighted color descriptor leans toward background/context.
@@ -290,10 +308,69 @@ def color_context(img: np.ndarray) -> np.ndarray:
     mask[-border:, :] = 255
     mask[:, :border] = 255
     mask[:, -border:] = 255
+    return _masked_hsv_hist(img, mask)
+
+
+def center_color_context(img: np.ndarray) -> np.ndarray:
+    h, w = img.shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+    x1, x2 = int(w * 0.20), int(w * 0.80)
+    y1, y2 = int(h * 0.18), int(h * 0.88)
+    mask[y1:y2, x1:x2] = 255
+    return _masked_hsv_hist(img, mask)
+
+
+def layout_context(img: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    small = cv2.resize(gray, (32, 32), interpolation=cv2.INTER_AREA)
+    dct = cv2.dct(np.float32(small))
+    block = dct[:8, :8].flatten()[1:].astype(np.float32)
+    norm = float(np.linalg.norm(block))
+    if norm > 0:
+        block = block / norm
+    return block
+
+
+def context_hsv(img: np.ndarray) -> tuple[float, float]:
+    h, w = img.shape[:2]
+    border = max(8, min(h, w) // 8)
+    mask = np.zeros((h, w), dtype=np.uint8)
+    mask[:border, :] = 255
+    mask[-border:, :] = 255
+    mask[:, :border] = 255
+    mask[:, -border:] = 255
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    hist = cv2.calcHist([hsv], [0, 1, 2], mask, [8, 4, 4], [0, 180, 0, 256, 0, 256])
-    hist = cv2.normalize(hist, hist).flatten().astype(np.float32)
-    return hist
+    selected = hsv[mask > 0]
+    if selected.size == 0:
+        return 0.0, 0.0
+    return float(np.median(selected[:, 0])), float(np.median(selected[:, 1]))
+
+
+def scene_context(border: np.ndarray,
+                  center: np.ndarray,
+                  layout: np.ndarray,
+                  face_ratio: float,
+                  face_x: float,
+                  face_y: float,
+                  width: int,
+                  height: int) -> np.ndarray:
+    aspect = width / max(1, height)
+    geometry = np.array([
+        min(max(aspect / 2.0, 0.0), 1.0),
+        min(max(face_ratio * 8.0, 0.0), 1.0),
+        min(max(face_x, 0.0), 1.0),
+        min(max(face_y, 0.0), 1.0),
+    ], dtype=np.float32)
+    vec = np.concatenate([
+        border.astype(np.float32) * 0.48,
+        center.astype(np.float32) * 0.28,
+        layout.astype(np.float32) * 0.18,
+        geometry * 0.06,
+    ])
+    norm = float(np.linalg.norm(vec))
+    if norm > 0:
+        vec = vec / norm
+    return vec.astype(np.float32)
 
 
 def sharpness_score(img: np.ndarray) -> float:
@@ -509,13 +586,21 @@ def load_infos(person_dir: Path) -> list[ImageInfo]:
         sharp = sharpness_score(img)
         brightness, contrast = exposure_stats(img)
         face_count, largest_face_ratio = detect_face_stats(img, face_cascade)
+        border_color = color_context(img)
+        center_color = center_color_context(img)
+        layout = layout_context(img)
+        hue, sat = context_hsv(img)
         infos.append(ImageInfo(
             path=path,
             rel=path.relative_to(person_dir),
             width=w,
             height=h,
             phash=phash64(img),
-            color=color_context(img),
+            color=border_color,
+            center_color=center_color,
+            scene=scene_context(border_color, center_color, layout, largest_face_ratio, 0.5, 0.5, w, h),
+            context_hue=hue,
+            context_sat=sat,
             sharpness=sharp,
             brightness=brightness,
             contrast=contrast,
@@ -733,6 +818,68 @@ def dominant_orientation(group: list[ImageInfo]) -> str:
     return max(counts.items(), key=lambda item: (item[1], item[0]))[0]
 
 
+def dominant_face_angle(group: list[ImageInfo]) -> str:
+    counts: dict[str, int] = defaultdict(int)
+    for info in group:
+        if info.face_angle:
+            counts[info.face_angle] += 1
+    if not counts:
+        return ""
+    return max(counts.items(), key=lambda item: (item[1], item[0]))[0]
+
+
+def framing_label(group: list[ImageInfo]) -> str:
+    ratio = float(np.median([i.largest_face_ratio for i in group])) if group else 0.0
+    if ratio >= 0.22:
+        return "closeup_face"
+    if ratio >= 0.10:
+        return "head_and_shoulders"
+    if ratio >= 0.045:
+        return "portrait_upper_body"
+    if ratio >= 0.015:
+        return "wide_full_body"
+    return "wide_scene"
+
+
+def light_label(group: list[ImageInfo]) -> str:
+    brightness = float(np.median([i.brightness for i in group])) if group else 128.0
+    if brightness < 78:
+        return "low_light"
+    if brightness > 172:
+        return "bright"
+    return "balanced_light"
+
+
+def color_label(group: list[ImageInfo]) -> str:
+    if not group:
+        return "neutral"
+    sat = float(np.median([i.context_sat for i in group]))
+    if sat < 38:
+        return "neutral"
+    hue = float(np.median([i.context_hue for i in group]))
+    if hue < 10 or hue >= 168:
+        return "red_warm"
+    if hue < 24:
+        return "orange_warm"
+    if hue < 38:
+        return "yellow_warm"
+    if hue < 80:
+        return "green"
+    if hue < 112:
+        return "blue_cool"
+    if hue < 145:
+        return "purple_cool"
+    return "pink_warm"
+
+
+def scene_group_label(group: list[ImageInfo]) -> str:
+    parts = [light_label(group), color_label(group), framing_label(group)]
+    angle = dominant_face_angle(group)
+    if angle in {"front", "three_quarter_left", "three_quarter_right", "side_profile"}:
+        parts.append(angle)
+    return safe_component("_".join(parts), max_len=56)
+
+
 def representative_info(group: list[ImageInfo]) -> ImageInfo:
     return sorted(
         group,
@@ -749,7 +896,7 @@ def group_folder_name(group_id: int, group: list[ImageInfo], kind: str) -> str:
     source_stem = safe_component(rep.path.stem, max_len=42)
     orient = dominant_orientation(group)
     count = len(group)
-    label = "scene" if kind == "scene" else orient
+    label = scene_group_label(group) if kind == "scene" else orient
     return f"{group_id:03d}_{count:02d}_photos_{label}_from_{source_stem}"
 
 
@@ -776,7 +923,101 @@ def link_image(info: ImageInfo, album_dir: Path, apply: bool) -> Path:
     return dest
 
 
-def group_visual_similar(infos: list[ImageInfo], threshold: int, min_group: int) -> list[list[ImageInfo]]:
+def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom <= 0:
+        return 1.0
+    return float(1.0 - float(np.dot(a, b)) / denom)
+
+
+def aspect_ratio(info: ImageInfo) -> float:
+    return info.width / max(1, info.height)
+
+
+def current_scene_vector(info: ImageInfo) -> np.ndarray:
+    geometry = np.array([
+        min(max(aspect_ratio(info) / 2.0, 0.0), 1.0),
+        min(max(info.largest_face_ratio * 8.0, 0.0), 1.0),
+        min(max(info.face_center_x, 0.0), 1.0),
+        min(max(info.face_center_y, 0.0), 1.0),
+        min(max(info.face_width_ratio * 3.0, 0.0), 1.0),
+        min(max(info.face_height_ratio * 3.0, 0.0), 1.0),
+    ], dtype=np.float32)
+    vec = np.concatenate([info.scene * 0.92, geometry * 0.08])
+    norm = float(np.linalg.norm(vec))
+    if norm > 0:
+        vec = vec / norm
+    return vec.astype(np.float32)
+
+
+def visual_pair_ok(a: ImageInfo, b: ImageInfo, threshold: int) -> bool:
+    phash_dist = hamming(a.phash, b.phash)
+    if phash_dist > threshold:
+        return False
+    if abs(aspect_ratio(a) - aspect_ratio(b)) > 0.055:
+        return False
+    border_dist = cosine_distance(a.color, b.color)
+    center_dist = cosine_distance(a.center_color, b.center_color)
+    if phash_dist <= max(2, threshold - 3):
+        if max(border_dist, center_dist) > 0.34:
+            return False
+    elif max(border_dist, center_dist) > 0.22:
+        return False
+    if a.face_count and b.face_count:
+        center_delta = abs(a.face_center_x - b.face_center_x) + abs(a.face_center_y - b.face_center_y)
+        if center_delta > 0.22:
+            return False
+        ratio_delta = abs(a.largest_face_ratio - b.largest_face_ratio)
+        if ratio_delta > max(0.035, min(a.largest_face_ratio, b.largest_face_ratio) * 0.65):
+            return False
+    return True
+
+
+def group_pair_stats(group: list[ImageInfo]) -> tuple[float, float, float]:
+    if len(group) < 2:
+        return 0.0, 0.0, 0.0
+    scene_dists: list[float] = []
+    phashes: list[int] = []
+    color_dists: list[float] = []
+    vectors = [current_scene_vector(i) for i in group]
+    for i, a in enumerate(group):
+        for j in range(i + 1, len(group)):
+            b = group[j]
+            scene_dists.append(cosine_distance(vectors[i], vectors[j]))
+            phashes.append(hamming(a.phash, b.phash))
+            color_dists.append(max(cosine_distance(a.color, b.color), cosine_distance(a.center_color, b.center_color)))
+    return (
+        float(np.mean(scene_dists)) if scene_dists else 0.0,
+        float(np.mean(phashes)) if phashes else 0.0,
+        float(np.mean(color_dists)) if color_dists else 0.0,
+    )
+
+
+def visual_confidence(group: list[ImageInfo], threshold: int) -> str:
+    scene_dist, phash_dist, color_dist = group_pair_stats(group)
+    if phash_dist <= max(2.5, threshold - 2) and color_dist <= 0.16 and scene_dist <= 0.055:
+        return "high_confidence"
+    return "review"
+
+
+def split_visual_component(component: list[ImageInfo], threshold: int, min_group: int) -> list[list[ImageInfo]]:
+    groups: list[list[ImageInfo]] = []
+    for info in sorted(component, key=lambda i: (str(i.rel).lower(), -i.quality)):
+        placed = False
+        for group in groups:
+            matches = sum(1 for existing in group if visual_pair_ok(info, existing, threshold))
+            if matches == len(group):
+                group.append(info)
+                placed = True
+                break
+        if not placed:
+            groups.append([info])
+    return [g for g in groups if len(g) >= min_group]
+
+
+def group_visual_similar(infos: list[ImageInfo], threshold: int, min_group: int) -> list[SmartGroup]:
+    if len(infos) < min_group:
+        return []
     parent = {i: i for i in range(len(infos))}
 
     def find(x: int) -> int:
@@ -791,57 +1032,97 @@ def group_visual_similar(infos: list[ImageInfo], threshold: int, min_group: int)
             parent[rb] = ra
 
     for i, a in enumerate(infos):
-        ratio_a = a.width / max(1, a.height)
         for j in range(i + 1, len(infos)):
-            b = infos[j]
-            ratio_b = b.width / max(1, b.height)
-            if abs(ratio_a - ratio_b) > 0.08:
-                continue
-            if hamming(a.phash, b.phash) <= threshold:
+            if visual_pair_ok(a, infos[j], threshold):
                 union(i, j)
 
-    clusters: dict[int, list[ImageInfo]] = defaultdict(list)
+    components: dict[int, list[ImageInfo]] = defaultdict(list)
     for i, info in enumerate(infos):
-        clusters[find(i)].append(info)
-    groups = [g for g in clusters.values() if len(g) >= min_group]
-    return sorted(groups, key=lambda g: (-len(g), str(g[0].rel).lower()))
+        components[find(i)].append(info)
+
+    groups: list[SmartGroup] = []
+    for component in components.values():
+        if len(component) < min_group:
+            continue
+        for group in split_visual_component(component, threshold, min_group):
+            groups.append(SmartGroup(
+                items=group,
+                confidence=visual_confidence(group, threshold),
+                label=dominant_orientation(group),
+            ))
+    return sorted(groups, key=lambda g: (-len(g.items), g.confidence, str(g.items[0].rel).lower()))
+
+
+def scene_confidence(group: list[ImageInfo]) -> str:
+    scene_dist, phash_dist, color_dist = group_pair_stats(group)
+    orientations = defaultdict(int)
+    angles = defaultdict(int)
+    for info in group:
+        orientations[orientation_name(info)] += 1
+        if info.face_angle:
+            angles[info.face_angle] += 1
+    orient_ratio = max(orientations.values()) / max(1, len(group))
+    angle_ratio = max(angles.values()) / max(1, len(group)) if angles else 1.0
+    if scene_dist <= 0.045 and color_dist <= 0.16 and orient_ratio >= 0.70 and angle_ratio >= 0.55:
+        return "high_confidence"
+    if scene_dist <= 0.075 and color_dist <= 0.24 and orient_ratio >= 0.55:
+        return "medium_confidence"
+    return "review"
+
+
+def split_large_scene_group(group: list[ImageInfo], eps: float, min_group: int, max_group: int) -> list[list[ImageInfo]]:
+    if len(group) <= max_group:
+        return [group]
+    vectors = np.stack([current_scene_vector(i) for i in group])
+    sub_labels = DBSCAN(
+        eps=max(eps * 0.62, 0.012),
+        min_samples=min_group,
+        metric="cosine",
+    ).fit_predict(vectors)
+    subgroups: dict[int, list[ImageInfo]] = defaultdict(list)
+    for info, label in zip(group, sub_labels):
+        if label >= 0:
+            subgroups[int(label)].append(info)
+    out: list[list[ImageInfo]] = []
+    for subgroup in subgroups.values():
+        if len(subgroup) < min_group:
+            continue
+        if len(subgroup) <= max_group:
+            out.append(subgroup)
+        else:
+            out.extend(g for g in split_large_scene_group(subgroup, eps * 0.62, min_group, max_group)
+                       if len(g) <= max_group)
+    return out
 
 
 def group_same_scene(infos: list[ImageInfo],
                      eps: float,
                      min_group: int,
-                     max_group: int) -> list[list[ImageInfo]]:
+                     max_group: int) -> list[SmartGroup]:
     if len(infos) < min_group:
         return []
-    colors = np.stack([i.color for i in infos])
-    labels = DBSCAN(eps=eps, min_samples=min_group, metric="cosine").fit_predict(colors)
+    vectors = np.stack([current_scene_vector(i) for i in infos])
+    labels = DBSCAN(eps=eps, min_samples=min_group, metric="cosine").fit_predict(vectors)
     groups: dict[int, list[ImageInfo]] = defaultdict(list)
     for info, label in zip(infos, labels):
         if label >= 0:
             groups[int(label)].append(info)
-    out: list[list[ImageInfo]] = []
+    out: list[SmartGroup] = []
     for group in groups.values():
         if len(group) < min_group:
             continue
-        if len(group) <= max_group:
-            out.append(group)
-            continue
-        # Large color clusters are often broad palette matches, not true scenes.
-        # Try one stricter split; if still too broad, omit for accuracy.
-        sub_colors = np.stack([i.color for i in group])
-        sub_labels = DBSCAN(
-            eps=max(eps * 0.60, 0.006),
-            min_samples=min_group,
-            metric="cosine",
-        ).fit_predict(sub_colors)
-        subgroups: dict[int, list[ImageInfo]] = defaultdict(list)
-        for info, label in zip(group, sub_labels):
-            if label >= 0:
-                subgroups[int(label)].append(info)
-        for subgroup in subgroups.values():
-            if min_group <= len(subgroup) <= max_group:
-                out.append(subgroup)
-    return sorted(out, key=lambda g: (-len(g), str(g[0].rel).lower()))
+        for subgroup in split_large_scene_group(group, eps, min_group, max_group):
+            confidence = scene_confidence(subgroup)
+            out.append(SmartGroup(
+                items=subgroup,
+                confidence=confidence,
+                label=scene_group_label(subgroup),
+            ))
+    confidence_order = {"high_confidence": 0, "medium_confidence": 1, "review": 2}
+    return sorted(
+        out,
+        key=lambda g: (confidence_order.get(g.confidence, 9), -len(g.items), str(g.items[0].rel).lower()),
+    )
 
 
 def context_name(info: ImageInfo) -> str:
@@ -1150,6 +1431,24 @@ def write_group(album_root: Path,
     return len(group)
 
 
+def write_smart_group(album_root: Path,
+                      base_path: str,
+                      group_id: int,
+                      smart_group: SmartGroup,
+                      kind: str,
+                      apply: bool,
+                      rows: list[dict[str, str]]) -> int:
+    group_path = f"{base_path}/{smart_group.confidence}"
+    return write_group(album_root, group_path, group_id, smart_group.items, kind, apply, rows)
+
+
+def confidence_numbered(groups: list[SmartGroup]):
+    counters: dict[str, int] = defaultdict(int)
+    for group in groups:
+        counters[group.confidence] += 1
+        yield counters[group.confidence], group
+
+
 def album_name_for_dest(album_root: Path, dest: Path) -> str:
     try:
         return str(dest.parent.relative_to(album_root))
@@ -1292,13 +1591,13 @@ def build_for_person(person_dir: Path,
                 stats["review_links"] += 1
 
     visual_groups = group_visual_similar(infos, visual_threshold, min_group)
-    for idx, group in enumerate(visual_groups, start=1):
-        stats["links"] += write_group(album_root, "04_visual_similar", idx, group, "visual", apply, rows)
+    for idx, group in confidence_numbered(visual_groups):
+        stats["links"] += write_smart_group(album_root, "04_visual_similar", idx, group, "visual", apply, rows)
     stats["visual_groups"] = len(visual_groups)
 
     scene_groups = group_same_scene(infos, scene_eps, min_group, max_scene_group)
-    for idx, group in enumerate(scene_groups, start=1):
-        stats["links"] += write_group(album_root, "05_same_scene", idx, group, "scene", apply, rows)
+    for idx, group in confidence_numbered(scene_groups):
+        stats["links"] += write_smart_group(album_root, "05_same_scene", idx, group, "scene", apply, rows)
     stats["scene_groups"] = len(scene_groups)
 
     for folder_name, album_name in NUDITY_DIRS.items():
@@ -1308,12 +1607,12 @@ def build_for_person(person_dir: Path,
         category = "possible" if "possible" in album_name else "uncertain"
         stats["links"] += link_collection(subset, album_root, f"06_nudity/{category}/all", apply, rows)
         visual = group_visual_similar(subset, visual_threshold, max(2, min_group))
-        for idx, group in enumerate(visual, start=1):
-            stats["links"] += write_group(
+        for idx, group in confidence_numbered(visual):
+            stats["links"] += write_smart_group(
                 album_root, f"06_nudity/{category}/visual_similar", idx, group, "visual", apply, rows)
         scene = group_same_scene(subset, scene_eps, max(2, min_group), max_scene_group)
-        for idx, group in enumerate(scene, start=1):
-            stats["links"] += write_group(
+        for idx, group in confidence_numbered(scene):
+            stats["links"] += write_smart_group(
                 album_root, f"06_nudity/{category}/same_scene", idx, group, "scene", apply, rows)
 
     if apply:
@@ -1380,8 +1679,8 @@ def main() -> int:
                         help="Create hardlink smart albums. Default is dry-run.")
     parser.add_argument("--visual-threshold", type=int, default=5,
                         help="pHash threshold for visual-similar groups. Default 5.")
-    parser.add_argument("--scene-eps", type=float, default=0.02,
-                        help="Strict DBSCAN cosine eps for same-scene context groups. Default 0.02.")
+    parser.add_argument("--scene-eps", type=float, default=0.075,
+                        help="DBSCAN cosine eps for multi-feature same-scene groups. Default 0.075.")
     parser.add_argument("--min-group", type=int, default=3,
                         help="Minimum images per smart group. Default 3.")
     parser.add_argument("--max-scene-group", type=int, default=12,
