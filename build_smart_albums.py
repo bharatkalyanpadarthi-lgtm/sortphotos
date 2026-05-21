@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -36,6 +37,7 @@ import numpy as np
 from sklearn.cluster import DBSCAN
 
 DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
+DEFAULT_NUDITY_CACHE = Path.home() / ".face_sort_cache" / "smart_album_nudity_cache.json"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
 SMART_DIR = "_smart_albums"
 EXCLUDED_DIRS = {
@@ -51,6 +53,15 @@ NUDITY_NESTED_DIRS = {
     "_possible_nudity": "_nudity_possible",
     "_uncertain_nudity": "_nudity_uncertain",
 }
+EXPLICIT_NUDITY_CLASSES = {
+    "FEMALE_BREAST_EXPOSED",
+    "FEMALE_GENITALIA_EXPOSED",
+    "MALE_GENITALIA_EXPOSED",
+    "BUTTOCKS_EXPOSED",
+    "ANUS_EXPOSED",
+}
+NUDITY_THRESHOLD = 0.35
+NUDITY_UNCERTAIN_THRESHOLD = 0.20
 
 
 @dataclass
@@ -67,12 +78,71 @@ class ImageInfo:
     face_count: int
     largest_face_ratio: float
     quality: float
+    nudity_status: str = ""
+    nudity_class: str = ""
+    nudity_score: float = 0.0
 
 
 def load_face_cascade() -> cv2.CascadeClassifier | None:
     cascade_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
     cascade = cv2.CascadeClassifier(str(cascade_path))
     return None if cascade.empty() else cascade
+
+
+def load_nudity_cache(path: Path) -> dict:
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("version") == 1 and isinstance(data.get("items"), dict):
+            return data
+    except Exception:
+        pass
+    return {"version": 1, "items": {}}
+
+
+def save_nudity_cache(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f)
+    tmp.replace(path)
+
+
+def file_signature(path: Path) -> dict[str, int]:
+    st = path.stat()
+    return {"size": int(st.st_size), "mtime_ns": int(st.st_mtime_ns)}
+
+
+def path_nudity_status(rel: Path) -> str:
+    if not rel.parts:
+        return ""
+    if rel.parts[0] == "_possible_nudity":
+        return "possible"
+    if rel.parts[0] == "_uncertain_nudity":
+        return "uncertain"
+    return ""
+
+
+def classify_nudity_detections(detections: list[dict]) -> tuple[str, str, float]:
+    explicit = [d for d in detections if d.get("class") in EXPLICIT_NUDITY_CLASSES]
+    if not explicit:
+        return "", "", 0.0
+    best = max(explicit, key=lambda d: float(d.get("score", 0.0)))
+    best_class = str(best.get("class", ""))
+    best_score = float(best.get("score", 0.0))
+    if best_score >= NUDITY_THRESHOLD:
+        return "possible", best_class, best_score
+    if best_score >= NUDITY_UNCERTAIN_THRESHOLD:
+        return "uncertain", best_class, best_score
+    return "", best_class, best_score
+
+
+def load_nudity_detector():
+    try:
+        from nudenet import NudeDetector
+    except ImportError:
+        return None
+    return NudeDetector()
 
 
 def imread(path: Path) -> np.ndarray | None:
@@ -231,8 +301,69 @@ def load_infos(person_dir: Path) -> list[ImageInfo]:
             face_count=face_count,
             largest_face_ratio=largest_face_ratio,
             quality=image_quality(img, sharp, brightness, contrast),
+            nudity_status=path_nudity_status(path.relative_to(person_dir)),
         ))
     return infos
+
+
+def annotate_nudity(infos: list[ImageInfo],
+                    detector,
+                    cache: dict,
+                    batch_size: int) -> int:
+    if detector is None:
+        return 0
+    items = cache.setdefault("items", {})
+    pending: list[ImageInfo] = []
+    changed = 0
+
+    for info in infos:
+        if info.nudity_status:
+            continue
+        key = str(info.path)
+        try:
+            sig = file_signature(info.path)
+        except OSError:
+            continue
+        cached = items.get(key)
+        if cached and cached.get("sig") == sig:
+            info.nudity_status = str(cached.get("status", ""))
+            info.nudity_class = str(cached.get("class", ""))
+            info.nudity_score = float(cached.get("score", 0.0))
+            continue
+        pending.append(info)
+
+    for start in range(0, len(pending), max(1, batch_size)):
+        batch = pending[start:start + max(1, batch_size)]
+        paths = [str(i.path) for i in batch]
+        try:
+            results = detector.detect_batch(paths, batch_size=len(paths))
+        except Exception:
+            results = []
+            for info in batch:
+                try:
+                    results.append(detector.detect(str(info.path)))
+                except Exception:
+                    results.append([])
+
+        for info, detections in zip(batch, results):
+            if not isinstance(detections, list):
+                detections = []
+            status, best_class, best_score = classify_nudity_detections(detections)
+            info.nudity_status = status
+            info.nudity_class = best_class
+            info.nudity_score = best_score
+            try:
+                sig = file_signature(info.path)
+            except OSError:
+                continue
+            items[str(info.path)] = {
+                "sig": sig,
+                "status": status,
+                "class": best_class,
+                "score": round(best_score, 6),
+            }
+            changed += 1
+    return changed
 
 
 def safe_name(path: Path) -> str:
@@ -245,9 +376,13 @@ def safe_name(path: Path) -> str:
     return stem
 
 
-def nudity_nested_dir(rel: Path) -> str | None:
-    if rel.parts and rel.parts[0] in NUDITY_NESTED_DIRS:
-        return NUDITY_NESTED_DIRS[rel.parts[0]]
+def nudity_nested_dir(info: ImageInfo) -> str | None:
+    if info.nudity_status == "possible":
+        return "_nudity_possible"
+    if info.nudity_status == "uncertain":
+        return "_nudity_uncertain"
+    if info.rel.parts and info.rel.parts[0] in NUDITY_NESTED_DIRS:
+        return NUDITY_NESTED_DIRS[info.rel.parts[0]]
     return None
 
 
@@ -310,20 +445,20 @@ def clear_smart_albums(person_dir: Path) -> None:
         shutil.rmtree(smart)
 
 
-def link_image(src: Path, album_dir: Path, rel: Path, apply: bool) -> Path:
-    nested = nudity_nested_dir(rel)
+def link_image(info: ImageInfo, album_dir: Path, apply: bool) -> Path:
+    nested = nudity_nested_dir(info)
     if nested and "06_nudity" not in album_dir.parts:
         album_dir = album_dir / nested
-    dest = album_dir / safe_name(visible_rel_name(rel))
+    dest = album_dir / safe_name(visible_rel_name(info.rel))
     if not apply:
         return dest
     album_dir.mkdir(parents=True, exist_ok=True)
     if dest.exists() or dest.is_symlink():
         dest.unlink()
     try:
-        os.link(str(src), str(dest))
+        os.link(str(info.path), str(dest))
     except OSError:
-        os.symlink(str(src), str(dest))
+        os.symlink(str(info.path), str(dest))
     return dest
 
 
@@ -420,7 +555,7 @@ def write_group(album_root: Path,
                 rows: list[dict[str, str]]) -> int:
     album_dir = album_root / group_path / group_folder_name(group_id, group, kind)
     for info in group:
-        dest = link_image(info.path, album_dir, info.rel, apply)
+        dest = link_image(info, album_dir, apply)
         rows.append(manifest_row(info, album_name_for_dest(album_root, dest), dest))
     return len(group)
 
@@ -445,6 +580,9 @@ def manifest_row(info: ImageInfo, album: str, link: Path) -> dict[str, str]:
         "contrast": f"{info.contrast:.1f}",
         "face_count": str(info.face_count),
         "largest_face_ratio": f"{info.largest_face_ratio:.4f}",
+        "nudity_status": info.nudity_status,
+        "nudity_class": info.nudity_class,
+        "nudity_score": f"{info.nudity_score:.3f}",
     }
 
 
@@ -453,7 +591,7 @@ def link_single(info: ImageInfo,
                 album_path: str,
                 apply: bool,
                 rows: list[dict[str, str]]) -> int:
-    dest = link_image(info.path, album_root / album_path, info.rel, apply)
+    dest = link_image(info, album_root / album_path, apply)
     rows.append(manifest_row(info, album_name_for_dest(album_root, dest), dest))
     return 1
 
@@ -474,8 +612,12 @@ def build_for_person(person_dir: Path,
                      visual_threshold: int,
                      scene_eps: float,
                      min_group: int,
+                     detector,
+                     nudity_cache: dict,
+                     nudity_batch_size: int,
                      quiet: bool) -> dict[str, int]:
     infos = load_infos(person_dir)
+    nudity_scanned = annotate_nudity(infos, detector, nudity_cache, nudity_batch_size)
     stats = {
         "images": len(infos),
         "links": 0,
@@ -483,6 +625,8 @@ def build_for_person(person_dir: Path,
         "scene_groups": 0,
         "best_links": 0,
         "review_links": 0,
+        "nudity_scanned": nudity_scanned,
+        "nudity_images": sum(1 for i in infos if i.nudity_status),
     }
     if not infos:
         return stats
@@ -506,7 +650,7 @@ def build_for_person(person_dir: Path,
 
     for info in infos:
         stats["links"] += 1
-        dest = link_image(info.path, album_root / context_name(info), info.rel, apply)
+        dest = link_image(info, album_root / context_name(info), apply)
         rows.append(manifest_row(info, album_name_for_dest(album_root, dest), dest))
         for album_name in quality_album_names(info):
             stats["links"] += link_single(info, album_root, album_name, apply, rows)
@@ -558,6 +702,9 @@ def build_for_person(person_dir: Path,
                 "contrast",
                 "face_count",
                 "largest_face_ratio",
+                "nudity_status",
+                "nudity_class",
+                "nudity_score",
             ])
             writer.writeheader()
             writer.writerows(rows)
@@ -566,6 +713,7 @@ def build_for_person(person_dir: Path,
         print(f"{person_dir.name:<32} images={stats['images']:<5} "
               f"visual_groups={stats['visual_groups']:<4} scene_groups={stats['scene_groups']:<4} "
               f"best={stats['best_links']:<3} review={stats['review_links']:<4} "
+              f"nudity={stats['nudity_images']:<4} nudity_scan={stats['nudity_scanned']:<4} "
               f"links={stats['links']}")
     return stats
 
@@ -597,6 +745,12 @@ def main() -> int:
                         help="DBSCAN cosine eps for focused same-scene color/context groups. Default 0.10.")
     parser.add_argument("--min-group", type=int, default=3,
                         help="Minimum images per smart group. Default 3.")
+    parser.add_argument("--no-detect-nudity", action="store_true",
+                        help="Only use existing _possible_nudity/_uncertain_nudity folders; do not run NudeNet.")
+    parser.add_argument("--nudity-batch-size", type=int, default=8,
+                        help="Batch size for cached NudeNet smart-album classification. Default 8.")
+    parser.add_argument("--nudity-cache", type=Path, default=DEFAULT_NUDITY_CACHE,
+                        help=f"Nudity classification cache. Default: {DEFAULT_NUDITY_CACHE}")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -617,7 +771,18 @@ def main() -> int:
         "scene_groups": 0,
         "best_links": 0,
         "review_links": 0,
+        "nudity_scanned": 0,
+        "nudity_images": 0,
     }
+    detector = None
+    nudity_cache = {"version": 1, "items": {}}
+    if not args.no_detect_nudity:
+        detector = load_nudity_detector()
+        if detector is None:
+            print("WARNING: NudeNet is not installed; smart albums will only use existing nudity subfolders.")
+        else:
+            nudity_cache = load_nudity_cache(args.nudity_cache.expanduser())
+
     for person_dir in dirs:
         stats = build_for_person(
             person_dir,
@@ -625,10 +790,16 @@ def main() -> int:
             visual_threshold=max(0, int(args.visual_threshold)),
             scene_eps=float(args.scene_eps),
             min_group=max(2, int(args.min_group)),
+            detector=detector,
+            nudity_cache=nudity_cache,
+            nudity_batch_size=max(1, int(args.nudity_batch_size)),
             quiet=args.quiet,
         )
         for key in total:
             total[key] += stats[key]
+
+    if detector is not None:
+        save_nudity_cache(args.nudity_cache.expanduser(), nudity_cache)
 
     print()
     print(f"People folder:       {root}")
@@ -636,6 +807,8 @@ def main() -> int:
     print(f"Images scanned:      {total['images']}")
     print(f"Best-quality links:  {total['best_links']}")
     print(f"Review-needed links: {total['review_links']}")
+    print(f"Nudity images:       {total['nudity_images']}")
+    print(f"Nudity newly scanned:{total['nudity_scanned']}")
     print(f"Visual groups:       {total['visual_groups']}")
     print(f"Same-scene groups:   {total['scene_groups']}")
     print(f"Smart album links:   {total['links']}")
