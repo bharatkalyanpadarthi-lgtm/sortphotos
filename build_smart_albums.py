@@ -378,7 +378,7 @@ def quality_album_names(info: ImageInfo) -> list[str]:
 
 def face_framing_album_names(info: ImageInfo) -> list[str]:
     if info.face_count == 0:
-        return ["03_face_framing/no_face_detected", "07_review_needed/no_face_detected"]
+        return ["03_face_framing/framing_unknown"]
     names: list[str] = []
     if info.face_count > 1:
         names.append("03_face_framing/multiple_faces")
