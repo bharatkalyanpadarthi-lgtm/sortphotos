@@ -10,6 +10,7 @@ The script keeps original images where they are and creates hardlinked views:
       02_format/portrait/
       03_face_framing/closeup_face/
       04_visual_similar/001_12_photos_portrait_from_Anushka_023/
+          _nudity_possible/
       05_same_scene/001_18_photos_scene_from_Anushka_041/
       06_nudity/possible/visual_similar/001_05_photos_portrait_from_Anushka_087/
       07_review_needed/small/
@@ -45,6 +46,10 @@ EXCLUDED_DIRS = {
 NUDITY_DIRS = {
     "_possible_nudity": "nudity_possible",
     "_uncertain_nudity": "nudity_uncertain",
+}
+NUDITY_NESTED_DIRS = {
+    "_possible_nudity": "_nudity_possible",
+    "_uncertain_nudity": "_nudity_uncertain",
 }
 
 
@@ -240,6 +245,18 @@ def safe_name(path: Path) -> str:
     return stem
 
 
+def nudity_nested_dir(rel: Path) -> str | None:
+    if rel.parts and rel.parts[0] in NUDITY_NESTED_DIRS:
+        return NUDITY_NESTED_DIRS[rel.parts[0]]
+    return None
+
+
+def visible_rel_name(rel: Path) -> Path:
+    if rel.parts and rel.parts[0] in NUDITY_NESTED_DIRS and len(rel.parts) > 1:
+        return Path(*rel.parts[1:])
+    return rel
+
+
 def safe_component(value: str, max_len: int = 64) -> str:
     value = value.strip()
     value = re.sub(r"\s+", "_", value)
@@ -294,7 +311,10 @@ def clear_smart_albums(person_dir: Path) -> None:
 
 
 def link_image(src: Path, album_dir: Path, rel: Path, apply: bool) -> Path:
-    dest = album_dir / safe_name(rel)
+    nested = nudity_nested_dir(rel)
+    if nested and "06_nudity" not in album_dir.parts:
+        album_dir = album_dir / nested
+    dest = album_dir / safe_name(visible_rel_name(rel))
     if not apply:
         return dest
     album_dir.mkdir(parents=True, exist_ok=True)
@@ -403,8 +423,15 @@ def write_group(album_root: Path,
     album_dir = album_root / group_path / group_folder_name(group_id, group, kind)
     for info in group:
         dest = link_image(info.path, album_dir, info.rel, apply)
-        rows.append(manifest_row(info, str(album_dir.relative_to(album_root.parent)), dest))
+        rows.append(manifest_row(info, album_name_for_dest(album_root, dest), dest))
     return len(group)
+
+
+def album_name_for_dest(album_root: Path, dest: Path) -> str:
+    try:
+        return str(dest.parent.relative_to(album_root))
+    except ValueError:
+        return str(dest.parent)
 
 
 def manifest_row(info: ImageInfo, album: str, link: Path) -> dict[str, str]:
@@ -429,7 +456,7 @@ def link_single(info: ImageInfo,
                 apply: bool,
                 rows: list[dict[str, str]]) -> int:
     dest = link_image(info.path, album_root / album_path, info.rel, apply)
-    rows.append(manifest_row(info, album_path, dest))
+    rows.append(manifest_row(info, album_name_for_dest(album_root, dest), dest))
     return 1
 
 
@@ -476,7 +503,7 @@ def build_for_person(person_dir: Path,
     for info in infos:
         stats["links"] += 1
         dest = link_image(info.path, album_root / context_name(info), info.rel, apply)
-        rows.append(manifest_row(info, context_name(info), dest))
+        rows.append(manifest_row(info, album_name_for_dest(album_root, dest), dest))
         for album_name in quality_album_names(info):
             stats["links"] += link_single(info, album_root, album_name, apply, rows)
             if album_name.startswith("07_review_needed/"):
