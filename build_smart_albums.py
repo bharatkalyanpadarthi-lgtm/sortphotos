@@ -1329,6 +1329,9 @@ def main() -> int:
     if smart_state is not None and not args.force:
         build_dirs = []
         people_state = smart_state.setdefault("people", {})
+        current_keys = {str(person_dir.resolve()) for person_dir in dirs}
+        for stale_key in [key for key in people_state if key not in current_keys]:
+            del people_state[stale_key]
         for person_dir in dirs:
             key = str(person_dir.resolve())
             sig = person_content_signature(person_dir)

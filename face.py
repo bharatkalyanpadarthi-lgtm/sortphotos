@@ -176,7 +176,7 @@ ACTIONS = [
         "label": "Rebuild Identity DB",
         "desc": "Maintenance: relearn known people from photos_by_person after many manual folder edits",
         "script": "sort_photos.py",
-        "args": ["--identity-db-only"],
+        "args": ["--identity-db-only", "--identity-max-images", "80"],
         "hidden": True,
     },
     {

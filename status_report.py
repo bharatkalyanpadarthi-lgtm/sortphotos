@@ -167,7 +167,7 @@ def smart_state_count() -> int:
     try:
         with SMART_STATE.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        return len(data.get("people", {}))
+        return sum(1 for key in data.get("people", {}) if Path(key).exists())
     except Exception:
         return 0
 
