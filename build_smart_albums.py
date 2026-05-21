@@ -493,7 +493,10 @@ def group_visual_similar(infos: list[ImageInfo], threshold: int, min_group: int)
     return sorted(groups, key=lambda g: (-len(g), str(g[0].rel).lower()))
 
 
-def group_same_scene(infos: list[ImageInfo], eps: float, min_group: int) -> list[list[ImageInfo]]:
+def group_same_scene(infos: list[ImageInfo],
+                     eps: float,
+                     min_group: int,
+                     max_group: int) -> list[list[ImageInfo]]:
     if len(infos) < min_group:
         return []
     colors = np.stack([i.color for i in infos])
@@ -502,7 +505,28 @@ def group_same_scene(infos: list[ImageInfo], eps: float, min_group: int) -> list
     for info, label in zip(infos, labels):
         if label >= 0:
             groups[int(label)].append(info)
-    out = [g for g in groups.values() if len(g) >= min_group]
+    out: list[list[ImageInfo]] = []
+    for group in groups.values():
+        if len(group) < min_group:
+            continue
+        if len(group) <= max_group:
+            out.append(group)
+            continue
+        # Large color clusters are often broad palette matches, not true scenes.
+        # Try one stricter split; if still too broad, omit for accuracy.
+        sub_colors = np.stack([i.color for i in group])
+        sub_labels = DBSCAN(
+            eps=max(eps * 0.60, 0.006),
+            min_samples=min_group,
+            metric="cosine",
+        ).fit_predict(sub_colors)
+        subgroups: dict[int, list[ImageInfo]] = defaultdict(list)
+        for info, label in zip(group, sub_labels):
+            if label >= 0:
+                subgroups[int(label)].append(info)
+        for subgroup in subgroups.values():
+            if min_group <= len(subgroup) <= max_group:
+                out.append(subgroup)
     return sorted(out, key=lambda g: (-len(g), str(g[0].rel).lower()))
 
 
@@ -612,6 +636,7 @@ def build_for_person(person_dir: Path,
                      visual_threshold: int,
                      scene_eps: float,
                      min_group: int,
+                     max_scene_group: int,
                      detector,
                      nudity_cache: dict,
                      nudity_batch_size: int,
@@ -666,7 +691,7 @@ def build_for_person(person_dir: Path,
         stats["links"] += write_group(album_root, "04_visual_similar", idx, group, "visual", apply, rows)
     stats["visual_groups"] = len(visual_groups)
 
-    scene_groups = group_same_scene(infos, scene_eps, min_group)
+    scene_groups = group_same_scene(infos, scene_eps, min_group, max_scene_group)
     for idx, group in enumerate(scene_groups, start=1):
         stats["links"] += write_group(album_root, "05_same_scene", idx, group, "scene", apply, rows)
     stats["scene_groups"] = len(scene_groups)
@@ -681,7 +706,7 @@ def build_for_person(person_dir: Path,
         for idx, group in enumerate(visual, start=1):
             stats["links"] += write_group(
                 album_root, f"06_nudity/{category}/visual_similar", idx, group, "visual", apply, rows)
-        scene = group_same_scene(subset, scene_eps, max(2, min_group))
+        scene = group_same_scene(subset, scene_eps, max(2, min_group), max_scene_group)
         for idx, group in enumerate(scene, start=1):
             stats["links"] += write_group(
                 album_root, f"06_nudity/{category}/same_scene", idx, group, "scene", apply, rows)
@@ -741,10 +766,12 @@ def main() -> int:
                         help="Create hardlink smart albums. Default is dry-run.")
     parser.add_argument("--visual-threshold", type=int, default=5,
                         help="pHash threshold for visual-similar groups. Default 5.")
-    parser.add_argument("--scene-eps", type=float, default=0.10,
-                        help="DBSCAN cosine eps for focused same-scene color/context groups. Default 0.10.")
+    parser.add_argument("--scene-eps", type=float, default=0.02,
+                        help="Strict DBSCAN cosine eps for same-scene context groups. Default 0.02.")
     parser.add_argument("--min-group", type=int, default=3,
                         help="Minimum images per smart group. Default 3.")
+    parser.add_argument("--max-scene-group", type=int, default=12,
+                        help="Skip/split broad same-scene groups above this size. Default 12.")
     parser.add_argument("--no-detect-nudity", action="store_true",
                         help="Only use existing _possible_nudity/_uncertain_nudity folders; do not run NudeNet.")
     parser.add_argument("--nudity-batch-size", type=int, default=8,
@@ -790,6 +817,7 @@ def main() -> int:
             visual_threshold=max(0, int(args.visual_threshold)),
             scene_eps=float(args.scene_eps),
             min_group=max(2, int(args.min_group)),
+            max_scene_group=max(3, int(args.max_scene_group)),
             detector=detector,
             nudity_cache=nudity_cache,
             nudity_batch_size=max(1, int(args.nudity_batch_size)),
