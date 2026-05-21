@@ -29,6 +29,7 @@ import json
 import os
 import re
 import shutil
+import time
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass
@@ -45,7 +46,9 @@ DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_p
 DEFAULT_NUDITY_CACHE = Path.home() / ".face_sort_cache" / "smart_album_nudity_cache.json"
 DEFAULT_NUDITY_OVERRIDES = Path.home() / ".face_sort_cache" / "smart_album_nudity_overrides.json"
 DEFAULT_FRAMING_CACHE = Path.home() / ".face_sort_cache" / "smart_album_framing_cache.json"
+DEFAULT_SMART_STATE = Path.home() / ".face_sort_cache" / "smart_album_person_state.json"
 FRAMING_CACHE_VERSION = 2
+SMART_ALBUM_LOGIC_VERSION = 4
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
 SMART_DIR = "_smart_albums"
 EXCLUDED_DIRS = {
@@ -163,6 +166,25 @@ def save_framing_cache(path: Path, data: dict) -> None:
 def file_signature(path: Path) -> dict[str, int]:
     st = path.stat()
     return {"size": int(st.st_size), "mtime_ns": int(st.st_mtime_ns)}
+
+
+def load_smart_state(path: Path) -> dict:
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("version") == 1 and isinstance(data.get("people"), dict):
+            return data
+    except Exception:
+        pass
+    return {"version": 1, "people": {}}
+
+
+def save_smart_state(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+    tmp.replace(path)
 
 
 def path_nudity_status(rel: Path) -> str:
@@ -432,6 +454,35 @@ def iter_images(person_dir: Path) -> list[Path]:
             if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
                 out.append(p)
     return sorted(out, key=lambda p: str(p.relative_to(person_dir)).lower())
+
+
+def person_content_signature(person_dir: Path) -> dict[str, int | str]:
+    h = hashlib.sha256()
+    count = 0
+    total_size = 0
+    newest_mtime_ns = 0
+    for path in iter_images(person_dir):
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        rel = str(path.relative_to(person_dir))
+        h.update(rel.encode("utf-8", errors="surrogateescape"))
+        h.update(b"\0")
+        h.update(str(int(st.st_size)).encode("ascii"))
+        h.update(b"\0")
+        h.update(str(int(st.st_mtime_ns)).encode("ascii"))
+        h.update(b"\n")
+        count += 1
+        total_size += int(st.st_size)
+        newest_mtime_ns = max(newest_mtime_ns, int(st.st_mtime_ns))
+    return {
+        "hash": h.hexdigest(),
+        "count": count,
+        "total_size": total_size,
+        "newest_mtime_ns": newest_mtime_ns,
+        "logic_version": SMART_ALBUM_LOGIC_VERSION,
+    }
 
 
 def load_infos(person_dir: Path) -> list[ImageInfo]:
@@ -818,6 +869,83 @@ def is_video_quality_candidate(info: ImageInfo) -> bool:
     )
 
 
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def video_candidate_score(info: ImageInfo) -> float:
+    """Rank images for single-image AI video workflows."""
+    if info.face_count <= 0:
+        return 0.0
+    pixels = info.width * info.height
+    score = 0.0
+    if info.face_count == 1:
+        score += 0.16
+    elif info.face_count == 2:
+        score += 0.04
+    else:
+        score -= 0.18
+
+    if info.face_angle == "front_facing":
+        score += 0.20
+    elif info.face_angle in {"turned_left", "turned_right"}:
+        score += 0.17
+    elif info.face_angle in {"side_angle_left", "side_angle_right"}:
+        score -= 0.18
+
+    roll = abs(info.face_roll)
+    if roll <= 8:
+        score += 0.10
+    elif roll <= 16:
+        score += 0.04
+    elif roll >= 32:
+        score -= 0.12
+
+    ratio = info.largest_face_ratio
+    if 0.035 <= ratio <= 0.18:
+        score += 0.11
+    elif 0.020 <= ratio <= 0.30:
+        score += 0.05
+    else:
+        score -= 0.04
+
+    eye_line = estimated_eye_line_y(info)
+    if 0.22 <= eye_line <= 0.44:
+        score += 0.10
+    elif 0.16 <= eye_line <= 0.52:
+        score += 0.04
+
+    if 0.36 <= info.face_center_x <= 0.64:
+        score += 0.08
+    elif 0.28 <= info.face_center_x <= 0.72:
+        score += 0.03
+    else:
+        score -= 0.05
+
+    min_dim = min(info.width, info.height)
+    if pixels >= 1_400_000 and min_dim >= 900:
+        score += 0.08
+    elif pixels >= 800_000 and min_dim >= 700:
+        score += 0.05
+    elif min_dim < 450:
+        score -= 0.08
+
+    score += 0.14 * clamp(info.quality, 0.0, 1.0)
+    if info.sharpness >= 45.0:
+        score += 0.06
+    elif info.sharpness >= 30.0:
+        score += 0.03
+    else:
+        score -= 0.08
+
+    if 55.0 <= info.brightness <= 205.0:
+        score += 0.05
+    elif info.brightness < 35.0 or info.brightness > 235.0:
+        score -= 0.07
+
+    return clamp(score, 0.0, 1.0)
+
+
 def face_framing_album_names(info: ImageInfo) -> list[str]:
     aspect = max(info.width, info.height) / max(1, min(info.width, info.height))
     if (
@@ -943,6 +1071,7 @@ def manifest_row(info: ImageInfo, album: str, link: Path) -> dict[str, str]:
         "face_center_y": f"{info.face_center_y:.3f}",
         "face_width_ratio": f"{info.face_width_ratio:.4f}",
         "face_height_ratio": f"{info.face_height_ratio:.4f}",
+        "ai_video_score": f"{video_candidate_score(info):.3f}",
         "nudity_status": info.nudity_status,
         "nudity_class": info.nudity_class,
         "nudity_score": f"{info.nudity_score:.3f}",
@@ -1025,6 +1154,19 @@ def build_for_person(person_dir: Path,
         stats["links"] += linked
         stats["best_links"] += linked
 
+    video_ranked = sorted(
+        [i for i in infos if video_candidate_score(i) >= 0.62],
+        key=lambda i: (-video_candidate_score(i), -i.quality, -i.width * i.height, str(i.rel).lower()),
+    )[:50]
+    if video_ranked:
+        stats["links"] += link_collection(
+            video_ranked,
+            album_root,
+            "03_face_framing/00_best_ai_video_candidates/top_050_ranked",
+            apply,
+            rows,
+        )
+
     for info in infos:
         stats["links"] += 1
         dest = link_image(info, album_root / context_name(info), apply)
@@ -1088,6 +1230,7 @@ def build_for_person(person_dir: Path,
                 "face_center_y",
                 "face_width_ratio",
                 "face_height_ratio",
+                "ai_video_score",
                 "nudity_status",
                 "nudity_class",
                 "nudity_score",
@@ -1148,6 +1291,12 @@ def main() -> int:
                         help=f"InsightFace framing cache. Default: {DEFAULT_FRAMING_CACHE}")
     parser.add_argument("--framing-det-size", type=int, default=1024,
                         help="InsightFace detector size for smart-album framing. Default 1024 for higher quality.")
+    parser.add_argument("--incremental", action="store_true",
+                        help="Skip person folders whose source images and smart-album logic have not changed.")
+    parser.add_argument("--force", action="store_true",
+                        help="Rebuild selected person folders even if incremental state says they are current.")
+    parser.add_argument("--smart-state", type=Path, default=DEFAULT_SMART_STATE,
+                        help=f"Incremental smart-album state file. Default: {DEFAULT_SMART_STATE}")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -1173,6 +1322,37 @@ def main() -> int:
         "nudity_scanned": 0,
         "nudity_images": 0,
     }
+    smart_state = load_smart_state(args.smart_state.expanduser()) if args.incremental and args.apply else None
+    signatures: dict[str, dict[str, int | str]] = {}
+    build_dirs = dirs
+    skipped_count = 0
+    if smart_state is not None and not args.force:
+        build_dirs = []
+        people_state = smart_state.setdefault("people", {})
+        for person_dir in dirs:
+            key = str(person_dir.resolve())
+            sig = person_content_signature(person_dir)
+            signatures[key] = sig
+            existing = people_state.get(key, {})
+            manifest = person_dir / SMART_DIR / "_smart_album_index.csv"
+            if existing.get("signature") == sig and manifest.exists():
+                skipped_count += 1
+            else:
+                build_dirs.append(person_dir)
+        if not args.quiet:
+            print(f"Incremental smart albums: {len(build_dirs)} changed, {skipped_count} unchanged skipped.", flush=True)
+    elif smart_state is not None:
+        for person_dir in dirs:
+            signatures[str(person_dir.resolve())] = person_content_signature(person_dir)
+
+    if not build_dirs:
+        print()
+        print(f"People folder:       {root}")
+        print(f"Person folders:      {len(dirs)}")
+        print(f"Skipped unchanged:   {skipped_count}")
+        print("No smart albums needed rebuilding.")
+        return 0
+
     detector = None
     nudity_cache = {"version": 1, "items": {}}
     nudity_overrides = load_nudity_overrides(args.nudity_overrides.expanduser())
@@ -1192,7 +1372,7 @@ def main() -> int:
         else:
             framing_cache = load_framing_cache(args.framing_cache.expanduser())
 
-    for person_dir in dirs:
+    for person_dir in build_dirs:
         stats = build_for_person(
             person_dir,
             apply=args.apply,
@@ -1215,15 +1395,29 @@ def main() -> int:
             save_nudity_cache(args.nudity_cache.expanduser(), nudity_cache)
         if framing_app is not None:
             save_framing_cache(args.framing_cache.expanduser(), framing_cache)
+        if smart_state is not None and args.apply:
+            key = str(person_dir.resolve())
+            sig = signatures.get(key) or person_content_signature(person_dir)
+            smart_state.setdefault("people", {})[key] = {
+                "signature": sig,
+                "updated_at": int(time.time()),
+                "person": person_dir.name,
+            }
+            save_smart_state(args.smart_state.expanduser(), smart_state)
 
     if detector is not None:
         save_nudity_cache(args.nudity_cache.expanduser(), nudity_cache)
     if framing_app is not None:
         save_framing_cache(args.framing_cache.expanduser(), framing_cache)
+    if smart_state is not None and args.apply:
+        save_smart_state(args.smart_state.expanduser(), smart_state)
 
     print()
     print(f"People folder:       {root}")
     print(f"Person folders:      {len(dirs)}")
+    if args.incremental and args.apply:
+        print(f"Rebuilt people:      {len(build_dirs)}")
+        print(f"Skipped unchanged:   {skipped_count}")
     print(f"Images scanned:      {total['images']}")
     print(f"Best-quality links:  {total['best_links']}")
     print(f"Review-needed links: {total['review_links']}")

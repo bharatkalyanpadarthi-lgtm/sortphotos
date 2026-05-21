@@ -23,8 +23,10 @@ SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
 PEOPLE = SORTED / "photos_by_person"
 SOURCE_REVIEW = SORTED / "_source_review"
 READY = SOURCE_REVIEW / "ready_to_delete"
+TO_PROCESS = Path.home() / "Pictures" / "To Process"
 ADV_REPORT = SOURCE_REVIEW / "duplicate_reports" / "advanced_duplicates.csv"
 FINGERPRINT_CACHE = Path.home() / ".face_sort_cache" / "advanced_duplicate_fingerprints.json"
+SMART_STATE = Path.home() / ".face_sort_cache" / "smart_album_person_state.json"
 IDENTITY_DB = Path.home() / ".face_sort_cache" / "person_identity_db.pkl"
 REFERENCE_DB = Path.home() / ".face_sort_cache" / "reference_centroids.pkl"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
@@ -47,7 +49,7 @@ def count_images(root: Path) -> int:
 def count_dirs(root: Path) -> int:
     if not root.exists():
         return 0
-    return sum(1 for p in root.iterdir() if p.is_dir())
+    return sum(1 for p in root.iterdir() if p.is_dir() and not p.name.startswith("_"))
 
 
 def size_bytes(root: Path) -> int:
@@ -76,14 +78,18 @@ def human_size(n: int) -> str:
 
 
 def identity_count() -> int:
+    return len(identity_names())
+
+
+def identity_names() -> set[str]:
     if not IDENTITY_DB.exists():
-        return 0
+        return set()
     try:
         with IDENTITY_DB.open("rb") as f:
             db = pickle.load(f)
-        return len(getattr(db, "identities", {}))
+        return set(getattr(db, "identities", {}).keys())
     except Exception:
-        return 0
+        return set()
 
 
 def reference_count() -> int:
@@ -155,9 +161,47 @@ def fingerprint_count() -> int:
         return 0
 
 
+def smart_state_count() -> int:
+    if not SMART_STATE.exists():
+        return 0
+    try:
+        with SMART_STATE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return len(data.get("people", {}))
+    except Exception:
+        return 0
+
+
+def count_smart_links(album_name: str | None = None) -> int:
+    if not PEOPLE.exists():
+        return 0
+    total = 0
+    for smart_dir in PEOPLE.glob("*/_smart_albums"):
+        if album_name is None:
+            total += sum(1 for p in smart_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
+            continue
+        target = smart_dir / album_name
+        if target.exists():
+            total += sum(1 for p in target.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
+    return total
+
+
+def identity_alignment() -> dict[str, int]:
+    if not PEOPLE.exists():
+        folders = {}
+    else:
+        folders = {p.name.lower(): p.name for p in PEOPLE.iterdir() if p.is_dir() and not p.name.startswith("_")}
+    identities = {name.lower(): name for name in identity_names()}
+    return {
+        "stale": len([name for key, name in identities.items() if key not in folders]),
+        "missing": len([name for key, name in folders.items() if key not in identities]),
+    }
+
+
 def main() -> int:
     labels = labeling_summary()
     adv = advanced_report_summary()
+    align = identity_alignment()
 
     print("Photo Pipeline Status")
     print("=" * 60)
@@ -166,7 +210,15 @@ def main() -> int:
     print(f"Organized images:       {count_images(PEOPLE)}")
     print(f"People data size:       {human_size(size_bytes(PEOPLE))}")
     print(f"Known identities DB:    {identity_count()} people")
+    print(f"Identity drift:         {align['stale']} stale / {align['missing']} missing")
     print(f"Reference identities:   {reference_count()} people")
+    print(f"To Process images:      {count_images(TO_PROCESS)} ({human_size(size_bytes(TO_PROCESS))})")
+    print()
+    print("Smart albums")
+    print(f"  Incremental tracked:  {smart_state_count()} people")
+    print(f"  Total album links:    {count_smart_links()}")
+    print(f"  AI video candidates:  {count_smart_links('03_face_framing/00_best_ai_video_candidates')}")
+    print(f"  Face uncertain links: {count_smart_links('03_face_framing/90_review/face_detection_uncertain')}")
     print()
     print("Pending labeling")
     print(f"  Remaining clusters:   {labels['remaining']} ({labels['remaining_faces']} faces)")

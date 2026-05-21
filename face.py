@@ -2,10 +2,11 @@
 face.py — Simple launcher for the photo sorting pipeline.
 
 Use the first option for normal day-to-day work: dump new images into
-~/Pictures/To Process, then run `python face.py process`.
+~/Pictures/To Process, then run `python face.py daily`.
 
 Run:
     python face.py             # show compact menu
+    python face.py daily       # full daily end-to-end workflow
     python face.py process     # recommended inbox-only unattended workflow
     python face.py review      # optional: label only larger unknown clusters
     python face.py finish      # finalize labels you already entered
@@ -15,6 +16,8 @@ Run:
     python face.py nudity      # scan sorted people folders for nudity
     python face.py rename      # name/number files inside person folders
     python face.py smart-albums # create hardlinked smart album views
+    python face.py people-cleanup # apply reusable person-folder merge/rename/remove rules
+    python face.py identity-audit # compare identity DB to current person folders
     python face.py backup-review # back up _source_review to external drive
     python face.py health      # validate cache and duplicate status
 """
@@ -28,6 +31,34 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 ACTIONS = [
+    {
+        "key": "daily",
+        "aliases": ["run", "go", "end-to-end"],
+        "label": "Daily End-to-End Run",
+        "desc": "Process new inbox images, place nudity, rename, dedupe, rebuild changed smart albums, then show status",
+        "steps": [
+            {
+                "script": "sort_photos.py",
+                "args": [
+                    str(Path.home() / "Pictures" / "To Process"),
+                    str(Path.home() / "Pictures" / "sorted_all_pictures"),
+                    "--unattended",
+                    "--archive-organized-sources",
+                    "--archive-sources-to-ready-delete",
+                    "--archive-scanned-sources",
+                    "--batch-size", "50",
+                    "--detect-workers", "1",
+                ],
+            },
+            {"script": "separate_nudity_review.py", "args": ["--apply", "--quiet"]},
+            {"script": "place_nudity_inside_person_folders.py", "args": ["--apply", "--remove-review-copies", "--quiet"]},
+            {"script": "rename_person_folder_files.py", "args": ["--apply", "--quiet"]},
+            {"script": "delete_person_folder_duplicates.py", "args": ["--apply", "--quiet"]},
+            {"script": "advanced_duplicate_matching.py", "args": ["--apply", "--quiet"]},
+            {"script": "build_smart_albums.py", "args": ["--apply", "--incremental"]},
+            {"script": "status_report.py"},
+        ],
+    },
     {
         "key": "process",
         "aliases": ["process-new", "process-move", "sort"],
@@ -116,7 +147,21 @@ ACTIONS = [
         "label": "Build Smart Albums",
         "desc": "Create hardlinked smart views for best, quality, framing, format, same-scene, visual-similar, nudity, and review folders",
         "script": "build_smart_albums.py",
-        "args": ["--apply"],
+        "args": ["--apply", "--incremental"],
+    },
+    {
+        "key": "people-cleanup",
+        "aliases": ["folder-cleanup", "person-cleanup"],
+        "label": "Person Folder Cleanup",
+        "desc": "Apply reusable merge/rename/remove rules for photos_by_person. Add --apply after dry-run review",
+        "script": "person_folder_cleanup.py",
+    },
+    {
+        "key": "identity-audit",
+        "aliases": ["audit-id", "audit-identities"],
+        "label": "Identity Audit",
+        "desc": "Check whether the identity DB matches current person folders after cleanup or renames",
+        "script": "identity_audit.py",
     },
     {
         "key": "backup-review",
