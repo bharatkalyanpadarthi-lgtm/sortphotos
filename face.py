@@ -11,8 +11,10 @@ Run:
     python face.py finish      # finalize labels you already entered
     python face.py status      # quick dashboard
     python face.py refs        # rebuild optional Face References DB
+    python face.py clean-refs  # clean/compact Face References then rebuild
     python face.py nudity      # scan sorted people folders for nudity
     python face.py rename      # name/number files inside person folders
+    python face.py smart-albums # create hardlinked smart album views
     python face.py backup-review # back up _source_review to external drive
     python face.py health      # validate cache and duplicate status
 """
@@ -109,6 +111,14 @@ ACTIONS = [
         "args": ["--apply", "--quiet"],
     },
     {
+        "key": "smart-albums",
+        "aliases": ["albums", "smart", "organize-smart"],
+        "label": "Build Smart Albums",
+        "desc": "Create hardlinked smart album views for visual-similar, same-scene, format, and nudity-context groups",
+        "script": "build_smart_albums.py",
+        "args": ["--apply", "--quiet"],
+    },
+    {
         "key": "backup-review",
         "aliases": ["backup", "backup-source-review"],
         "label": "Backup Source Review",
@@ -130,6 +140,16 @@ ACTIONS = [
         "label": "Build Face References",
         "desc": "Maintenance: build optional AI/reference matching DB from ~/Pictures/Face References",
         "script": "build_celeb_centroids.py",
+        "args": ["--max-per-person", "20"],
+        "hidden": True,
+    },
+    {
+        "key": "clean-refs",
+        "aliases": ["clean-references", "optimize-refs"],
+        "label": "Clean Face References",
+        "desc": "Keep best reference images per person, move duplicates/extras to review, then rebuild references",
+        "script": "clean_face_references.py",
+        "args": ["--apply", "--rebuild", "--quiet"],
         "hidden": True,
     },
     {

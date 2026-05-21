@@ -25,6 +25,7 @@ DEFAULT_INPUT = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_pe
 DEFAULT_OUTPUT = Path.home() / "Pictures" / "sorted_all_pictures" / "_nudity_review"
 EXCLUDED_DIRS = {
     "_possible_nudity",
+    "_smart_albums",
     "_uncertain_nudity",
 }
 

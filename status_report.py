@@ -29,13 +29,19 @@ IDENTITY_DB = Path.home() / ".face_sort_cache" / "person_identity_db.pkl"
 REFERENCE_DB = Path.home() / ".face_sort_cache" / "reference_centroids.pkl"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
               ".tif", ".tiff", ".heic", ".heif"}
+EXCLUDED_DIRS = {"_duplicates", "_near_visual_review", "_smart_albums"}
 
 
 def count_images(root: Path) -> int:
     if not root.exists():
         return 0
-    return sum(1 for p in root.rglob("*")
-               if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
+    total = 0
+    for p in root.rglob("*"):
+        if any(part in EXCLUDED_DIRS for part in p.parts):
+            continue
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
+            total += 1
+    return total
 
 
 def count_dirs(root: Path) -> int:
@@ -49,6 +55,8 @@ def size_bytes(root: Path) -> int:
         return 0
     total = 0
     for p in root.rglob("*"):
+        if any(part in EXCLUDED_DIRS for part in p.parts):
+            continue
         if p.is_file():
             try:
                 total += p.stat().st_size

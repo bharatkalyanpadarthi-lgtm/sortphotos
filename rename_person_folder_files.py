@@ -23,7 +23,8 @@ DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_p
 
 def iter_images(person_dir: Path) -> list[Path]:
     out: list[Path] = []
-    for dirpath, _dirnames, filenames in os.walk(person_dir):
+    for dirpath, dirnames, filenames in os.walk(person_dir):
+        dirnames[:] = [d for d in dirnames if d != "_smart_albums"]
         base = Path(dirpath)
         for filename in filenames:
             p = base / filename

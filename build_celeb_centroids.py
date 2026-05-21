@@ -23,14 +23,17 @@ Folder name conventions:
   - Folders with fewer than --min-images usable photos are skipped
 
 Usage:
-    python build_celeb_centroids.py REF_DIR OUTPUT.pkl [--min-images 3] [--max-per-person 10]
+    python build_celeb_centroids.py REF_DIR OUTPUT.pkl [--min-images 3] [--max-per-person 20]
 
 Example:
     python build_celeb_centroids.py ~/Downloads/bollywood_db celeb_centroids.pkl
 """
 
 import argparse
+import gc
 import pickle
+import shutil
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -50,6 +53,7 @@ from sort_photos import (  # type: ignore
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".heic", ".heif"}
 DEFAULT_REF_DIR = Path.home() / "Pictures" / "Face References"
+DEFAULT_CHUNK_SIZE = 25
 
 
 def direct_crop_embedding(img, app) -> np.ndarray | None:
@@ -81,19 +85,19 @@ def best_face_embedding(img, app) -> tuple[np.ndarray | None, str]:
     """Highest-confidence face in img -> embedding and method."""
     if img is None:
         return None, "decode_failed"
+    fallback = direct_crop_embedding(img, app)
+    if fallback is not None:
+        return fallback, "crop_direct"
     faces = app.get(img)
     if not faces:
-        fallback = direct_crop_embedding(img, app)
-        return (fallback, "crop_fallback") if fallback is not None else (None, "no_face")
+        return None, "no_face"
     valid = [f for f in faces if float(getattr(f, "det_score", 0)) >= MIN_DET_SCORE]
     if not valid:
-        fallback = direct_crop_embedding(img, app)
-        return (fallback, "crop_fallback") if fallback is not None else (None, "low_score")
+        return None, "low_score"
     best = max(valid, key=lambda f: float(f.det_score))
     emb = getattr(best, "normed_embedding", None)
     if emb is None:
-        fallback = direct_crop_embedding(img, app)
-        return (fallback, "crop_fallback") if fallback is not None else (None, "no_embedding")
+        return None, "no_embedding"
     return np.asarray(emb, dtype=np.float32), "detected"
 
 
@@ -102,6 +106,111 @@ def l2_normalize(v: np.ndarray) -> np.ndarray:
     if n < 1e-9:
         return v.astype(np.float32)
     return (v / n).astype(np.float32)
+
+
+def reference_person_dirs(ref_dir: Path) -> list[Path]:
+    return [
+        d for d in sorted(ref_dir.iterdir())
+        if d.is_dir() and not d.name.startswith("_")
+    ]
+
+
+def save_payload(output: Path,
+                 names: list[str],
+                 centroids: list[np.ndarray],
+                 counts: list[int]) -> None:
+    payload = {
+        "version": 1,
+        "model": MODEL_NAME,
+        "names": names,
+        "centroids": np.stack(centroids).astype(np.float32),
+        "counts": counts,
+    }
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    tmp = output.with_suffix(output.suffix + ".tmp")
+    with tmp.open("wb") as f:
+        pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp.replace(output)
+
+
+def build_in_chunks(args: argparse.Namespace, actresses: list[Path]) -> int:
+    """Run short-lived worker processes and merge their centroid outputs.
+
+    ONNX Runtime can keep CPU memory arenas alive for the life of the process.
+    Rebuilding a large reference set in chunks releases that memory between
+    batches and prevents macOS from pausing Terminal for application memory.
+    """
+    chunk_size = max(1, int(args.chunk_size))
+    parts_dir = args.output.parent / f".{args.output.stem}_parts"
+    shutil.rmtree(parts_dir, ignore_errors=True)
+    parts_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Found {len(actresses)} subfolders.")
+    print(f"Building in chunks of {chunk_size} people to keep memory bounded.\n")
+
+    part_paths: list[Path] = []
+    script = Path(__file__).resolve()
+    for start in range(0, len(actresses), chunk_size):
+        end = min(start + chunk_size, len(actresses))
+        part_path = parts_dir / f"part_{start:04d}_{end:04d}.pkl"
+        part_paths.append(part_path)
+        cmd = [
+            sys.executable,
+            str(script),
+            str(args.ref_dir),
+            str(part_path),
+            "--min-images", str(args.min_images),
+            "--max-per-person", str(args.max_per_person),
+            "--det-size", str(args.det_size),
+            "--chunk-size", "0",
+            "--person-start", str(start),
+            "--person-limit", str(chunk_size),
+            "--allow-empty",
+        ]
+        print(f"Chunk {start // chunk_size + 1}: people {start + 1}-{end}")
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            print(f"\nChunk failed with exit code {result.returncode}: {start + 1}-{end}",
+                  file=sys.stderr)
+            return result.returncode
+        print()
+
+    names: list[str] = []
+    centroids: list[np.ndarray] = []
+    counts: list[int] = []
+    seen: set[str] = set()
+    for part_path in part_paths:
+        if not part_path.exists():
+            continue
+        with part_path.open("rb") as f:
+            payload = pickle.load(f)
+        part_names = list(payload.get("names", []))
+        part_centroids = np.asarray(payload.get("centroids", []), dtype=np.float32)
+        part_counts = list(payload.get("counts", []))
+        if part_centroids.ndim != 2 or len(part_names) != len(part_centroids):
+            print(f"Skipping malformed chunk output: {part_path}", file=sys.stderr)
+            continue
+        for i, name in enumerate(part_names):
+            clean = str(name).strip()
+            if not clean or clean in seen:
+                continue
+            seen.add(clean)
+            names.append(clean)
+            centroids.append(l2_normalize(part_centroids[i]))
+            counts.append(int(part_counts[i]) if i < len(part_counts) else 0)
+
+    if not names:
+        print("\nNo actresses passed the threshold. Nothing saved.")
+        return 1
+
+    save_payload(args.output, names, centroids, counts)
+    shutil.rmtree(parts_dir, ignore_errors=True)
+
+    print(f"Saved {len(names)} centroids to {args.output}")
+    print(f"Model: {MODEL_NAME}")
+    return 0
 
 
 def main() -> int:
@@ -115,8 +224,18 @@ def main() -> int:
                    help=f"Output pickle path. Default: {REFERENCE_CENTROIDS_FILE}")
     p.add_argument("--min-images", type=int, default=3,
                    help="Skip actresses with fewer than this many usable photos. Default 3.")
-    p.add_argument("--max-per-person", type=int, default=10,
-                   help="Cap photos used per actress. Default 10 (fast and usually enough for reference matching).")
+    p.add_argument("--max-per-person", type=int, default=20,
+                   help="Cap photos used per actress. Default 20 for higher-quality reference matching.")
+    p.add_argument("--det-size", type=int, default=1024,
+                   help="InsightFace detection size. Default 1024 for quality.")
+    p.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE,
+                   help=f"People per worker process. Default {DEFAULT_CHUNK_SIZE}; use 0 to disable chunking.")
+    p.add_argument("--person-start", type=int, default=0,
+                   help=argparse.SUPPRESS)
+    p.add_argument("--person-limit", type=int, default=0,
+                   help=argparse.SUPPRESS)
+    p.add_argument("--allow-empty", action="store_true",
+                   help=argparse.SUPPRESS)
     args = p.parse_args()
 
     if not args.ref_dir.is_dir():
@@ -128,14 +247,23 @@ def main() -> int:
         print("Then rerun: python face.py refs")
         return 1
 
-    print(f"Initializing InsightFace ({MODEL_NAME})...")
-    app = _build_app()
-    print()
-
-    actresses = [d for d in sorted(args.ref_dir.iterdir()) if d.is_dir()]
+    actresses = reference_person_dirs(args.ref_dir)
     if not actresses:
         print(f"No subfolders found in {args.ref_dir}", file=sys.stderr)
         return 1
+
+    if args.person_start or args.person_limit:
+        start = max(0, int(args.person_start))
+        limit = max(0, int(args.person_limit))
+        actresses = actresses[start:start + limit if limit else None]
+
+    if args.chunk_size > 0 and not args.person_start and not args.person_limit and len(actresses) > args.chunk_size:
+        return build_in_chunks(args, actresses)
+
+    sort_photos.DET_SIZE = (max(320, int(args.det_size)), max(320, int(args.det_size)))
+    print(f"Initializing InsightFace ({MODEL_NAME}, det_size={sort_photos.DET_SIZE[0]})...")
+    app = _build_app()
+    print()
 
     print(f"Found {len(actresses)} subfolders.\n")
 
@@ -171,10 +299,14 @@ def main() -> int:
                     no_face_count[name] += 1
             except Exception as exc:  # noqa: BLE001
                 print(f"    skipped {img_path.name}: {exc}")
+            finally:
+                img = None
+                emb = None
         methods = " ".join(f"{k}={v}" for k, v in sorted(method_count[name].items()))
         if methods:
             methods = f" ({methods})"
         print(f"  {name:<32} usable={len(by_name[name]):<4} no_face={no_face_count[name]}{methods}")
+        gc.collect()
 
     names: list[str] = []
     centroids: list[np.ndarray] = []
@@ -198,20 +330,9 @@ def main() -> int:
 
     if not names:
         print("\nNo actresses passed the threshold. Nothing saved.")
-        return 1
+        return 0 if args.allow_empty else 1
 
-    payload = {
-        "version": 1,
-        "model": MODEL_NAME,
-        "names": names,
-        "centroids": np.stack(centroids).astype(np.float32),
-        "counts": counts,
-    }
-
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("wb") as f:
-        pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+    save_payload(args.output, names, centroids, counts)
 
     print()
     print(f"Saved {len(names)} centroids to {args.output}")

@@ -35,7 +35,7 @@ DEFAULT_REVIEW = DEFAULT_SORTED / "_source_review" / "ready_to_delete" / "advanc
 DEFAULT_REPORT = DEFAULT_SORTED / "_source_review" / "duplicate_reports" / "advanced_duplicates.csv"
 DEFAULT_CACHE = Path.home() / ".face_sort_cache" / "advanced_duplicate_fingerprints.json"
 CACHE_VERSION = 1
-ALWAYS_EXCLUDED_DIRS = {"videos"}
+ALWAYS_EXCLUDED_DIRS = {"videos", "_duplicates", "_near_visual_review", "_smart_albums"}
 
 
 @dataclass(frozen=True)

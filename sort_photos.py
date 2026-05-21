@@ -175,6 +175,7 @@ INVALID_NAME_CHARS = '/\\:*?"<>|'
 DEFAULT_EXCLUDED_SCAN_DIRS = {
     "Celebrities",
     "_nudity_review",
+    "_smart_albums",
     "_source_review",
     "duplicate_to_review",
     "Face References",
@@ -186,6 +187,9 @@ DEFAULT_EXCLUDED_SCAN_DIRS = {
     "videos",
 }
 ALWAYS_EXCLUDED_SCAN_DIRS = {
+    "_duplicates",
+    "_near_visual_review",
+    "_smart_albums",
     "videos",
 }
 
