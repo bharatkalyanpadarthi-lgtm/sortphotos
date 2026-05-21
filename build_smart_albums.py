@@ -380,8 +380,6 @@ def face_framing_album_names(info: ImageInfo) -> list[str]:
     if info.face_count == 0:
         return ["03_face_framing/framing_unknown"]
     names: list[str] = []
-    if info.face_count > 1:
-        names.append("03_face_framing/multiple_faces")
     ratio = info.largest_face_ratio
     if ratio >= 0.16:
         names.append("03_face_framing/closeup_face")
