@@ -114,7 +114,7 @@ ACTIONS = [
         "key": "smart-albums",
         "aliases": ["albums", "smart", "organize-smart"],
         "label": "Build Smart Albums",
-        "desc": "Create hardlinked smart album views for visual-similar, same-scene, format, and nudity-context groups",
+        "desc": "Create hardlinked smart views for best, quality, framing, format, same-scene, visual-similar, nudity, and review folders",
         "script": "build_smart_albums.py",
         "args": ["--apply", "--quiet"],
     },
