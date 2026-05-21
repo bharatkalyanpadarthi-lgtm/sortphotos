@@ -19,6 +19,7 @@ Run:
     python face.py people-cleanup # apply reusable person-folder merge/rename/remove rules
     python face.py identity-audit # compare identity DB to current person folders
     python face.py backup-review # back up _source_review to external drive
+    python face.py duplicate-review # browser review for near-visual duplicates
     python face.py health      # validate cache and duplicate status
 """
 
@@ -169,6 +170,13 @@ ACTIONS = [
         "label": "Backup Source Review",
         "desc": "Sync _source_review to /Volumes/Photos & Videos  Backup and verify counts",
         "script": "backup_source_review.py",
+    },
+    {
+        "key": "duplicate-review",
+        "aliases": ["review-duplicates", "near-visual-review", "visual-review"],
+        "label": "Review Near-Visual Duplicates",
+        "desc": "Open a local browser review page for near-visual duplicate candidates",
+        "script": "near_visual_review.py",
     },
     {
         "key": "rebuild-id",
