@@ -5,8 +5,8 @@ Build non-destructive smart albums inside photos_by_person folders.
 The script keeps original images where they are and creates hardlinked views:
 
   photos_by_person/Anushka/_smart_albums/
-      00_best/top_020_quality/
-      01_quality/sharp_large/
+      00_best/top_020_technical_quality/
+      01_quality/large_high_score/
       02_format/portrait/
       03_face_framing/closeup_face/
       04_visual_similar/001_12_photos_portrait_from_Anushka_023/
@@ -380,18 +380,16 @@ def quality_album_names(info: ImageInfo) -> list[str]:
     pixels = info.width * info.height
     min_dim = min(info.width, info.height)
     if info.quality >= 0.68 and pixels >= 800_000:
-        names.append("01_quality/sharp_large")
+        names.append("01_quality/large_high_score")
     if info.sharpness < 25.0:
         names.append("01_quality/low_sharpness_score")
     if min_dim < 450 or pixels < 350_000:
-        names.append("01_quality/small")
-        names.append("07_review_needed/small")
+        names.append("01_quality/low_resolution")
+        names.append("07_review_needed/low_resolution")
     if info.brightness < 45.0:
-        names.append("01_quality/dark")
-        names.append("07_review_needed/dark")
+        names.append("01_quality/low_brightness_score")
     elif info.brightness > 220.0:
-        names.append("01_quality/overexposed")
-        names.append("07_review_needed/overexposed")
+        names.append("01_quality/high_brightness_score")
     return names
 
 
@@ -496,7 +494,13 @@ def build_for_person(person_dir: Path,
     best = sorted(infos, key=lambda i: (-i.quality, -i.width * i.height, str(i.rel).lower()))
     top_n = min(20, len(best))
     if top_n:
-        linked = link_collection(best[:top_n], album_root, f"00_best/top_{top_n:03d}_quality", apply, rows)
+        linked = link_collection(
+            best[:top_n],
+            album_root,
+            f"00_best/top_{top_n:03d}_technical_quality",
+            apply,
+            rows,
+        )
         stats["links"] += linked
         stats["best_links"] += linked
 
