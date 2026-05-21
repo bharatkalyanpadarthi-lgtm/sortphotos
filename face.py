@@ -67,12 +67,13 @@ ACTIONS = [
         "key": "process-all",
         "aliases": ["scan-all-pictures"],
         "label": "Process All Pictures",
-        "desc": "Full scan of ~/Pictures with nudity placement. Slower; use only when old source folders must be swept again",
+        "desc": "Full scan of ~/Pictures without automatic nudity moves. Slower; use only when old source folders must be swept again",
         "script": "sort_photos.py",
         "args": [
             "--unattended",
             "--archive-organized-sources",
             "--archive-sources-to-ready-delete",
+            "--no-nudity-sort",
             "--batch-size", "50",
             "--detect-workers", "1",
         ],
@@ -108,7 +109,7 @@ ACTIONS = [
         "key": "nudity",
         "aliases": ["nudity-check", "scan-nudity"],
         "label": "Run Nudity Check",
-        "desc": "Scan all sorted person folders and move flagged images into each person's nudity subfolders",
+        "desc": "Optional manual command: scan sorted person folders and move reviewed flagged images into nudity subfolders",
         "steps": [
             {
                 "script": "separate_nudity_review.py",

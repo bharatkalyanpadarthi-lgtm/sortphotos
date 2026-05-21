@@ -77,6 +77,8 @@ There is no separate `06_nudity/` smart-album section anymore. Nude or possible-
 
 This keeps scene, outfit, quality, and framing folders useful while still separating nude images inside each folder.
 
+Automatic nudity movement is disabled in the normal scan and daily flow. New images stay in each person's normal `photos/` folder unless you explicitly run `python face.py nudity` for a separate review pass.
+
 ## Why Visual Similar And Same Scene Are Separate
 
 `04_visual_similar/` is stricter. It is best for near duplicates and same-looking frames.

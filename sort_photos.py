@@ -125,7 +125,10 @@ INTERACTIVE_LABELING = True
 DEDUP_DUPLICATES     = True
 REVIEW_CLOSE_PAIRS   = True
 USE_AI_SUGGESTIONS   = True
-NUDITY_SORT_ENABLED  = True
+# Keep new scans conservative by default. Nudity detection can be useful, but
+# false positives previously moved normal photos out of each person's main
+# `photos/` folder. Use explicit nudity commands when you want to review it.
+NUDITY_SORT_ENABLED  = False
 
 MAKE_MONTAGES   = True
 MONTAGE_COLS    = 6
