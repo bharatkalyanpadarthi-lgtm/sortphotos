@@ -182,6 +182,12 @@ AI_PROMPT = (
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
               ".tif", ".tiff", ".heic", ".heif"}
+VIDEO_EXTS = {
+    ".3g2", ".3gp", ".avi", ".m4v", ".mkv", ".mov", ".mp4",
+    ".mpeg", ".mpg", ".mts", ".m2ts", ".webm", ".wmv",
+}
+TO_PROCESS_DIR = Path.home() / "Pictures" / "To Process"
+VIDEOS_DIR = Path.home() / "Pictures" / "videos"
 INVALID_NAME_CHARS = '/\\:*?"<>|'
 DEFAULT_EXCLUDED_SCAN_DIRS = {
     "Celebrities",
@@ -313,6 +319,69 @@ def iter_images(root: Path,
             p = base / filename
             if p.suffix.lower() in IMAGE_EXTS:
                 yield p
+
+
+def iter_videos(root: Path) -> Iterable[Path]:
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d != ".DS_Store" and not d.startswith(".")]
+        base = Path(dirpath)
+        for filename in filenames:
+            p = base / filename
+            if p.suffix.lower() in VIDEO_EXTS:
+                yield p
+
+
+def prune_empty_dirs(root: Path) -> int:
+    removed = 0
+    if not root.exists():
+        return removed
+    for dirpath, dirnames, filenames in os.walk(root, topdown=False):
+        path = Path(dirpath)
+        if path == root:
+            continue
+        try:
+            if not dirnames and not filenames:
+                path.rmdir()
+                removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+def move_to_process_videos(input_dir: Path, videos_dir: Path = VIDEOS_DIR) -> int:
+    try:
+        resolved_input = input_dir.expanduser().resolve()
+        resolved_to_process = TO_PROCESS_DIR.resolve()
+    except OSError:
+        return 0
+    if resolved_input != resolved_to_process:
+        return 0
+
+    videos = list(iter_videos(resolved_input))
+    if not videos:
+        return 0
+
+    moved = 0
+    videos_dir = videos_dir.expanduser().resolve()
+    for src in sorted(videos, key=lambda p: str(p).lower()):
+        if not src.exists():
+            continue
+        try:
+            rel = src.resolve().relative_to(resolved_input)
+        except ValueError:
+            rel = Path(src.name)
+        dest = unique_path(videos_dir / rel)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.move(str(src), str(dest))
+            moved += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("Could not move video %s to %s: %s", src, dest, e)
+    if moved:
+        removed = prune_empty_dirs(resolved_input)
+        log.info("Moved %d video file(s) from To Process to %s; removed %d empty folder(s).",
+                 moved, videos_dir, removed)
+    return moved
 
 
 def imread_unicode(path: Path) -> np.ndarray | None:
@@ -2899,6 +2968,8 @@ def main() -> int:
     if not input_dir.exists():
         log.error("Input folder does not exist: %s", input_dir)
         return 2
+
+    move_to_process_videos(input_dir)
 
     if args.reset_cache:
         if CACHE_FILE.exists():

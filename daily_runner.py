@@ -34,6 +34,10 @@ STATE_FILE = Path.home() / ".face_sort_cache" / "daily_run_state.json"
 SUMMARY_DIR = SOURCE_REVIEW / "daily_run_summaries"
 ADV_REPORT = SOURCE_REVIEW / "duplicate_reports" / "advanced_duplicates.csv"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
+VIDEO_EXTS = {
+    ".3g2", ".3gp", ".avi", ".m4v", ".mkv", ".mov", ".mp4",
+    ".mpeg", ".mpg", ".mts", ".m2ts", ".webm", ".wmv",
+}
 SMART_DIRS = {"_smart_albums", "_duplicates", "_near_visual_review"}
 
 
@@ -49,6 +53,18 @@ def count_images(root: Path) -> int:
         if any(part in SMART_DIRS for part in p.parts):
             continue
         if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
+            total += 1
+    return total
+
+
+def count_videos(root: Path) -> int:
+    if not root.exists():
+        return 0
+    total = 0
+    for p in root.rglob("*"):
+        if any(part in SMART_DIRS for part in p.parts):
+            continue
+        if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
             total += 1
     return total
 
@@ -139,6 +155,7 @@ def snapshot() -> dict:
     labels = labeling_remaining()
     return {
         "to_process_images": count_images(TO_PROCESS),
+        "to_process_videos": count_videos(TO_PROCESS),
         "organized_images": count_images(PEOPLE),
         "nudity_images": nudity_count(),
         "ready_to_delete_files": count_files(READY),
@@ -340,6 +357,7 @@ def print_summary(before: dict, after: dict, summary_path: Path) -> None:
     print("=" * 60)
     print(f"New organized images:       {delta(after, before, 'organized_images')}")
     print(f"To Process before/after:    {before['to_process_images']} -> {after['to_process_images']}")
+    print(f"To Process videos moved:    {before.get('to_process_videos', 0)} -> {after.get('to_process_videos', 0)}")
     print(f"Nudity-folder image change: {delta(after, before, 'nudity_images')}")
     print(f"Archived organized sources: +{delta(after, before, 'organized_sources_files')}")
     print(f"Archived scanned sources:   +{delta(after, before, 'scanned_sources_files')}")
@@ -352,12 +370,16 @@ def print_summary(before: dict, after: dict, summary_path: Path) -> None:
 
 def print_dry_run(steps: list[dict], before: dict, profile: dict,
                   full_maintenance: bool, backup_prompt: bool) -> None:
-    empty_inbox = int(before.get("to_process_images", 0)) == 0
+    empty_inbox = (
+        int(before.get("to_process_images", 0)) == 0
+        and int(before.get("to_process_videos", 0)) == 0
+    )
     print("Daily Dry Run")
     print("=" * 60)
     print(f"Sorted folder:              {SORTED}")
     print(f"Input folder:               {TO_PROCESS}")
     print(f"To Process images:          {before['to_process_images']}")
+    print(f"To Process videos:          {before.get('to_process_videos', 0)}")
     print(f"Organized images:           {before['organized_images']}")
     print(f"_source_review files:       {cleanup_holding_count():,}")
     if profile.get("available_mb") is not None:
@@ -440,7 +462,10 @@ def main() -> int:
     log_path = SUMMARY_DIR / f"daily_run_{state['run_id']}.log"
     summary_path = SUMMARY_DIR / f"daily_run_{state['run_id']}.json"
     steps = step_list(batch_size)
-    empty_inbox = int(before.get("to_process_images", 0)) == 0
+    empty_inbox = (
+        int(before.get("to_process_images", 0)) == 0
+        and int(before.get("to_process_videos", 0)) == 0
+    )
     skip_when_empty = destructive_step_names()
     will_run_destructive = any(
         not (empty_inbox and not args.full_maintenance and step["name"] in skip_when_empty)

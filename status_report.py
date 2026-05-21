@@ -31,6 +31,10 @@ IDENTITY_DB = Path.home() / ".face_sort_cache" / "person_identity_db.pkl"
 REFERENCE_DB = Path.home() / ".face_sort_cache" / "reference_centroids.pkl"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
               ".tif", ".tiff", ".heic", ".heif"}
+VIDEO_EXTS = {
+    ".3g2", ".3gp", ".avi", ".m4v", ".mkv", ".mov", ".mp4",
+    ".mpeg", ".mpg", ".mts", ".m2ts", ".webm", ".wmv",
+}
 EXCLUDED_DIRS = {"_duplicates", "_near_visual_review", "_smart_albums"}
 
 
@@ -42,6 +46,18 @@ def count_images(root: Path) -> int:
         if any(part in EXCLUDED_DIRS for part in p.parts):
             continue
         if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
+            total += 1
+    return total
+
+
+def count_videos(root: Path) -> int:
+    if not root.exists():
+        return 0
+    total = 0
+    for p in root.rglob("*"):
+        if any(part in EXCLUDED_DIRS for part in p.parts):
+            continue
+        if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
             total += 1
     return total
 
@@ -213,6 +229,7 @@ def main() -> int:
     print(f"Identity drift:         {align['stale']} stale / {align['missing']} missing")
     print(f"Reference identities:   {reference_count()} people")
     print(f"To Process images:      {count_images(TO_PROCESS)} ({human_size(size_bytes(TO_PROCESS))})")
+    print(f"To Process videos:      {count_videos(TO_PROCESS)}")
     print()
     print("Smart albums")
     print(f"  Incremental tracked:  {smart_state_count()} people")
