@@ -829,7 +829,7 @@ def face_framing_album_names(info: ImageInfo) -> list[str]:
         return ["03_face_framing/90_review/face_detection_uncertain"]
 
     names: list[str] = []
-    if info.face_count >= 8 or (info.face_count >= 5 and info.largest_face_ratio < 0.045):
+    if info.face_count >= 8 and info.largest_face_ratio < 0.025:
         names.append("03_face_framing/90_review/contact_sheet_or_collage")
         return names
     if info.face_count >= 3:
