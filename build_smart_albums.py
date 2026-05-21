@@ -48,7 +48,7 @@ DEFAULT_NUDITY_OVERRIDES = Path.home() / ".face_sort_cache" / "smart_album_nudit
 DEFAULT_FRAMING_CACHE = Path.home() / ".face_sort_cache" / "smart_album_framing_cache.json"
 DEFAULT_SMART_STATE = Path.home() / ".face_sort_cache" / "smart_album_person_state.json"
 FRAMING_CACHE_VERSION = 2
-SMART_ALBUM_LOGIC_VERSION = 4
+SMART_ALBUM_LOGIC_VERSION = 5
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
 SMART_DIR = "_smart_albums"
 EXCLUDED_DIRS = {
@@ -64,6 +64,19 @@ NUDITY_NESTED_DIRS = {
     "_possible_nudity": "_nudity_possible",
     "_uncertain_nudity": "_nudity_uncertain",
 }
+AI_VIDEO_REFERENCE_FOLDERS = [
+    "03_face_framing/06_ai_video_reference_set/00_best_single_starting_image",
+    "03_face_framing/06_ai_video_reference_set/01_front_facing_portrait_chest_up",
+    "03_face_framing/06_ai_video_reference_set/02_three_quarter_left_waist_up",
+    "03_face_framing/06_ai_video_reference_set/03_three_quarter_right_waist_up",
+    "03_face_framing/06_ai_video_reference_set/04_full_body_front_view",
+    "03_face_framing/06_ai_video_reference_set/05_full_body_three_quarter",
+    "03_face_framing/06_ai_video_reference_set/06_side_profile_chest_up",
+    "03_face_framing/06_ai_video_reference_set/07_talking_head_refs",
+    "03_face_framing/06_ai_video_reference_set/08_cinematic_portrait_refs",
+    "03_face_framing/06_ai_video_reference_set/09_walking_action_refs",
+    "03_face_framing/06_ai_video_reference_set/10_orbit_head_turn_refs",
+]
 EXPLICIT_NUDITY_CLASSES = {
     "FEMALE_BREAST_EXPOSED",
     "FEMALE_GENITALIA_EXPOSED",
@@ -946,6 +959,97 @@ def video_candidate_score(info: ImageInfo) -> float:
     return clamp(score, 0.0, 1.0)
 
 
+def is_eye_level_reference(info: ImageInfo) -> bool:
+    if info.face_count > 2:
+        return False
+    eye_line = estimated_eye_line_y(info)
+    return abs(info.face_roll) <= 14.0 and 0.18 <= eye_line <= 0.50
+
+
+def is_reference_quality(info: ImageInfo, min_score: float = 0.46) -> bool:
+    pixels = info.width * info.height
+    return (
+        info.face_count >= 1
+        and pixels >= 350_000
+        and min(info.width, info.height) >= 450
+        and info.quality >= min_score
+        and info.sharpness >= 25.0
+        and 40.0 <= info.brightness <= 225.0
+    )
+
+
+def shot_framing(info: ImageInfo) -> str:
+    """Approximate person framing from face size when body keypoints are unavailable."""
+    ratio = info.largest_face_ratio
+    face_height = info.face_height_ratio
+    if ratio >= 0.090 or face_height >= 0.36:
+        return "portrait"
+    if ratio >= 0.055 or face_height >= 0.26:
+        return "chest_up"
+    if ratio >= 0.028 or face_height >= 0.16:
+        return "waist_up"
+    return "full_body"
+
+
+def ai_video_reference_album_names(info: ImageInfo) -> list[str]:
+    """Shot-list folders for building a small identity reference set."""
+    if not is_reference_quality(info):
+        return []
+
+    names: list[str] = []
+    angle = info.face_angle
+    framing = shot_framing(info)
+    side_profile = angle in {"side_angle_left", "side_angle_right"}
+    front = angle == "front_facing" and abs(info.face_roll) <= 12.0
+    three_quarter_left = angle == "turned_left" and abs(info.face_roll) <= 18.0
+    three_quarter_right = angle == "turned_right" and abs(info.face_roll) <= 18.0
+    three_quarter = three_quarter_left or three_quarter_right
+    eye_level = is_eye_level_reference(info)
+    centered = 0.30 <= info.face_center_x <= 0.70
+    portrait_or_chest = framing in {"portrait", "chest_up"}
+    medium_or_waist = framing in {"chest_up", "waist_up"}
+    full_body = (
+        framing == "full_body"
+        or (info.largest_face_ratio <= 0.065 and info.face_height_ratio <= 0.30)
+    )
+
+    base = "03_face_framing/06_ai_video_reference_set"
+    if front and eye_level and portrait_or_chest:
+        names.append(f"{base}/01_front_facing_portrait_chest_up")
+        names.append(f"{base}/07_talking_head_refs")
+        names.append(f"{base}/10_orbit_head_turn_refs")
+    if three_quarter_left and eye_level and medium_or_waist:
+        names.append(f"{base}/02_three_quarter_left_waist_up")
+        names.append(f"{base}/08_cinematic_portrait_refs")
+        names.append(f"{base}/10_orbit_head_turn_refs")
+    if three_quarter_right and eye_level and medium_or_waist:
+        names.append(f"{base}/03_three_quarter_right_waist_up")
+        names.append(f"{base}/08_cinematic_portrait_refs")
+        names.append(f"{base}/10_orbit_head_turn_refs")
+    if front and eye_level and full_body and centered:
+        names.append(f"{base}/04_full_body_front_view")
+        names.append(f"{base}/09_walking_action_refs")
+    if three_quarter and eye_level and full_body and centered:
+        names.append(f"{base}/05_full_body_three_quarter")
+        names.append(f"{base}/09_walking_action_refs")
+    if side_profile and portrait_or_chest and abs(info.face_roll) <= 18.0:
+        names.append(f"{base}/06_side_profile_chest_up")
+        names.append(f"{base}/10_orbit_head_turn_refs")
+
+    best_single = (
+        three_quarter
+        and eye_level
+        and medium_or_waist
+        and centered
+        and video_candidate_score(info) >= 0.58
+    )
+    if best_single:
+        names.append(f"{base}/00_best_single_starting_image")
+        names.append("03_face_framing/00_best_ai_video_candidates")
+
+    return sorted(set(names))
+
+
 def face_framing_album_names(info: ImageInfo) -> list[str]:
     aspect = max(info.width, info.height) / max(1, min(info.width, info.height))
     if (
@@ -1003,6 +1107,8 @@ def face_framing_album_names(info: ImageInfo) -> list[str]:
         names.append("03_face_framing/04_medium_or_full_body")
     if slight_low_angle_chest_up:
         names.append("03_face_framing/05_slight_low_angle_chest_up")
+
+    names.extend(ai_video_reference_album_names(info))
 
     if is_video_quality_candidate(info) and (
         "03_face_framing/01_front_facing_straight_on" in names
@@ -1139,6 +1245,9 @@ def build_for_person(person_dir: Path,
     if apply:
         clear_smart_albums(person_dir)
     album_root = person_dir / SMART_DIR
+    if apply:
+        for folder in AI_VIDEO_REFERENCE_FOLDERS:
+            (album_root / folder).mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, str]] = []
 
     best = sorted(infos, key=lambda i: (-i.quality, -i.width * i.height, str(i.rel).lower()))
