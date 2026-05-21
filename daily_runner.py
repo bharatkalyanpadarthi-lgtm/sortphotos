@@ -7,6 +7,9 @@ Use this through:
 
 If a step fails or the run is interrupted, resume with:
   python face.py daily --resume
+
+Preview without moving files:
+  python face.py daily --dry-run
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -216,6 +220,51 @@ def memory_profile() -> dict:
     return {"available_mb": mb, "batch_size": 50, "ok": True, "message": "normal"}
 
 
+def destructive_step_names() -> set[str]:
+    return {
+        "process", "nudity-scan", "nudity-place", "rename",
+        "exact-dedupe", "advanced-dedupe", "smart-albums",
+    }
+
+
+def cleanup_holding_count() -> int:
+    return count_files(SOURCE_REVIEW)
+
+
+def offer_backup_before_cleanup(noninteractive: bool) -> int:
+    if noninteractive:
+        print("Backup prompt skipped because this run is non-interactive.")
+        return 0
+    if cleanup_holding_count() == 0:
+        print("Backup prompt skipped: _source_review is empty.")
+        return 0
+    if not shutil.which("rsync"):
+        print("WARNING: rsync was not found; skipping backup prompt.")
+        return 0
+    print()
+    print("Safety backup")
+    print("=" * 60)
+    print(f"_source_review currently contains {count_files(SOURCE_REVIEW):,} files.")
+    print("Before cleanup/move steps, you can mirror it to the external drive.")
+    print("The backup script verifies the copy and asks again before deleting local files.")
+    try:
+        ans = input("Run verified _source_review backup now? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("Backup prompt cancelled; continuing without backup.")
+        return 0
+    if ans not in {"y", "yes"}:
+        print("Continuing without pre-cleanup backup.")
+        return 0
+    cmd = [
+        sys.executable,
+        str(SCRIPT_DIR / "backup_source_review.py"),
+        "--mirror-destination",
+        "--checksum-verify",
+        "--ask-delete-local",
+    ]
+    return run_command(cmd, SUMMARY_DIR / f"daily_backup_{run_id()}.log")
+
+
 def step_list(batch_size: int) -> list[dict]:
     py = sys.executable
     return [
@@ -301,6 +350,33 @@ def print_summary(before: dict, after: dict, summary_path: Path) -> None:
     print(f"Summary JSON:               {summary_path}")
 
 
+def print_dry_run(steps: list[dict], before: dict, profile: dict,
+                  full_maintenance: bool, backup_prompt: bool) -> None:
+    empty_inbox = int(before.get("to_process_images", 0)) == 0
+    print("Daily Dry Run")
+    print("=" * 60)
+    print(f"Sorted folder:              {SORTED}")
+    print(f"Input folder:               {TO_PROCESS}")
+    print(f"To Process images:          {before['to_process_images']}")
+    print(f"Organized images:           {before['organized_images']}")
+    print(f"_source_review files:       {cleanup_holding_count():,}")
+    if profile.get("available_mb") is not None:
+        print(f"Memory mode:                {profile['message']} ({profile['available_mb']} MB), batch {profile['batch_size']}")
+    else:
+        print(f"Memory mode:                {profile['message']}, batch {profile['batch_size']}")
+    print(f"Pre-cleanup backup prompt:  {'yes' if backup_prompt else 'no'}")
+    print()
+    print("Steps that would run")
+    skip_when_empty = destructive_step_names()
+    for index, step in enumerate(steps, start=1):
+        would_skip = empty_inbox and not full_maintenance and step["name"] in skip_when_empty
+        status = "skip: empty inbox" if would_skip else "run"
+        print(f"[{index}/{len(steps)}] {status:18} {step['desc']}")
+        print(f"    {' '.join(step['cmd'])}")
+    print()
+    print("DRY-RUN only. No files were moved, renamed, deleted, or backed up.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--resume", action="store_true",
@@ -311,7 +387,25 @@ def main() -> int:
                         help="Run even if the memory safety check says memory is critically low.")
     parser.add_argument("--full-maintenance", action="store_true",
                         help="Run maintenance steps even when To Process has no images.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print what daily would do without running any step.")
+    parser.add_argument("--no-backup-prompt", action="store_true",
+                        help="Do not offer _source_review backup before cleanup/move steps.")
+    parser.add_argument("--noninteractive", action="store_true",
+                        help="Skip prompts; useful for scheduled runs.")
     args = parser.parse_args()
+
+    if args.dry_run:
+        profile = memory_profile()
+        before = snapshot()
+        print_dry_run(
+            step_list(int(profile.get("batch_size") or 50)),
+            before,
+            profile,
+            args.full_maintenance,
+            not args.no_backup_prompt and not args.noninteractive,
+        )
+        return 0
 
     if args.restart:
         clear_state()
@@ -347,10 +441,20 @@ def main() -> int:
     summary_path = SUMMARY_DIR / f"daily_run_{state['run_id']}.json"
     steps = step_list(batch_size)
     empty_inbox = int(before.get("to_process_images", 0)) == 0
-    skip_when_empty = {
-        "process", "nudity-scan", "nudity-place", "rename",
-        "exact-dedupe", "advanced-dedupe", "smart-albums",
-    }
+    skip_when_empty = destructive_step_names()
+    will_run_destructive = any(
+        not (empty_inbox and not args.full_maintenance and step["name"] in skip_when_empty)
+        and step["name"] in destructive_step_names()
+        and state["steps"].get(step["name"], {}).get("status") != "completed"
+        for step in steps
+    )
+    if will_run_destructive and not args.no_backup_prompt:
+        rc = offer_backup_before_cleanup(args.noninteractive)
+        if rc != 0:
+            print(f"ERROR: pre-cleanup backup failed (exit {rc}).")
+            print("Daily run stopped before cleanup/move steps.")
+            return rc
+
     for index, step in enumerate(steps, start=1):
         if state["steps"].get(step["name"], {}).get("status") == "completed":
             print(f"[{index}/{len(steps)}] Skipping completed step: {step['desc']}")

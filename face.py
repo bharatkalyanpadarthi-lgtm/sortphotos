@@ -7,6 +7,7 @@ Use the first option for normal day-to-day work: dump new images into
 Run:
     python face.py             # show compact menu
     python face.py daily       # full daily end-to-end workflow
+    python face.py dry-run     # preview daily workflow without moving files
     python face.py process     # recommended inbox-only unattended workflow
     python face.py review      # optional: label only larger unknown clusters
     python face.py finish      # finalize labels you already entered
@@ -19,9 +20,11 @@ Run:
     python face.py people-cleanup # apply reusable person-folder merge/rename/remove rules
     python face.py identity-audit # compare identity DB to current person folders
     python face.py backup-review # back up _source_review to external drive
+    python face.py review-dashboard # one HTML dashboard for review queues
     python face.py duplicate-review # browser review for near-visual duplicates
     python face.py unknown-triage # HTML report for unlabeled face clusters
     python face.py health      # validate cache and duplicate status
+    python face.py repair      # run full audit/repair workflow
 """
 
 from __future__ import annotations
@@ -39,6 +42,14 @@ ACTIONS = [
         "label": "Daily End-to-End Run",
         "desc": "Memory-safe resumable daily flow with final per-run summary",
         "script": "daily_runner.py",
+    },
+    {
+        "key": "dry-run",
+        "aliases": ["preview", "daily-dry-run"],
+        "label": "Preview Daily Run",
+        "desc": "Show exactly what daily would scan, skip, and move without changing files",
+        "script": "daily_runner.py",
+        "args": ["--dry-run"],
     },
     {
         "key": "process",
@@ -153,6 +164,14 @@ ACTIONS = [
         "args": ["--mirror-destination", "--checksum-verify", "--ask-delete-local"],
     },
     {
+        "key": "review-dashboard",
+        "aliases": ["dashboard", "review-ui"],
+        "label": "Review Dashboard",
+        "desc": "Create one local HTML dashboard linking unknowns, duplicates, references, nudity, and ready-to-delete",
+        "script": "review_dashboard.py",
+        "args": ["--open"],
+    },
+    {
         "key": "duplicate-review",
         "aliases": ["review-duplicates", "near-visual-review", "visual-review"],
         "label": "Review Near-Visual Duplicates",
@@ -165,6 +184,13 @@ ACTIONS = [
         "label": "Unknown Face Triage",
         "desc": "Write HTML/CSV samples for unlabeled clusters so manual naming is faster",
         "script": "unknown_triage.py",
+    },
+    {
+        "key": "repair",
+        "aliases": ["audit-repair", "repair-all"],
+        "label": "Audit / Repair",
+        "desc": "Run preflight, cache validation, identity audit, duplicate audits, smart album check, and reports",
+        "script": "repair_pipeline.py",
     },
     {
         "key": "rebuild-id",
@@ -197,8 +223,9 @@ ACTIONS = [
         "key": "health",
         "aliases": ["validate", "dedupe", "optimize", "cleanup"],
         "label": "Health Check",
-        "desc": "Validate cache and check duplicate status without moving files",
+        "desc": "Preflight folders/cache/memory, validate cache, and check duplicate status without moving files",
         "steps": [
+            {"script": "preflight_check.py"},
             {"script": "validate_cache.py"},
             {"script": "delete_person_folder_duplicates.py"},
             {"script": "advanced_duplicate_matching.py", "args": ["--quiet"]},
@@ -260,7 +287,7 @@ def run_action(action: dict, extra_args: list[str] | None = None) -> int:
             if extra_args and len(steps) == 1:
                 cmd.extend(extra_args)
             prefix = f"[{i}/{len(steps)}] " if len(steps) > 1 else ""
-            print(f"\n→ {prefix}Running: {' '.join(cmd)}\n")
+            print(f"\n→ {prefix}Running: {' '.join(cmd)}\n", flush=True)
             result = subprocess.run(cmd)
             if result.returncode != 0:
                 return result.returncode
