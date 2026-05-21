@@ -91,7 +91,7 @@ def main() -> int:
     print(f"Ready folder:   {ready_dir}")
     print()
 
-    person_images = iter_images(people_dir)
+    person_images = iter_images(people_dir, skip_dir_names={"all", "_smart_albums"})
     by_size: dict[int, list[Path]] = defaultdict(list)
     for p in person_images:
         try:

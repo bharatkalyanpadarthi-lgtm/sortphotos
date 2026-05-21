@@ -38,7 +38,7 @@ VIDEO_EXTS = {
     ".3g2", ".3gp", ".avi", ".m4v", ".mkv", ".mov", ".mp4",
     ".mpeg", ".mpg", ".mts", ".m2ts", ".webm", ".wmv",
 }
-SMART_DIRS = {"_smart_albums", "_duplicates", "_near_visual_review"}
+SMART_DIRS = {"all", "_smart_albums", "_duplicates", "_near_visual_review"}
 
 
 def run_id() -> str:
@@ -240,7 +240,7 @@ def memory_profile() -> dict:
 def destructive_step_names() -> set[str]:
     return {
         "process", "nudity-scan", "nudity-place", "rename",
-        "exact-dedupe", "advanced-dedupe", "smart-albums",
+        "exact-dedupe", "advanced-dedupe", "all-views", "smart-albums",
     }
 
 
@@ -311,6 +311,8 @@ def step_list(batch_size: int) -> list[dict]:
          "cmd": [py, str(SCRIPT_DIR / "delete_person_folder_duplicates.py"), "--apply", "--quiet"]},
         {"name": "advanced-dedupe", "desc": "Refresh advanced duplicate report",
          "cmd": [py, str(SCRIPT_DIR / "advanced_duplicate_matching.py"), "--apply", "--quiet"], "heavy": True},
+        {"name": "all-views", "desc": "Rebuild per-person all/nude hardlink views",
+         "cmd": [py, str(SCRIPT_DIR / "build_all_person_views.py"), "--apply", "--quiet"]},
         {"name": "smart-albums", "desc": "Refresh changed smart albums",
          "cmd": [py, str(SCRIPT_DIR / "build_smart_albums.py"), "--apply", "--incremental"], "heavy": True},
         {"name": "unknown-triage", "desc": "Write unknown-cluster triage report",

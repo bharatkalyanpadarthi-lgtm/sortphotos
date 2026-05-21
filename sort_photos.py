@@ -204,6 +204,7 @@ DEFAULT_EXCLUDED_SCAN_DIRS = {
     "videos",
 }
 ALWAYS_EXCLUDED_SCAN_DIRS = {
+    "all",
     "_duplicates",
     "_near_visual_review",
     "_smart_albums",

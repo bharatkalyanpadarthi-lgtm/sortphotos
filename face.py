@@ -16,6 +16,7 @@ Run:
     python face.py clean-refs  # clean/compact Face References then rebuild
     python face.py nudity      # scan sorted people folders for nudity
     python face.py rename      # name/number files inside person folders
+    python face.py all-views   # build all/all nude hardlink views in each person folder
     python face.py smart-albums # create hardlinked smart album views
     python face.py people-cleanup # apply reusable person-folder merge/rename/remove rules
     python face.py identity-audit # compare identity DB to current person folders
@@ -131,6 +132,14 @@ ACTIONS = [
         "label": "Rename Person Files",
         "desc": "Smart-name person images as Person_0001_category_orientation_quality.ext",
         "script": "rename_person_folder_files.py",
+        "args": ["--apply", "--quiet"],
+    },
+    {
+        "key": "all-views",
+        "aliases": ["all", "person-all", "all-photos"],
+        "label": "Build All Person Views",
+        "desc": "Create hardlinked all/ and all/nude views inside each person folder",
+        "script": "build_all_person_views.py",
         "args": ["--apply", "--quiet"],
     },
     {

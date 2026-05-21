@@ -40,7 +40,7 @@ def person_dirs(root: Path) -> list[Path]:
 def image_count(root: Path) -> int:
     total = 0
     for p in root.rglob("*"):
-        if "_smart_albums" in p.parts:
+        if "all" in p.parts or "_smart_albums" in p.parts:
             continue
         if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
             total += 1

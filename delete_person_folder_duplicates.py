@@ -21,7 +21,7 @@ from pathlib import Path
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
               ".tif", ".tiff", ".heic", ".heif"}
 DEFAULT_SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
-EXCLUDED_DIRS = {"_smart_albums", "_near_visual_review"}
+EXCLUDED_DIRS = {"all", "_smart_albums", "_near_visual_review"}
 
 
 def iter_images(root: Path) -> list[Path]:

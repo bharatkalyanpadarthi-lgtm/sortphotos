@@ -52,6 +52,7 @@ SMART_ALBUM_LOGIC_VERSION = 7
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
 SMART_DIR = "_smart_albums"
 EXCLUDED_DIRS = {
+    "all",
     SMART_DIR,
     "_duplicates",
     "_blurred",

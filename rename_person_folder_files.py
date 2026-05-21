@@ -22,7 +22,7 @@ import numpy as np
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
               ".tif", ".tiff", ".heic", ".heif", ".gif"}
 DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
-SKIP_DIRS = {"_smart_albums"}
+SKIP_DIRS = {"all", "_smart_albums"}
 CATEGORY_RANK = {
     "photo": 0,
     "nudity_possible": 1,
