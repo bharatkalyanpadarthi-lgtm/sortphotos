@@ -17,9 +17,10 @@
   },
   "rename": {
     "aishwarya this": "aishwarya rai",
-    "anika": "ishika reganadh",
+    "anika": "ishika ranganath",
     "Anika Surendran": "Anikha Surendran",
     "Bhavan": "bhavana",
+    "ishika reganadh": "ishika ranganath",
     "malayalam": "Nikhila Vimal",
     "manju": "manju warrior",
     "najriya": "Nazriya",
@@ -29,6 +30,10 @@
   },
   "remove": [
     "aadya",
+    "Abhay",
+    "Ajith",
+    "allu",
+    "anchor rumulamma",
     "sreekanth guggilam",
     "sreekanth guggilamand",
     "Srinivas Buddha",
