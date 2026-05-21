@@ -39,6 +39,7 @@ from sklearn.cluster import DBSCAN
 DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
 DEFAULT_NUDITY_CACHE = Path.home() / ".face_sort_cache" / "smart_album_nudity_cache.json"
 DEFAULT_NUDITY_OVERRIDES = Path.home() / ".face_sort_cache" / "smart_album_nudity_overrides.json"
+DEFAULT_FRAMING_CACHE = Path.home() / ".face_sort_cache" / "smart_album_framing_cache.json"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
 SMART_DIR = "_smart_albums"
 EXCLUDED_DIRS = {
@@ -79,6 +80,9 @@ class ImageInfo:
     face_count: int
     largest_face_ratio: float
     quality: float
+    face_source: str = "haar"
+    face_angle: str = ""
+    face_roll: float = 0.0
     nudity_status: str = ""
     nudity_class: str = ""
     nudity_score: float = 0.0
@@ -91,6 +95,17 @@ def load_face_cascade() -> cv2.CascadeClassifier | None:
 
 
 def load_nudity_cache(path: Path) -> dict:
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("version") == 1 and isinstance(data.get("items"), dict):
+            return data
+    except Exception:
+        pass
+    return {"version": 1, "items": {}}
+
+
+def load_framing_cache(path: Path) -> dict:
     try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
@@ -120,6 +135,14 @@ def load_nudity_overrides(path: Path) -> dict[str, str]:
 
 
 def save_nudity_cache(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f)
+    tmp.replace(path)
+
+
+def save_framing_cache(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as f:
@@ -162,6 +185,28 @@ def load_nudity_detector():
     except ImportError:
         return None
     return NudeDetector()
+
+
+def load_insightface_detector(det_size: int):
+    try:
+        from insightface.app import FaceAnalysis
+        import sort_photos
+    except Exception:
+        return None
+    try:
+        app = FaceAnalysis(
+            name=sort_photos.MODEL_NAME,
+            allowed_modules=["detection"],
+            providers=sort_photos.PROVIDERS,
+        )
+        app.prepare(
+            ctx_id=0,
+            det_size=(int(det_size), int(det_size)),
+            det_thresh=0.35,
+        )
+        return app
+    except Exception:
+        return None
 
 
 def imread(path: Path) -> np.ndarray | None:
@@ -277,6 +322,73 @@ def detect_face_stats(img: np.ndarray,
     return len(significant), float(largest / image_area)
 
 
+def face_angle_from_keypoints(kps: np.ndarray | None) -> tuple[str, float]:
+    if kps is None or len(kps) < 3:
+        return "", 0.0
+    left_eye, right_eye, nose = kps[0], kps[1], kps[2]
+    eye_dx = float(right_eye[0] - left_eye[0])
+    eye_dy = float(right_eye[1] - left_eye[1])
+    eye_dist = float(np.hypot(eye_dx, eye_dy))
+    if eye_dist <= 1.0:
+        return "", 0.0
+    roll = float(np.degrees(np.arctan2(eye_dy, eye_dx)))
+    nose_offset = float((nose[0] - ((left_eye[0] + right_eye[0]) / 2.0)) / eye_dist)
+    if abs(nose_offset) >= 0.34:
+        angle = "side_angled"
+    elif abs(nose_offset) >= 0.18:
+        angle = "slightly_turned"
+    else:
+        angle = "front_facing"
+    return angle, roll
+
+
+def detect_face_stats_insightface(img: np.ndarray, app) -> tuple[int, float, str, float]:
+    if app is None:
+        return 0, 0.0, "", 0.0
+    h, w = img.shape[:2]
+    image_area = max(1, w * h)
+    try:
+        faces = app.get(img)
+    except Exception:
+        return 0, 0.0, "", 0.0
+
+    boxes: list[tuple[int, int, int, int, float, str, float]] = []
+    for face in faces:
+        score = float(getattr(face, "det_score", 0.0) or 0.0)
+        if score < 0.35:
+            continue
+        bbox = getattr(face, "bbox", None)
+        if bbox is None or len(bbox) < 4:
+            continue
+        x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+        x1 = max(0.0, min(float(w), x1))
+        x2 = max(0.0, min(float(w), x2))
+        y1 = max(0.0, min(float(h), y1))
+        y2 = max(0.0, min(float(h), y2))
+        bw = max(0, int(round(x2 - x1)))
+        bh = max(0, int(round(y2 - y1)))
+        if bw <= 0 or bh <= 0:
+            continue
+        angle, roll = face_angle_from_keypoints(getattr(face, "kps", None))
+        boxes.append((int(round(x1)), int(round(y1)), bw, bh, score, angle, roll))
+
+    if not boxes:
+        return 0, 0.0, "", 0.0
+
+    deduped: list[tuple[int, int, int, int, float, str, float]] = []
+    for box in sorted(boxes, key=lambda b: b[2] * b[3], reverse=True):
+        rect = box[:4]
+        if all(iou(rect, existing[:4]) < 0.35 for existing in deduped):
+            deduped.append(box)
+    largest_box = max(deduped, key=lambda b: b[2] * b[3])
+    largest_area = largest_box[2] * largest_box[3]
+    significant = [
+        box for box in deduped
+        if box[2] * box[3] >= max(largest_area * 0.30, image_area * 0.0025)
+    ]
+    return len(significant), float(largest_area / image_area), largest_box[5], largest_box[6]
+
+
 def hamming(a: int, b: int) -> int:
     return int((a ^ b).bit_count())
 
@@ -323,6 +435,60 @@ def load_infos(person_dir: Path) -> list[ImageInfo]:
             nudity_status=path_nudity_status(path.relative_to(person_dir)),
         ))
     return infos
+
+
+def annotate_framing(infos: list[ImageInfo], app, cache: dict, quiet: bool) -> int:
+    if app is None:
+        return 0
+    items = cache.setdefault("items", {})
+    pending: list[tuple[ImageInfo, str, dict[str, int]]] = []
+    cache_hits = 0
+    changed = 0
+    for info in infos:
+        key = str(info.path)
+        try:
+            sig = file_signature(info.path)
+        except OSError:
+            continue
+        cached = items.get(key)
+        if cached and cached.get("sig") == sig:
+            cached_count = int(cached.get("face_count", 0) or 0)
+            if cached_count > 0 or info.face_count == 0:
+                info.face_count = cached_count
+                info.largest_face_ratio = float(cached.get("largest_face_ratio", 0.0) or 0.0)
+                info.face_angle = str(cached.get("face_angle", "") or "")
+                info.face_roll = float(cached.get("face_roll", 0.0) or 0.0)
+                info.face_source = str(cached.get("source", "insightface") or "insightface")
+            cache_hits += 1
+            continue
+        pending.append((info, key, sig))
+
+    if pending and not quiet:
+        print(f"  framing: {cache_hits} cached, {len(pending)} new InsightFace checks...", flush=True)
+
+    for idx, (info, key, sig) in enumerate(pending, start=1):
+        img = imread(info.path)
+        if img is None:
+            continue
+        face_count, largest_face_ratio, face_angle, face_roll = detect_face_stats_insightface(img, app)
+        if face_count > 0 or info.face_count == 0:
+            info.face_count = face_count
+            info.largest_face_ratio = largest_face_ratio
+            info.face_angle = face_angle
+            info.face_roll = face_roll
+            info.face_source = "insightface"
+        items[key] = {
+            "sig": sig,
+            "face_count": face_count,
+            "largest_face_ratio": round(largest_face_ratio, 8),
+            "face_angle": face_angle,
+            "face_roll": round(face_roll, 4),
+            "source": "insightface",
+        }
+        changed += 1
+        if not quiet and (idx % 250 == 0 or idx == len(pending)):
+            print(f"  framing: checked {idx}/{len(pending)}", flush=True)
+    return changed
 
 
 def annotate_nudity(infos: list[ImageInfo],
@@ -584,16 +750,38 @@ def quality_album_names(info: ImageInfo) -> list[str]:
 
 
 def face_framing_album_names(info: ImageInfo) -> list[str]:
+    aspect = max(info.width, info.height) / max(1, min(info.width, info.height))
+    if aspect >= 2.8:
+        return ["03_face_framing/contact_sheet_or_collage"]
     if info.face_count == 0:
-        return ["03_face_framing/framing_unknown"]
+        orient = orientation_name(info)
+        if orient == "portrait":
+            return [
+                "03_face_framing/wide_or_full_body",
+                "03_face_framing/face_detection_uncertain",
+            ]
+        if orient == "landscape":
+            return [
+                "03_face_framing/wide_or_scene_context",
+                "03_face_framing/face_detection_uncertain",
+            ]
+        return ["03_face_framing/face_detection_uncertain"]
     names: list[str] = []
+    if info.face_count >= 5:
+        names.append("03_face_framing/contact_sheet_or_collage")
     ratio = info.largest_face_ratio
     if ratio >= 0.16:
         names.append("03_face_framing/closeup_face")
-    elif ratio >= 0.045:
+    elif ratio >= 0.09:
+        names.append("03_face_framing/head_and_shoulders")
+    elif ratio >= 0.035:
         names.append("03_face_framing/portrait_or_upper_body")
     else:
         names.append("03_face_framing/wide_or_full_body")
+    if info.face_angle:
+        names.append(f"03_face_framing/{info.face_angle}")
+    if abs(info.face_roll) >= 14.0:
+        names.append("03_face_framing/tilted_face")
     return names
 
 
@@ -635,6 +823,9 @@ def manifest_row(info: ImageInfo, album: str, link: Path) -> dict[str, str]:
         "contrast": f"{info.contrast:.1f}",
         "face_count": str(info.face_count),
         "largest_face_ratio": f"{info.largest_face_ratio:.4f}",
+        "face_source": info.face_source,
+        "face_angle": info.face_angle,
+        "face_roll": f"{info.face_roll:.1f}",
         "nudity_status": info.nudity_status,
         "nudity_class": info.nudity_class,
         "nudity_score": f"{info.nudity_score:.3f}",
@@ -672,8 +863,11 @@ def build_for_person(person_dir: Path,
                      nudity_cache: dict,
                      nudity_overrides: dict[str, str],
                      nudity_batch_size: int,
+                     framing_app,
+                     framing_cache: dict,
                      quiet: bool) -> dict[str, int]:
     infos = load_infos(person_dir)
+    framing_scanned = annotate_framing(infos, framing_app, framing_cache, quiet)
     nudity_scanned = annotate_nudity(
         infos,
         detector,
@@ -688,6 +882,8 @@ def build_for_person(person_dir: Path,
         "scene_groups": 0,
         "best_links": 0,
         "review_links": 0,
+        "framing_scanned": framing_scanned,
+        "face_uncertain": 0,
         "nudity_scanned": nudity_scanned,
         "nudity_images": sum(1 for i in infos if i.nudity_status),
     }
@@ -721,6 +917,8 @@ def build_for_person(person_dir: Path,
                 stats["review_links"] += 1
         for album_name in face_framing_album_names(info):
             stats["links"] += link_single(info, album_root, album_name, apply, rows)
+            if album_name == "03_face_framing/face_detection_uncertain":
+                stats["face_uncertain"] += 1
             if album_name.startswith("07_review_needed/"):
                 stats["review_links"] += 1
 
@@ -765,6 +963,9 @@ def build_for_person(person_dir: Path,
                 "contrast",
                 "face_count",
                 "largest_face_ratio",
+                "face_source",
+                "face_angle",
+                "face_roll",
                 "nudity_status",
                 "nudity_class",
                 "nudity_score",
@@ -776,8 +977,9 @@ def build_for_person(person_dir: Path,
         print(f"{person_dir.name:<32} images={stats['images']:<5} "
               f"visual_groups={stats['visual_groups']:<4} scene_groups={stats['scene_groups']:<4} "
               f"best={stats['best_links']:<3} review={stats['review_links']:<4} "
+              f"face_uncertain={stats['face_uncertain']:<4} framing_scan={stats['framing_scanned']:<4} "
               f"nudity={stats['nudity_images']:<4} nudity_scan={stats['nudity_scanned']:<4} "
-              f"links={stats['links']}")
+              f"links={stats['links']}", flush=True)
     return stats
 
 
@@ -818,6 +1020,12 @@ def main() -> int:
                         help=f"Nudity classification cache. Default: {DEFAULT_NUDITY_CACHE}")
     parser.add_argument("--nudity-overrides", type=Path, default=DEFAULT_NUDITY_OVERRIDES,
                         help=f"Manual nudity overrides JSON. Default: {DEFAULT_NUDITY_OVERRIDES}")
+    parser.add_argument("--no-insightface-framing", action="store_true",
+                        help="Use only the faster OpenCV Haar fallback for face-framing albums.")
+    parser.add_argument("--framing-cache", type=Path, default=DEFAULT_FRAMING_CACHE,
+                        help=f"InsightFace framing cache. Default: {DEFAULT_FRAMING_CACHE}")
+    parser.add_argument("--framing-det-size", type=int, default=640,
+                        help="InsightFace detector size for smart-album framing. Default 640.")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -838,6 +1046,8 @@ def main() -> int:
         "scene_groups": 0,
         "best_links": 0,
         "review_links": 0,
+        "framing_scanned": 0,
+        "face_uncertain": 0,
         "nudity_scanned": 0,
         "nudity_images": 0,
     }
@@ -850,6 +1060,14 @@ def main() -> int:
             print("WARNING: NudeNet is not installed; smart albums will only use existing nudity subfolders.")
         else:
             nudity_cache = load_nudity_cache(args.nudity_cache.expanduser())
+    framing_app = None
+    framing_cache = {"version": 1, "items": {}}
+    if not args.no_insightface_framing:
+        framing_app = load_insightface_detector(max(320, int(args.framing_det_size)))
+        if framing_app is None:
+            print("WARNING: InsightFace framing detector unavailable; using OpenCV fallback only.")
+        else:
+            framing_cache = load_framing_cache(args.framing_cache.expanduser())
 
     for person_dir in dirs:
         stats = build_for_person(
@@ -863,13 +1081,21 @@ def main() -> int:
             nudity_cache=nudity_cache,
             nudity_overrides=nudity_overrides,
             nudity_batch_size=max(1, int(args.nudity_batch_size)),
+            framing_app=framing_app,
+            framing_cache=framing_cache,
             quiet=args.quiet,
         )
         for key in total:
             total[key] += stats[key]
+        if detector is not None:
+            save_nudity_cache(args.nudity_cache.expanduser(), nudity_cache)
+        if framing_app is not None:
+            save_framing_cache(args.framing_cache.expanduser(), framing_cache)
 
     if detector is not None:
         save_nudity_cache(args.nudity_cache.expanduser(), nudity_cache)
+    if framing_app is not None:
+        save_framing_cache(args.framing_cache.expanduser(), framing_cache)
 
     print()
     print(f"People folder:       {root}")
@@ -877,6 +1103,8 @@ def main() -> int:
     print(f"Images scanned:      {total['images']}")
     print(f"Best-quality links:  {total['best_links']}")
     print(f"Review-needed links: {total['review_links']}")
+    print(f"Face uncertain:      {total['face_uncertain']}")
+    print(f"Framing newly scanned: {total['framing_scanned']}")
     print(f"Nudity images:       {total['nudity_images']}")
     print(f"Nudity newly scanned:{total['nudity_scanned']}")
     print(f"Visual groups:       {total['visual_groups']}")

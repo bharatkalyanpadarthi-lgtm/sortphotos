@@ -116,7 +116,7 @@ ACTIONS = [
         "label": "Build Smart Albums",
         "desc": "Create hardlinked smart views for best, quality, framing, format, same-scene, visual-similar, nudity, and review folders",
         "script": "build_smart_albums.py",
-        "args": ["--apply", "--quiet"],
+        "args": ["--apply"],
     },
     {
         "key": "backup-review",
