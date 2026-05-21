@@ -10,32 +10,38 @@ local _source_review folder.
 from __future__ import annotations
 
 import argparse
+import select
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 DEFAULT_SOURCE = Path.home() / "Pictures" / "sorted_all_pictures" / "_source_review"
 DEFAULT_DEST_ROOT = Path("/Volumes/Photos & Videos  Backup/photo_source_review_backup")
 
 
-def count_files(root: Path) -> int:
+def scan_tree(root: Path, label: str) -> tuple[int, int]:
     if not root.exists():
-        return 0
-    return sum(1 for p in root.rglob("*") if p.is_file())
-
-
-def size_bytes(root: Path) -> int:
-    if not root.exists():
-        return 0
+        return 0, 0
+    print(f"Scanning {label} for verification counts...")
+    started = time.monotonic()
+    last_print = started
+    count = 0
     total = 0
     for p in root.rglob("*"):
         if not p.is_file():
             continue
         try:
+            count += 1
             total += p.stat().st_size
         except OSError:
             pass
-    return total
+        now = time.monotonic()
+        if count % 10000 == 0 or now - last_print >= 10:
+            print(f"  {label}: {count:,} files, {human_size(total)} scanned...")
+            last_print = now
+    print(f"  {label}: {count:,} files, {human_size(total)} total.")
+    return count, total
 
 
 def human_size(n: int) -> str:
@@ -51,15 +57,51 @@ def human_size(n: int) -> str:
 def checksum_verify(source: Path, dest: Path) -> list[str]:
     cmd = [
         "rsync",
-        "-ahcn",
+        "-ahcni",
         "--delete",
         f"{source}/",
         f"{dest}/",
     ]
-    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
-    lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or f"rsync verify failed: {result.returncode}")
+    print("  Verifying checksums with rsync dry-run. This can take a while for large folders.")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    lines: list[str] = []
+    started = time.monotonic()
+    last_print = started
+    while True:
+        ready, _w, _x = select.select([proc.stdout], [], [], 1.0)
+        if ready:
+            line = proc.stdout.readline()
+            if line:
+                stripped = line.strip()
+                if stripped:
+                    lines.append(stripped)
+                    if len(lines) <= 20:
+                        print(f"  Difference candidate: {stripped}")
+            elif proc.poll() is not None:
+                break
+        if proc.poll() is not None:
+            for line in proc.stdout:
+                stripped = line.strip()
+                if stripped:
+                    lines.append(stripped)
+                    if len(lines) <= 20:
+                        print(f"  Difference candidate: {stripped}")
+            break
+        now = time.monotonic()
+        if now - last_print >= 10:
+            elapsed = int(now - started)
+            print(f"  Checksum verification still running... {elapsed}s elapsed")
+            last_print = now
+    returncode = proc.wait()
+    if returncode != 0:
+        raise RuntimeError(f"rsync verify failed: {returncode}")
     return lines
 
 
@@ -117,14 +159,16 @@ def main() -> int:
 
     dest.mkdir(parents=True, exist_ok=True)
 
-    print(f"Source:      {source}")
-    print(f"Destination: {dest}")
-    print()
+    print(f"Source:      {source}", flush=True)
+    print(f"Destination: {dest}", flush=True)
+    print(flush=True)
 
+    print("Starting rsync backup. Per-file progress will be shown below.", flush=True)
     cmd = [
         "rsync",
         "-ah",
         "--progress",
+        "--stats",
     ]
     if args.mirror_destination:
         cmd.append("--delete")
@@ -134,10 +178,9 @@ def main() -> int:
         print(f"ERROR: rsync failed with exit code {result.returncode}")
         return result.returncode
 
-    source_count = count_files(source)
-    dest_count = count_files(dest)
-    source_size = size_bytes(source)
-    dest_size = size_bytes(dest)
+    print()
+    source_count, source_size = scan_tree(source, "source")
+    dest_count, dest_size = scan_tree(dest, "destination")
 
     print()
     print("Backup verification")
