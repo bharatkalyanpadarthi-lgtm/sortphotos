@@ -12,8 +12,8 @@ The script keeps original images where they are and creates hardlinked views:
       04_visual_similar/high_confidence/001_12_photos_portrait_from_Anushka_023/
           _nudity_possible/
       05_same_scene/high_confidence/001_18_photos_balanced_light_green_portrait_upper_body_from_Anushka_041/
-      06_nudity/possible/visual_similar/high_confidence/001_05_photos_portrait_from_Anushka_087/
       07_review_needed/small/
+      08_outfit/01_likely_saree_or_draped_ethnic/
 
 Hardlinks do not duplicate file contents on disk. If a hardlink cannot be
 created, the script falls back to a symlink.
@@ -48,7 +48,7 @@ DEFAULT_NUDITY_OVERRIDES = Path.home() / ".face_sort_cache" / "smart_album_nudit
 DEFAULT_FRAMING_CACHE = Path.home() / ".face_sort_cache" / "smart_album_framing_cache.json"
 DEFAULT_SMART_STATE = Path.home() / ".face_sort_cache" / "smart_album_person_state.json"
 FRAMING_CACHE_VERSION = 2
-SMART_ALBUM_LOGIC_VERSION = 8
+SMART_ALBUM_LOGIC_VERSION = 9
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
 SMART_DIR = "_smart_albums"
 EXCLUDED_DIRS = {
@@ -58,11 +58,6 @@ EXCLUDED_DIRS = {
     "_near_visual_review",
     "_blurred",
     "review",
-}
-NUDITY_DIRS = {
-    "photos_nude": "nudity_possible",
-    "_possible_nudity": "nudity_possible",
-    "_uncertain_nudity": "nudity_uncertain",
 }
 NUDITY_NESTED_DIRS = {
     "photos_nude": "_nudity_possible",
@@ -953,7 +948,7 @@ def clear_smart_albums(person_dir: Path) -> None:
 
 def link_image(info: ImageInfo, album_dir: Path, apply: bool) -> Path:
     nested = nudity_nested_dir(info)
-    if nested and "06_nudity" not in album_dir.parts:
+    if nested:
         album_dir = album_dir / nested
     dest = album_dir / safe_name(visible_rel_name(info.rel))
     if not apply:
@@ -1541,10 +1536,6 @@ def face_framing_album_names(info: ImageInfo) -> list[str]:
     return names
 
 
-def subset_for_nudity(infos: list[ImageInfo], folder_name: str) -> list[ImageInfo]:
-    return [i for i in infos if i.rel.parts and i.rel.parts[0] == folder_name]
-
-
 def write_group(album_root: Path,
                 group_path: str,
                 group_id: int,
@@ -1734,21 +1725,6 @@ def build_for_person(person_dir: Path,
     for idx, group in confidence_numbered(scene_groups):
         stats["links"] += write_smart_group(album_root, "05_same_scene", idx, group, "scene", apply, rows)
     stats["scene_groups"] = len(scene_groups)
-
-    for folder_name, album_name in NUDITY_DIRS.items():
-        subset = subset_for_nudity(infos, folder_name)
-        if not subset:
-            continue
-        category = "possible" if "possible" in album_name else "uncertain"
-        stats["links"] += link_collection(subset, album_root, f"06_nudity/{category}/all", apply, rows)
-        visual = group_visual_similar(subset, visual_threshold, max(2, min_group))
-        for idx, group in confidence_numbered(visual):
-            stats["links"] += write_smart_group(
-                album_root, f"06_nudity/{category}/visual_similar", idx, group, "visual", apply, rows)
-        scene = group_same_scene(subset, scene_eps, max(2, min_group), max_scene_group)
-        for idx, group in confidence_numbered(scene):
-            stats["links"] += write_smart_group(
-                album_root, f"06_nudity/{category}/same_scene", idx, group, "scene", apply, rows)
 
     if apply:
         manifest = album_root / "_smart_album_index.csv"

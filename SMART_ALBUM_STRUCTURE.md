@@ -21,7 +21,6 @@ photos_by_person/<person>/photos_nude/
 - `03_face_framing/` - AI-video/reference-use folders based on detected face angle, face size, centering, eye line, and roll.
 - `04_visual_similar/` - near-duplicate or very similar-looking images using pHash plus color/geometry checks.
 - `05_same_scene/` - broader scene/context groups using color, layout, face position, framing, and clustering.
-- `06_nudity/` - generated nudity views based on existing `photos_nude/` files and cached NudeNet results.
 - `07_review_needed/` - technical review buckets, currently mainly low-resolution images.
 - `08_outfit/` - local heuristic outfit views using lower/central body-region color, shot framing, and face geometry.
 
@@ -65,6 +64,19 @@ Current outfit views:
 
 The saree folder is a broad candidate set, not a guaranteed classifier. It favors images with visible body framing, saturated/rich garment color, and body-region cues that often appear in saree or draped ethnic photos.
 
+## Nudity Inside Albums
+
+There is no separate `06_nudity/` smart-album section anymore. Nude or possible-nude images are nested inside the useful album where they belong:
+
+```text
+05_same_scene/.../_nudity_possible/
+04_visual_similar/.../_nudity_possible/
+08_outfit/.../_nudity_possible/
+03_face_framing/.../_nudity_possible/
+```
+
+This keeps scene, outfit, quality, and framing folders useful while still separating nude images inside each folder.
+
 ## Why Visual Similar And Same Scene Are Separate
 
 `04_visual_similar/` is stricter. It is best for near duplicates and same-looking frames.
@@ -75,4 +87,3 @@ Keeping both is useful:
 
 - use `04_visual_similar/` to clean repeated images
 - use `05_same_scene/` to browse shoot/scene variations
-
