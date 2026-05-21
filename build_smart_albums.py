@@ -6,9 +6,9 @@ The script keeps original images where they are and creates hardlinked views:
 
   photos_by_person/Anushka/_smart_albums/
       format/portrait/
-      visual_similar/group_001/
-      same_scene/group_001/
-      nudity_possible/visual_similar/group_001/
+      visual_similar/001_12_photos_portrait_from_Anushka_023/
+      same_scene/001_18_photos_scene_from_Anushka_041/
+      nudity_possible/visual_similar/001_05_photos_portrait_from_Anushka_087/
 
 Hardlinks do not duplicate file contents on disk. If a hardlink cannot be
 created, the script falls back to a symlink.
@@ -20,6 +20,7 @@ import argparse
 import csv
 import hashlib
 import os
+import re
 import shutil
 from collections import defaultdict
 from dataclasses import dataclass
@@ -134,6 +135,53 @@ def safe_name(path: Path) -> str:
     return stem
 
 
+def safe_component(value: str, max_len: int = 64) -> str:
+    value = value.strip()
+    value = re.sub(r"\s+", "_", value)
+    value = re.sub(r"[/:\\*?\"<>|]+", "_", value)
+    value = re.sub(r"[^A-Za-z0-9._-]+", "_", value)
+    value = re.sub(r"_+", "_", value).strip("._-")
+    if not value:
+        return "image"
+    return value[:max_len].rstrip("._-") or "image"
+
+
+def orientation_name(info: ImageInfo) -> str:
+    ratio = info.width / max(1, info.height)
+    if ratio > 1.2:
+        return "landscape"
+    if ratio < 0.82:
+        return "portrait"
+    return "square"
+
+
+def dominant_orientation(group: list[ImageInfo]) -> str:
+    counts: dict[str, int] = defaultdict(int)
+    for info in group:
+        counts[orientation_name(info)] += 1
+    return max(counts.items(), key=lambda item: (item[1], item[0]))[0]
+
+
+def representative_info(group: list[ImageInfo]) -> ImageInfo:
+    return sorted(
+        group,
+        key=lambda i: (
+            len(i.rel.parts),
+            str(i.rel).lower(),
+            -i.width * i.height,
+        ),
+    )[0]
+
+
+def group_folder_name(group_id: int, group: list[ImageInfo], kind: str) -> str:
+    rep = representative_info(group)
+    source_stem = safe_component(rep.path.stem, max_len=42)
+    orient = dominant_orientation(group)
+    count = len(group)
+    label = "scene" if kind == "scene" else orient
+    return f"{group_id:03d}_{count:02d}_photos_{label}_from_{source_stem}"
+
+
 def clear_smart_albums(person_dir: Path) -> None:
     smart = person_dir / SMART_DIR
     if smart.exists():
@@ -199,12 +247,7 @@ def group_same_scene(infos: list[ImageInfo], eps: float, min_group: int) -> list
 
 
 def context_name(info: ImageInfo) -> str:
-    ratio = info.width / max(1, info.height)
-    if ratio > 1.2:
-        return "format/landscape"
-    if ratio < 0.82:
-        return "format/portrait"
-    return "format/square"
+    return f"format/{orientation_name(info)}"
 
 
 def subset_for_nudity(infos: list[ImageInfo], folder_name: str) -> list[ImageInfo]:
@@ -215,9 +258,10 @@ def write_group(album_root: Path,
                 group_path: str,
                 group_id: int,
                 group: list[ImageInfo],
+                kind: str,
                 apply: bool,
                 rows: list[dict[str, str]]) -> int:
-    album_dir = album_root / group_path / f"group_{group_id:03d}"
+    album_dir = album_root / group_path / group_folder_name(group_id, group, kind)
     for info in group:
         dest = link_image(info.path, album_dir, info.rel, apply)
         rows.append({
@@ -250,12 +294,12 @@ def build_for_person(person_dir: Path,
 
     visual_groups = group_visual_similar(infos, visual_threshold, min_group)
     for idx, group in enumerate(visual_groups, start=1):
-        stats["links"] += write_group(album_root, "visual_similar", idx, group, apply, rows)
+        stats["links"] += write_group(album_root, "visual_similar", idx, group, "visual", apply, rows)
     stats["visual_groups"] = len(visual_groups)
 
     scene_groups = group_same_scene(infos, scene_eps, min_group)
     for idx, group in enumerate(scene_groups, start=1):
-        stats["links"] += write_group(album_root, "same_scene", idx, group, apply, rows)
+        stats["links"] += write_group(album_root, "same_scene", idx, group, "scene", apply, rows)
     stats["scene_groups"] = len(scene_groups)
 
     for folder_name, album_name in NUDITY_DIRS.items():
@@ -265,11 +309,11 @@ def build_for_person(person_dir: Path,
         visual = group_visual_similar(subset, visual_threshold, max(2, min_group))
         for idx, group in enumerate(visual, start=1):
             stats["links"] += write_group(
-                album_root, f"{album_name}/visual_similar", idx, group, apply, rows)
+                album_root, f"{album_name}/visual_similar", idx, group, "visual", apply, rows)
         scene = group_same_scene(subset, scene_eps, max(2, min_group))
         for idx, group in enumerate(scene, start=1):
             stats["links"] += write_group(
-                album_root, f"{album_name}/same_scene", idx, group, apply, rows)
+                album_root, f"{album_name}/same_scene", idx, group, "scene", apply, rows)
 
     if apply:
         manifest = album_root / "_smart_album_index.csv"
@@ -309,8 +353,8 @@ def main() -> int:
                         help="Create hardlink smart albums. Default is dry-run.")
     parser.add_argument("--visual-threshold", type=int, default=5,
                         help="pHash threshold for visual-similar groups. Default 5.")
-    parser.add_argument("--scene-eps", type=float, default=0.18,
-                        help="DBSCAN cosine eps for same-scene color/context groups. Default 0.18.")
+    parser.add_argument("--scene-eps", type=float, default=0.10,
+                        help="DBSCAN cosine eps for focused same-scene color/context groups. Default 0.10.")
     parser.add_argument("--min-group", type=int, default=3,
                         help="Minimum images per smart group. Default 3.")
     parser.add_argument("--quiet", action="store_true")
