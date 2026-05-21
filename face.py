@@ -25,6 +25,8 @@ Run:
     python face.py review-dashboard # one HTML dashboard for review queues
     python face.py duplicate-review # browser review for near-visual duplicates
     python face.py unknown-triage # HTML report for unlabeled face clusters
+    python face.py cache-status # inspect detector cache usefulness
+    python face.py cache-rehydrate # rebuild detector cache from current person folders
     python face.py health      # validate cache and duplicate status
     python face.py repair      # run full audit/repair workflow
 """
@@ -191,6 +193,22 @@ ACTIONS = [
         "label": "Unknown Face Triage",
         "desc": "Write HTML/CSV samples for unlabeled clusters so manual naming is faster",
         "script": "unknown_triage.py",
+    },
+    {
+        "key": "cache-status",
+        "aliases": ["cache", "detector-cache"],
+        "label": "Face Cache Status",
+        "desc": "Show whether the detector cache is useful or points at moved source files",
+        "script": "cache_tools.py",
+        "args": ["status"],
+    },
+    {
+        "key": "cache-rehydrate",
+        "aliases": ["rehydrate-cache", "rebuild-cache"],
+        "label": "Rehydrate Face Cache",
+        "desc": "Rebuild detector cache from current photos_by_person files. Add --apply to write it",
+        "script": "cache_tools.py",
+        "args": ["rehydrate"],
     },
     {
         "key": "repair",

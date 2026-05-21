@@ -51,6 +51,7 @@ def main() -> int:
         steps = [
             ("Preflight", [py, str(SCRIPT_DIR / "preflight_check.py")]),
             ("Cache validation", [py, str(SCRIPT_DIR / "validate_cache.py")]),
+            ("Face cache status", [py, str(SCRIPT_DIR / "cache_tools.py"), "status"]),
             ("Rebuild identity DB", [py, str(SCRIPT_DIR / "sort_photos.py"), "--identity-db-only", "--identity-max-images", "80"]),
             ("Identity audit", [py, str(SCRIPT_DIR / "identity_audit.py")]),
             ("Normalize person filenames", [py, str(SCRIPT_DIR / "rename_person_folder_files.py"), "--apply", "--quiet"]),
@@ -65,6 +66,7 @@ def main() -> int:
         steps = [
             ("Preflight", [py, str(SCRIPT_DIR / "preflight_check.py")]),
             ("Cache validation", [py, str(SCRIPT_DIR / "validate_cache.py")]),
+            ("Face cache status", [py, str(SCRIPT_DIR / "cache_tools.py"), "status"]),
             ("Identity audit", [py, str(SCRIPT_DIR / "identity_audit.py")]),
             ("Exact duplicate dry-run", [py, str(SCRIPT_DIR / "delete_person_folder_duplicates.py"), "--quiet"]),
             ("Advanced duplicate report dry-run", [py, str(SCRIPT_DIR / "advanced_duplicate_matching.py"), "--quiet"]),
