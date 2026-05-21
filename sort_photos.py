@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import csv
 import gc
 import hashlib
@@ -46,6 +47,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import warnings
 import webbrowser
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -54,6 +56,9 @@ from typing import Iterable
 
 import cv2
 import numpy as np
+
+warnings.filterwarnings("ignore", category=FutureWarning, module=r"insightface\..*")
+warnings.filterwarnings("ignore", message=r".*`estimate` is deprecated.*", category=FutureWarning)
 
 # ============================================================================
 # CONFIG
@@ -932,10 +937,19 @@ def claude_suggest_name(crop_jpeg: bytes) -> str | None:
 # DETECTION WORKER (subprocess)
 # ============================================================================
 
+@contextlib.contextmanager
+def quiet_model_startup():
+    """Hide noisy third-party model startup logs while keeping progress output."""
+    with open(os.devnull, "w", encoding="utf-8") as devnull:
+        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+            yield
+
+
 def _build_app():
     from insightface.app import FaceAnalysis
-    app = FaceAnalysis(name=MODEL_NAME, providers=PROVIDERS)
-    app.prepare(ctx_id=0, det_size=DET_SIZE, det_thresh=MIN_DET_SCORE * 0.8)
+    with quiet_model_startup():
+        app = FaceAnalysis(name=MODEL_NAME, providers=PROVIDERS)
+        app.prepare(ctx_id=0, det_size=DET_SIZE, det_thresh=MIN_DET_SCORE * 0.8)
     return app
 
 
@@ -991,6 +1005,8 @@ def _detect_one_image(src: Path, app) -> list[CachedFace]:
 
 def run_detection_worker(job_path: Path) -> int:
     global DET_SIZE
+    warnings.filterwarnings("ignore", category=FutureWarning, module=r"insightface\..*")
+    warnings.filterwarnings("ignore", message=r".*`estimate` is deprecated.*", category=FutureWarning)
     with job_path.open("rb") as f:
         job = pickle.load(f)
     input_paths: list[str] = job["input_paths"]

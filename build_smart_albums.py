@@ -22,12 +22,14 @@ created, the script falls back to a symlink.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import hashlib
 import json
 import os
 import re
 import shutil
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,10 +38,14 @@ import cv2
 import numpy as np
 from sklearn.cluster import DBSCAN
 
+warnings.filterwarnings("ignore", category=FutureWarning, module=r"insightface\..*")
+warnings.filterwarnings("ignore", message=r".*`estimate` is deprecated.*", category=FutureWarning)
+
 DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
 DEFAULT_NUDITY_CACHE = Path.home() / ".face_sort_cache" / "smart_album_nudity_cache.json"
 DEFAULT_NUDITY_OVERRIDES = Path.home() / ".face_sort_cache" / "smart_album_nudity_overrides.json"
 DEFAULT_FRAMING_CACHE = Path.home() / ".face_sort_cache" / "smart_album_framing_cache.json"
+FRAMING_CACHE_VERSION = 2
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
 SMART_DIR = "_smart_albums"
 EXCLUDED_DIRS = {
@@ -83,6 +89,10 @@ class ImageInfo:
     face_source: str = "haar"
     face_angle: str = ""
     face_roll: float = 0.0
+    face_center_x: float = 0.5
+    face_center_y: float = 0.5
+    face_width_ratio: float = 0.0
+    face_height_ratio: float = 0.0
     nudity_status: str = ""
     nudity_class: str = ""
     nudity_score: float = 0.0
@@ -109,11 +119,11 @@ def load_framing_cache(path: Path) -> dict:
     try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        if data.get("version") == 1 and isinstance(data.get("items"), dict):
+        if data.get("version") == FRAMING_CACHE_VERSION and isinstance(data.get("items"), dict):
             return data
     except Exception:
         pass
-    return {"version": 1, "items": {}}
+    return {"version": FRAMING_CACHE_VERSION, "items": {}}
 
 
 def load_nudity_overrides(path: Path) -> dict[str, str]:
@@ -187,6 +197,13 @@ def load_nudity_detector():
     return NudeDetector()
 
 
+@contextlib.contextmanager
+def quiet_model_startup():
+    with open(os.devnull, "w", encoding="utf-8") as devnull:
+        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+            yield
+
+
 def load_insightface_detector(det_size: int):
     try:
         from insightface.app import FaceAnalysis
@@ -194,16 +211,17 @@ def load_insightface_detector(det_size: int):
     except Exception:
         return None
     try:
-        app = FaceAnalysis(
-            name=sort_photos.MODEL_NAME,
-            allowed_modules=["detection"],
-            providers=sort_photos.PROVIDERS,
-        )
-        app.prepare(
-            ctx_id=0,
-            det_size=(int(det_size), int(det_size)),
-            det_thresh=0.35,
-        )
+        with quiet_model_startup():
+            app = FaceAnalysis(
+                name=sort_photos.MODEL_NAME,
+                allowed_modules=["detection"],
+                providers=sort_photos.PROVIDERS,
+            )
+            app.prepare(
+                ctx_id=0,
+                det_size=(int(det_size), int(det_size)),
+                det_thresh=0.35,
+            )
         return app
     except Exception:
         return None
@@ -333,24 +351,28 @@ def face_angle_from_keypoints(kps: np.ndarray | None) -> tuple[str, float]:
         return "", 0.0
     roll = float(np.degrees(np.arctan2(eye_dy, eye_dx)))
     nose_offset = float((nose[0] - ((left_eye[0] + right_eye[0]) / 2.0)) / eye_dist)
-    if abs(nose_offset) >= 0.34:
-        angle = "side_angled"
-    elif abs(nose_offset) >= 0.18:
-        angle = "slightly_turned"
+    if nose_offset <= -0.34:
+        angle = "side_angle_left"
+    elif nose_offset >= 0.34:
+        angle = "side_angle_right"
+    elif nose_offset <= -0.18:
+        angle = "turned_left"
+    elif nose_offset >= 0.18:
+        angle = "turned_right"
     else:
         angle = "front_facing"
     return angle, roll
 
 
-def detect_face_stats_insightface(img: np.ndarray, app) -> tuple[int, float, str, float]:
+def detect_face_stats_insightface(img: np.ndarray, app) -> tuple[int, float, str, float, float, float, float, float]:
     if app is None:
-        return 0, 0.0, "", 0.0
+        return 0, 0.0, "", 0.0, 0.5, 0.5, 0.0, 0.0
     h, w = img.shape[:2]
     image_area = max(1, w * h)
     try:
         faces = app.get(img)
     except Exception:
-        return 0, 0.0, "", 0.0
+        return 0, 0.0, "", 0.0, 0.5, 0.5, 0.0, 0.0
 
     boxes: list[tuple[int, int, int, int, float, str, float]] = []
     for face in faces:
@@ -373,7 +395,7 @@ def detect_face_stats_insightface(img: np.ndarray, app) -> tuple[int, float, str
         boxes.append((int(round(x1)), int(round(y1)), bw, bh, score, angle, roll))
 
     if not boxes:
-        return 0, 0.0, "", 0.0
+        return 0, 0.0, "", 0.0, 0.5, 0.5, 0.0, 0.0
 
     deduped: list[tuple[int, int, int, int, float, str, float]] = []
     for box in sorted(boxes, key=lambda b: b[2] * b[3], reverse=True):
@@ -384,9 +406,13 @@ def detect_face_stats_insightface(img: np.ndarray, app) -> tuple[int, float, str
     largest_area = largest_box[2] * largest_box[3]
     significant = [
         box for box in deduped
-        if box[2] * box[3] >= max(largest_area * 0.30, image_area * 0.0025)
+        if box[2] * box[3] >= max(largest_area * 0.25, image_area * 0.001)
     ]
-    return len(significant), float(largest_area / image_area), largest_box[5], largest_box[6]
+    cx = float((largest_box[0] + largest_box[2] / 2.0) / max(1, w))
+    cy = float((largest_box[1] + largest_box[3] / 2.0) / max(1, h))
+    fw = float(largest_box[2] / max(1, w))
+    fh = float(largest_box[3] / max(1, h))
+    return len(significant), float(largest_area / image_area), largest_box[5], largest_box[6], cx, cy, fw, fh
 
 
 def hamming(a: int, b: int) -> int:
@@ -437,7 +463,11 @@ def load_infos(person_dir: Path) -> list[ImageInfo]:
     return infos
 
 
-def annotate_framing(infos: list[ImageInfo], app, cache: dict, quiet: bool) -> int:
+def annotate_framing(infos: list[ImageInfo],
+                     app,
+                     cache: dict,
+                     cache_path: Path | None,
+                     quiet: bool) -> int:
     if app is None:
         return 0
     items = cache.setdefault("items", {})
@@ -458,6 +488,10 @@ def annotate_framing(infos: list[ImageInfo], app, cache: dict, quiet: bool) -> i
                 info.largest_face_ratio = float(cached.get("largest_face_ratio", 0.0) or 0.0)
                 info.face_angle = str(cached.get("face_angle", "") or "")
                 info.face_roll = float(cached.get("face_roll", 0.0) or 0.0)
+                info.face_center_x = float(cached.get("face_center_x", 0.5) or 0.5)
+                info.face_center_y = float(cached.get("face_center_y", 0.5) or 0.5)
+                info.face_width_ratio = float(cached.get("face_width_ratio", 0.0) or 0.0)
+                info.face_height_ratio = float(cached.get("face_height_ratio", 0.0) or 0.0)
                 info.face_source = str(cached.get("source", "insightface") or "insightface")
             cache_hits += 1
             continue
@@ -470,12 +504,25 @@ def annotate_framing(infos: list[ImageInfo], app, cache: dict, quiet: bool) -> i
         img = imread(info.path)
         if img is None:
             continue
-        face_count, largest_face_ratio, face_angle, face_roll = detect_face_stats_insightface(img, app)
+        (
+            face_count,
+            largest_face_ratio,
+            face_angle,
+            face_roll,
+            face_center_x,
+            face_center_y,
+            face_width_ratio,
+            face_height_ratio,
+        ) = detect_face_stats_insightface(img, app)
         if face_count > 0 or info.face_count == 0:
             info.face_count = face_count
             info.largest_face_ratio = largest_face_ratio
             info.face_angle = face_angle
             info.face_roll = face_roll
+            info.face_center_x = face_center_x
+            info.face_center_y = face_center_y
+            info.face_width_ratio = face_width_ratio
+            info.face_height_ratio = face_height_ratio
             info.face_source = "insightface"
         items[key] = {
             "sig": sig,
@@ -483,11 +530,17 @@ def annotate_framing(infos: list[ImageInfo], app, cache: dict, quiet: bool) -> i
             "largest_face_ratio": round(largest_face_ratio, 8),
             "face_angle": face_angle,
             "face_roll": round(face_roll, 4),
+            "face_center_x": round(face_center_x, 6),
+            "face_center_y": round(face_center_y, 6),
+            "face_width_ratio": round(face_width_ratio, 6),
+            "face_height_ratio": round(face_height_ratio, 6),
             "source": "insightface",
         }
         changed += 1
         if not quiet and (idx % 250 == 0 or idx == len(pending)):
             print(f"  framing: checked {idx}/{len(pending)}", flush=True)
+        if cache_path is not None and (idx % 250 == 0 or idx == len(pending)):
+            save_framing_cache(cache_path, cache)
     return changed
 
 
@@ -749,39 +802,99 @@ def quality_album_names(info: ImageInfo) -> list[str]:
     return names
 
 
+def estimated_eye_line_y(info: ImageInfo) -> float:
+    return float(info.face_center_y - (info.face_height_ratio * 0.16))
+
+
+def is_video_quality_candidate(info: ImageInfo) -> bool:
+    pixels = info.width * info.height
+    return (
+        info.face_count == 1
+        and pixels >= 800_000
+        and min(info.width, info.height) >= 700
+        and info.quality >= 0.58
+        and info.sharpness >= 35.0
+        and 45.0 <= info.brightness <= 220.0
+    )
+
+
 def face_framing_album_names(info: ImageInfo) -> list[str]:
     aspect = max(info.width, info.height) / max(1, min(info.width, info.height))
-    if aspect >= 2.8:
-        return ["03_face_framing/contact_sheet_or_collage"]
+    if (
+        aspect >= 2.8
+        and (info.face_count == 0 or info.face_count >= 3 or info.largest_face_ratio < 0.025)
+    ):
+        return ["03_face_framing/90_review/contact_sheet_or_collage"]
     if info.face_count == 0:
-        orient = orientation_name(info)
-        if orient == "portrait":
-            return [
-                "03_face_framing/wide_or_full_body",
-                "03_face_framing/face_detection_uncertain",
-            ]
-        if orient == "landscape":
-            return [
-                "03_face_framing/wide_or_scene_context",
-                "03_face_framing/face_detection_uncertain",
-            ]
-        return ["03_face_framing/face_detection_uncertain"]
+        return ["03_face_framing/90_review/face_detection_uncertain"]
+
     names: list[str] = []
-    if info.face_count >= 5:
-        names.append("03_face_framing/contact_sheet_or_collage")
+    if info.face_count >= 8 or (info.face_count >= 5 and info.largest_face_ratio < 0.045):
+        names.append("03_face_framing/90_review/contact_sheet_or_collage")
+        return names
+    if info.face_count >= 3:
+        names.append("03_face_framing/90_review/multi_face_or_group_photo")
+
     ratio = info.largest_face_ratio
-    if ratio >= 0.16:
-        names.append("03_face_framing/closeup_face")
-    elif ratio >= 0.09:
-        names.append("03_face_framing/head_and_shoulders")
-    elif ratio >= 0.035:
-        names.append("03_face_framing/portrait_or_upper_body")
-    else:
-        names.append("03_face_framing/wide_or_full_body")
-    if info.face_angle:
-        names.append(f"03_face_framing/{info.face_angle}")
-    if abs(info.face_roll) >= 14.0:
-        names.append("03_face_framing/tilted_face")
+    face_height = info.face_height_ratio
+
+    front = info.face_angle == "front_facing" and abs(info.face_roll) <= 10.0
+    three_quarter = info.face_angle in {"turned_left", "turned_right"} and abs(info.face_roll) <= 16.0
+    side_profile = info.face_angle in {"side_angle_left", "side_angle_right"}
+    centered = 0.34 <= info.face_center_x <= 0.66
+    eye_line = estimated_eye_line_y(info)
+    eye_level = (
+        info.face_count <= 2
+        and not side_profile
+        and abs(info.face_roll) <= 12.0
+        and 0.20 <= eye_line <= 0.46
+    )
+    medium_or_full_body = (
+        info.face_count <= 2
+        and ratio < 0.055
+        and face_height < 0.26
+        and centered
+        and aspect < 2.8
+    )
+    slight_low_angle_chest_up = (
+        info.face_count <= 2
+        and not side_profile
+        and 0.045 <= ratio <= 0.16
+        and 0.18 <= face_height <= 0.42
+        and 0.24 <= info.face_center_y <= 0.54
+        and abs(info.face_roll) <= 14.0
+    )
+
+    if front and ratio >= 0.035:
+        names.append("03_face_framing/01_front_facing_straight_on")
+    if three_quarter and ratio >= 0.025:
+        names.append("03_face_framing/02_three_quarter_view")
+    if eye_level and ratio >= 0.025:
+        names.append("03_face_framing/03_eye_level_camera")
+    if medium_or_full_body:
+        names.append("03_face_framing/04_medium_or_full_body")
+    if slight_low_angle_chest_up:
+        names.append("03_face_framing/05_slight_low_angle_chest_up")
+
+    if is_video_quality_candidate(info) and (
+        "03_face_framing/01_front_facing_straight_on" in names
+        or "03_face_framing/02_three_quarter_view" in names
+    ) and (
+        "03_face_framing/03_eye_level_camera" in names
+        or "03_face_framing/04_medium_or_full_body" in names
+    ):
+        names.append("03_face_framing/00_best_ai_video_candidates")
+
+    if side_profile:
+        names.append("03_face_framing/90_review/side_profile_or_extreme_angle")
+    if info.face_count <= 2 and ratio >= 0.025 and not centered:
+        names.append("03_face_framing/90_review/off_center_subject")
+    if abs(info.face_roll) >= 32.0:
+        names.append("03_face_framing/90_review/strongly_tilted_or_rotated")
+    elif abs(info.face_roll) >= 14.0:
+        names.append("03_face_framing/90_review/tilted_face")
+    if not names:
+        names.append("03_face_framing/90_review/needs_manual_angle_review")
     return names
 
 
@@ -826,6 +939,10 @@ def manifest_row(info: ImageInfo, album: str, link: Path) -> dict[str, str]:
         "face_source": info.face_source,
         "face_angle": info.face_angle,
         "face_roll": f"{info.face_roll:.1f}",
+        "face_center_x": f"{info.face_center_x:.3f}",
+        "face_center_y": f"{info.face_center_y:.3f}",
+        "face_width_ratio": f"{info.face_width_ratio:.4f}",
+        "face_height_ratio": f"{info.face_height_ratio:.4f}",
         "nudity_status": info.nudity_status,
         "nudity_class": info.nudity_class,
         "nudity_score": f"{info.nudity_score:.3f}",
@@ -865,9 +982,10 @@ def build_for_person(person_dir: Path,
                      nudity_batch_size: int,
                      framing_app,
                      framing_cache: dict,
+                     framing_cache_path: Path | None,
                      quiet: bool) -> dict[str, int]:
     infos = load_infos(person_dir)
-    framing_scanned = annotate_framing(infos, framing_app, framing_cache, quiet)
+    framing_scanned = annotate_framing(infos, framing_app, framing_cache, framing_cache_path, quiet)
     nudity_scanned = annotate_nudity(
         infos,
         detector,
@@ -917,7 +1035,7 @@ def build_for_person(person_dir: Path,
                 stats["review_links"] += 1
         for album_name in face_framing_album_names(info):
             stats["links"] += link_single(info, album_root, album_name, apply, rows)
-            if album_name == "03_face_framing/face_detection_uncertain":
+            if album_name == "03_face_framing/90_review/face_detection_uncertain":
                 stats["face_uncertain"] += 1
             if album_name.startswith("07_review_needed/"):
                 stats["review_links"] += 1
@@ -966,6 +1084,10 @@ def build_for_person(person_dir: Path,
                 "face_source",
                 "face_angle",
                 "face_roll",
+                "face_center_x",
+                "face_center_y",
+                "face_width_ratio",
+                "face_height_ratio",
                 "nudity_status",
                 "nudity_class",
                 "nudity_score",
@@ -1024,8 +1146,8 @@ def main() -> int:
                         help="Use only the faster OpenCV Haar fallback for face-framing albums.")
     parser.add_argument("--framing-cache", type=Path, default=DEFAULT_FRAMING_CACHE,
                         help=f"InsightFace framing cache. Default: {DEFAULT_FRAMING_CACHE}")
-    parser.add_argument("--framing-det-size", type=int, default=640,
-                        help="InsightFace detector size for smart-album framing. Default 640.")
+    parser.add_argument("--framing-det-size", type=int, default=1024,
+                        help="InsightFace detector size for smart-album framing. Default 1024 for higher quality.")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -1054,6 +1176,7 @@ def main() -> int:
     detector = None
     nudity_cache = {"version": 1, "items": {}}
     nudity_overrides = load_nudity_overrides(args.nudity_overrides.expanduser())
+    framing_cache_path = args.framing_cache.expanduser()
     if not args.no_detect_nudity:
         detector = load_nudity_detector()
         if detector is None:
@@ -1061,7 +1184,7 @@ def main() -> int:
         else:
             nudity_cache = load_nudity_cache(args.nudity_cache.expanduser())
     framing_app = None
-    framing_cache = {"version": 1, "items": {}}
+    framing_cache = {"version": FRAMING_CACHE_VERSION, "items": {}}
     if not args.no_insightface_framing:
         framing_app = load_insightface_detector(max(320, int(args.framing_det_size)))
         if framing_app is None:
@@ -1083,6 +1206,7 @@ def main() -> int:
             nudity_batch_size=max(1, int(args.nudity_batch_size)),
             framing_app=framing_app,
             framing_cache=framing_cache,
+            framing_cache_path=framing_cache_path if framing_app is not None else None,
             quiet=args.quiet,
         )
         for key in total:
