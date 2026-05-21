@@ -129,7 +129,7 @@ ACTIONS = [
         "key": "rename",
         "aliases": ["number", "number-files", "rename-files"],
         "label": "Rename Person Files",
-        "desc": "Name and number images inside sorted person folders as Person_001, Person_002, etc.",
+        "desc": "Smart-name person images as Person_0001_category_orientation_quality.ext",
         "script": "rename_person_folder_files.py",
         "args": ["--apply", "--quiet"],
     },

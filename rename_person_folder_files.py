@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Rename images inside each person folder using the folder name plus a sequence.
+Rename images inside each person folder using a smart canonical name.
 
 Example:
   photos_by_person/Sonali Bendre/IMG_1234.jpg
-  -> photos_by_person/Sonali Bendre/Sonali_Bendre_001.jpg
+  -> photos_by_person/Sonali Bendre/Sonali_Bendre_0001_photo_portrait_q_high.jpg
 
 Default is dry-run. Use --apply to rename files.
 """
@@ -16,15 +16,34 @@ import os
 import re
 from pathlib import Path
 
+import cv2
+import numpy as np
+
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
-              ".tif", ".tiff", ".heic", ".heif"}
+              ".tif", ".tiff", ".heic", ".heif", ".gif"}
 DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
+SKIP_DIRS = {"_smart_albums"}
+CATEGORY_RANK = {
+    "photo": 0,
+    "nudity_possible": 1,
+    "nudity_uncertain": 2,
+    "near_visual_review": 3,
+    "duplicate_review": 4,
+    "review": 5,
+}
+
+
+class ImageMeta:
+    def __init__(self, width: int = 0, height: int = 0, sharpness: float = 0.0) -> None:
+        self.width = width
+        self.height = height
+        self.sharpness = sharpness
 
 
 def iter_images(person_dir: Path) -> list[Path]:
     out: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(person_dir):
-        dirnames[:] = [d for d in dirnames if d != "_smart_albums"]
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         base = Path(dirpath)
         for filename in filenames:
             p = base / filename
@@ -48,38 +67,144 @@ def clean_prefix(folder_name: str) -> str:
     return name or "person"
 
 
-def plan_for_person(person_dir: Path) -> list[tuple[Path, Path]]:
+def read_image_meta(path: Path) -> ImageMeta:
+    try:
+        data = np.fromfile(str(path), dtype=np.uint8)
+        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if img is not None:
+            h, w = img.shape[:2]
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+            sharp = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+            return ImageMeta(w, h, sharp)
+    except Exception:
+        pass
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            w, h = im.size
+            frame = im.convert("RGB")
+            arr = cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR)
+            gray = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+            sharp = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+            return ImageMeta(w, h, sharp)
+    except Exception:
+        return ImageMeta()
+
+
+def orientation_label(meta: ImageMeta) -> str:
+    if meta.width <= 0 or meta.height <= 0:
+        return "unknown"
+    ratio = meta.width / max(1, meta.height)
+    if ratio > 1.2:
+        return "landscape"
+    if ratio < 0.82:
+        return "portrait"
+    return "square"
+
+
+def quality_label(meta: ImageMeta) -> str:
+    if meta.width <= 0 or meta.height <= 0:
+        return "q_unknown"
+    megapixels = (meta.width * meta.height) / 1_000_000.0
+    if megapixels >= 1.0 and meta.sharpness >= 90.0:
+        return "q_high"
+    if megapixels >= 0.45 and meta.sharpness >= 25.0:
+        return "q_good"
+    return "q_review"
+
+
+def category_label(rel: Path) -> str:
+    if not rel.parts:
+        return "photo"
+    first = rel.parts[0]
+    if first == "_possible_nudity":
+        return "nudity_possible"
+    if first == "_uncertain_nudity":
+        return "nudity_uncertain"
+    if first == "_near_visual_review":
+        return "near_visual_review"
+    if first == "_duplicates":
+        return "duplicate_review"
+    if first.startswith("_"):
+        return "review"
+    return "photo"
+
+
+def canonical_pattern(prefix: str) -> re.Pattern:
+    return re.compile(
+        rf"^{re.escape(prefix)}_(\d+)(?:_[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*)?$",
+        re.IGNORECASE,
+    )
+
+
+def parsed_index(path: Path, prefix: str) -> int | None:
+    match = canonical_pattern(prefix).fullmatch(path.stem)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def sort_key_for_image(path: Path, person_dir: Path, prefix: str) -> tuple:
+    rel = path.relative_to(person_dir)
+    category = category_label(rel)
+    index = parsed_index(path, prefix)
+    return (
+        CATEGORY_RANK.get(category, 9),
+        0 if index is not None else 1,
+        index if index is not None else 999_999,
+        len(rel.parts),
+        str(rel).lower(),
+    )
+
+
+def smart_filename(prefix: str, index: int, meta: ImageMeta, category: str,
+                   width: int, suffix: str) -> str:
+    return (
+        f"{prefix}_{index:0{width}d}_"
+        f"{category}_{orientation_label(meta)}_{quality_label(meta)}"
+        f"{suffix.lower()}"
+    )
+
+
+def plan_for_person(person_dir: Path, compact: bool = False) -> list[tuple[Path, Path]]:
     images = iter_images(person_dir)
     if not images:
         return []
 
-    width = max(3, len(str(len(images))))
     prefix = clean_prefix(person_dir.name)
+    width = max(4, len(str(len(images))))
     planned: list[tuple[Path, Path]] = []
-    used: set[Path] = set()
-    max_index = 0
-    existing_pattern = re.compile(rf"^{re.escape(prefix)}_(\d+)$")
+    used_paths: set[Path] = set()
+    used_indices: set[int] = set()
+    next_index = 1
 
-    for src in images:
-        match = existing_pattern.fullmatch(src.stem)
-        if match:
-            max_index = max(max_index, int(match.group(1)))
-            used.add(src)
+    sorted_images = sorted(images, key=lambda p: sort_key_for_image(p, person_dir, prefix))
+    if not compact:
+        existing_indices = [i for i in (parsed_index(src, prefix) for src in sorted_images) if i is not None]
+        next_index = max(existing_indices, default=0) + 1
 
-    next_index = max_index + 1
-    for src in images:
-        if existing_pattern.fullmatch(src.stem):
-            continue
-        ext = src.suffix.lower()
-        while True:
-            dest = src.parent / f"{prefix}_{next_index:0{width}d}{ext}"
+    for ordinal, src in enumerate(sorted_images, start=1):
+        rel = src.relative_to(person_dir)
+        category = category_label(rel)
+        meta = read_image_meta(src)
+        index = ordinal if compact else parsed_index(src, prefix)
+        if index is None or index in used_indices:
+            while next_index in used_indices:
+                next_index += 1
+            index = next_index
+            used_indices.add(index)
             next_index += 1
-            if dest not in used and not dest.exists():
-                break
-        if dest in used:
+        else:
+            used_indices.add(index)
+        dest = src.parent / smart_filename(prefix, index, meta, category, width, src.suffix)
+        if dest in used_paths:
             raise RuntimeError(f"duplicate planned path: {dest}")
-        used.add(dest)
-        planned.append((src, dest))
+        used_paths.add(dest)
+        if src != dest:
+            planned.append((src, dest))
     return planned
 
 
@@ -91,6 +216,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("people_dir", nargs="?", default=str(DEFAULT_PEOPLE))
+    parser.add_argument("--person", default=None,
+                        help="Rename one person folder only.")
+    parser.add_argument("--compact", action="store_true",
+                        help="Renumber each person from 0001. Default preserves existing numbers.")
     parser.add_argument("--apply", action="store_true",
                         help="Rename files. Default is dry-run.")
     parser.add_argument("--quiet", action="store_true",
@@ -105,12 +234,19 @@ def main() -> int:
     all_actions: list[tuple[Path, Path]] = []
     folder_count = 0
     image_count = 0
-    for person_dir in sorted([p for p in people_dir.iterdir() if p.is_dir()],
-                             key=lambda p: p.name.lower()):
+    person_dirs = [p for p in people_dir.iterdir() if p.is_dir() and not p.name.startswith("_")]
+    if args.person:
+        wanted = args.person.casefold()
+        person_dirs = [p for p in person_dirs if p.name.casefold() == wanted]
+        if not person_dirs:
+            print(f"ERROR: person folder not found: {args.person}")
+            return 1
+
+    for person_dir in sorted(person_dirs, key=lambda p: p.name.lower()):
         folder_count += 1
         images = iter_images(person_dir)
         image_count += len(images)
-        all_actions.extend(plan_for_person(person_dir))
+        all_actions.extend(plan_for_person(person_dir, compact=args.compact))
 
     print(f"People folder:      {people_dir}")
     print(f"Person folders:     {folder_count}")
