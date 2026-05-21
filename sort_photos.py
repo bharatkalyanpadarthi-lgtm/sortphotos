@@ -59,6 +59,11 @@ import numpy as np
 
 warnings.filterwarnings("ignore", category=FutureWarning, module=r"insightface\..*")
 warnings.filterwarnings("ignore", message=r".*`estimate` is deprecated.*", category=FutureWarning)
+warnings.filterwarnings(
+    "ignore",
+    message=r"resource_tracker: There appear to be .* leaked semaphore objects.*",
+    category=UserWarning,
+)
 
 # ============================================================================
 # CONFIG
@@ -646,20 +651,34 @@ def save_identity_db(db: IdentityDB) -> None:
     tmp.replace(IDENTITY_DB_FILE)
 
 
-def build_identity_db_from_person_folders(people_dir: Path) -> IdentityDB:
+def build_identity_db_from_person_folders(people_dir: Path,
+                                          force_rebuild: bool = False) -> IdentityDB:
     from tqdm import tqdm
 
     people_dir = people_dir.expanduser().resolve()
-    db = load_identity_db()
-    if db is None:
-        db = IdentityDB(config_fingerprint=config_fingerprint())
     if not people_dir.exists():
         log.warning("Identity DB source folder does not exist: %s", people_dir)
-        return db
+        return IdentityDB(config_fingerprint=config_fingerprint())
 
-    app = _build_app()
     person_dirs = sorted([p for p in people_dir.iterdir() if p.is_dir()],
                          key=lambda p: p.name.lower())
+    current_names = {
+        p.name for p in person_dirs
+        if not p.name.startswith("_") and is_real_person_label(p.name)
+    }
+    existing = None if force_rebuild else load_identity_db()
+    db = IdentityDB(config_fingerprint=config_fingerprint())
+    if existing and existing.config_fingerprint == config_fingerprint():
+        db.identities = {
+            name: emb for name, emb in existing.identities.items()
+            if name in current_names
+        }
+        db.source_counts = {
+            name: count for name, count in existing.source_counts.items()
+            if name in db.identities
+        }
+
+    app = _build_app()
     for person_dir in tqdm(person_dirs, desc="Building identity DB", unit="person"):
         if person_dir.name.startswith("_") or not is_real_person_label(person_dir.name):
             continue
@@ -2818,7 +2837,10 @@ def main() -> int:
     requested_output_dir = Path(args.output).expanduser()
 
     if args.identity_db_only or args.rebuild_identity_db:
-        build_identity_db_from_person_folders(requested_output_dir / "photos_by_person")
+        build_identity_db_from_person_folders(
+            requested_output_dir / "photos_by_person",
+            force_rebuild=bool(args.rebuild_identity_db),
+        )
         if args.identity_db_only:
             return 0
 
