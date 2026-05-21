@@ -151,6 +151,7 @@ USE_HARDLINKS = True
 ARCHIVE_ORGANIZED_SOURCES = False
 ARCHIVE_SCANNED_SOURCES = False
 UNATTENDED_FINISH_KNOWN = False
+ASSUME_MERGE_EXISTING_OUTPUT = False
 SOURCE_ARCHIVE_DIR_NAME = "organized_sources"
 SCANNED_SOURCE_ARCHIVE_DIR_NAME = "ready_to_delete/scanned_sources"
 INTAKE_DUPLICATE_ARCHIVE_DIR_NAME = "ready_to_delete/intake_duplicates"
@@ -2592,6 +2593,9 @@ def confirm_overwrite(output_dir: Path) -> bool:
     """
     if not output_dir.exists():
         return True
+    if ASSUME_MERGE_EXISTING_OUTPUT:
+        log.info("Merging into existing output folder: %s", output_dir)
+        return True
     print(f"\nOutput folder already exists: {output_dir}")
     print(f"  [Enter] or 'm'  →  keep existing labeled folders, merge new photos in (default)")
     print(f"  'w'             →  wipe and start completely fresh")
@@ -2734,7 +2738,7 @@ def main() -> int:
     global AUTO_PERSON_MATCH_DIST, IDENTITY_MAX_IMAGES_PER_PERSON
     global POST_PROCESS_OUTPUT, USE_HARDLINKS, ARCHIVE_ORGANIZED_SOURCES
     global ARCHIVE_SCANNED_SOURCES, SOURCE_ARCHIVE_DIR_NAME
-    global UNATTENDED_FINISH_KNOWN, DET_SIZE
+    global UNATTENDED_FINISH_KNOWN, ASSUME_MERGE_EXISTING_OUTPUT, DET_SIZE
 
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -2773,6 +2777,8 @@ def main() -> int:
                         help="With --archive-organized-sources, move organized source images under _source_review/ready_to_delete/organized_sources.")
     parser.add_argument("--archive-scanned-sources", action="store_true",
                         help="After finishing, move every scanned input image out of the input folder to _source_review/ready_to_delete/scanned_sources. Best for a To Process inbox.")
+    parser.add_argument("--merge-existing-output", action="store_true",
+                        help="Do not prompt when output exists; always merge into existing output.")
     parser.add_argument("--unattended", action="store_true",
                         help="Do not ask for labels; organize known/auto-matched people, preserve unknown clusters for later.")
     parser.add_argument("--reset-cache", action="store_true")
@@ -2823,6 +2829,8 @@ def main() -> int:
         SOURCE_ARCHIVE_DIR_NAME = str(Path("ready_to_delete") / "organized_sources")
     if args.archive_scanned_sources:
         ARCHIVE_SCANNED_SOURCES = True
+    if args.merge_existing_output:
+        ASSUME_MERGE_EXISTING_OUTPUT = True
     if args.unattended:
         UNATTENDED_FINISH_KNOWN = True
         args.no_ai = True

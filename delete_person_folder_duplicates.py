@@ -21,13 +21,15 @@ from pathlib import Path
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
               ".tif", ".tiff", ".heic", ".heif"}
 DEFAULT_SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
+EXCLUDED_DIRS = {"_smart_albums", "_near_visual_review"}
 
 
 def iter_images(root: Path) -> list[Path]:
     out: list[Path] = []
     if not root.exists():
         return out
-    for dirpath, _dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
         base = Path(dirpath)
         for filename in filenames:
             p = base / filename
@@ -84,7 +86,7 @@ def unique_dest(dest: Path) -> Path:
 
 def person_dirs(people_root: Path) -> list[Path]:
     return sorted(
-        [p for p in people_root.iterdir() if p.is_dir()],
+        [p for p in people_root.iterdir() if p.is_dir() and not p.name.startswith("_")],
         key=lambda p: p.name.lower(),
     )
 

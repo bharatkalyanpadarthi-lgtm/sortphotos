@@ -20,6 +20,7 @@ Run:
     python face.py identity-audit # compare identity DB to current person folders
     python face.py backup-review # back up _source_review to external drive
     python face.py duplicate-review # browser review for near-visual duplicates
+    python face.py unknown-triage # HTML report for unlabeled face clusters
     python face.py health      # validate cache and duplicate status
 """
 
@@ -36,29 +37,8 @@ ACTIONS = [
         "key": "daily",
         "aliases": ["run", "go", "end-to-end"],
         "label": "Daily End-to-End Run",
-        "desc": "Process new inbox images, place nudity, rename, dedupe, rebuild changed smart albums, then show status",
-        "steps": [
-            {
-                "script": "sort_photos.py",
-                "args": [
-                    str(Path.home() / "Pictures" / "To Process"),
-                    str(Path.home() / "Pictures" / "sorted_all_pictures"),
-                    "--unattended",
-                    "--archive-organized-sources",
-                    "--archive-sources-to-ready-delete",
-                    "--archive-scanned-sources",
-                    "--batch-size", "50",
-                    "--detect-workers", "1",
-                ],
-            },
-            {"script": "separate_nudity_review.py", "args": ["--apply", "--quiet"]},
-            {"script": "place_nudity_inside_person_folders.py", "args": ["--apply", "--remove-review-copies", "--quiet"]},
-            {"script": "rename_person_folder_files.py", "args": ["--apply", "--quiet"]},
-            {"script": "delete_person_folder_duplicates.py", "args": ["--apply", "--quiet"]},
-            {"script": "advanced_duplicate_matching.py", "args": ["--apply", "--quiet"]},
-            {"script": "build_smart_albums.py", "args": ["--apply", "--incremental"]},
-            {"script": "status_report.py"},
-        ],
+        "desc": "Memory-safe resumable daily flow with final per-run summary",
+        "script": "daily_runner.py",
     },
     {
         "key": "process",
@@ -177,6 +157,13 @@ ACTIONS = [
         "label": "Review Near-Visual Duplicates",
         "desc": "Open a local browser review page for near-visual duplicate candidates",
         "script": "near_visual_review.py",
+    },
+    {
+        "key": "unknown-triage",
+        "aliases": ["unknowns", "triage-unknowns"],
+        "label": "Unknown Face Triage",
+        "desc": "Write HTML/CSV samples for unlabeled clusters so manual naming is faster",
+        "script": "unknown_triage.py",
     },
     {
         "key": "rebuild-id",
