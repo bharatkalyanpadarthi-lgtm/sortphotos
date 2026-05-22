@@ -15,6 +15,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -234,6 +235,18 @@ def test_duplicate_matching_accepts_pillow_readable_images(tmp: Path) -> None:
     assert_true(fallback.exists(), "readable fallback image was moved out of place")
 
 
+def test_intake_fingerprint_accepts_pillow_readable_images(tmp: Path) -> None:
+    fallback = tmp / "incoming" / "fallback.heic"
+    fallback.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (24, 24), (35, 140, 80)).save(fallback, format="GIF")
+
+    stats: Counter = Counter()
+    fp = sort_photos.image_duplicate_fingerprint(fallback, cache_entries={}, stats=stats)
+    assert_true(fp is not None, "intake duplicate fingerprint rejected a Pillow-readable image")
+    assert_true(stats.get("decode_errors", 0) == 0,
+                f"intake duplicate fingerprint counted a decode error: {stats}")
+
+
 def test_incremental_smart_albums_skip_without_heavy_models(tmp: Path) -> None:
     people = tmp / "people"
     person = people / "Person"
@@ -279,6 +292,7 @@ TESTS = [
     ("Cache dry-run is non-destructive", test_full_rehydrate_keeps_cached_candidates),
     ("Generated bad views are not recovered", test_generated_views_do_not_recover_bad_images),
     ("Duplicate matching accepts Pillow-readable images", test_duplicate_matching_accepts_pillow_readable_images),
+    ("Intake fingerprint accepts Pillow-readable images", test_intake_fingerprint_accepts_pillow_readable_images),
     ("Incremental smart albums skip heavy dry-run work", test_incremental_smart_albums_skip_without_heavy_models),
 ]
 

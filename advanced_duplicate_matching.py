@@ -155,10 +155,13 @@ def imread(path: Path) -> np.ndarray | None:
 
         try:
             from PIL import Image, ImageFile
-            import pillow_heif  # noqa: F401
+            import pillow_heif
 
             ImageFile.LOAD_TRUNCATED_IMAGES = True
+            if hasattr(pillow_heif, "register_heif_opener"):
+                pillow_heif.register_heif_opener()
             with Image.open(path) as im:
+                im.load()
                 return cv2.cvtColor(np.array(im.convert("RGB")), cv2.COLOR_RGB2BGR)
         except Exception:
             return None

@@ -431,21 +431,29 @@ def move_to_process_videos(input_dir: Path, videos_dir: Path = VIDEOS_DIR) -> in
 
 
 def imread_unicode(path: Path) -> np.ndarray | None:
-    try:
-        data = np.fromfile(str(path), dtype=np.uint8)
-        with suppress_native_stderr():
+    with suppress_native_stderr():
+        try:
+            data = np.fromfile(str(path), dtype=np.uint8)
+            if data.size == 0:
+                return None
             img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-        if img is not None:
-            return img
-    except Exception:
-        pass
-    try:
-        from PIL import Image
-        import pillow_heif  # noqa: F401
-        with suppress_native_stderr(), Image.open(path) as im:
+            if img is not None and getattr(img, "size", 0) > 0:
+                return img
+        except Exception:
+            pass
+
+        try:
+            from PIL import Image, ImageFile
+            import pillow_heif
+
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+            if hasattr(pillow_heif, "register_heif_opener"):
+                pillow_heif.register_heif_opener()
+            with Image.open(path) as im:
+                im.load()
             return cv2.cvtColor(np.array(im.convert("RGB")), cv2.COLOR_RGB2BGR)
-    except Exception:
-        return None
+        except Exception:
+            return None
 
 
 def sharpness(bgr: np.ndarray) -> float:

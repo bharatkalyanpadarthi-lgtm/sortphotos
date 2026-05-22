@@ -100,9 +100,11 @@ def can_decode_image(path: Path) -> bool:
 
         try:
             from PIL import Image, ImageFile
-            import pillow_heif  # noqa: F401
+            import pillow_heif
 
             ImageFile.LOAD_TRUNCATED_IMAGES = True
+            if hasattr(pillow_heif, "register_heif_opener"):
+                pillow_heif.register_heif_opener()
             with Image.open(path) as im:
                 im.load()
                 return im.size[0] > 0 and im.size[1] > 0
