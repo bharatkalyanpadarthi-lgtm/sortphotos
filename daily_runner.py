@@ -18,7 +18,6 @@ import argparse
 import csv
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -237,13 +236,6 @@ def memory_profile() -> dict:
     return {"available_mb": mb, "batch_size": 50, "ok": True, "message": "normal"}
 
 
-def destructive_step_names() -> set[str]:
-    return {
-        "process", "structure", "rename",
-        "exact-dedupe", "advanced-dedupe", "cleanup-empty", "all-views", "smart-albums",
-    }
-
-
 def empty_inbox_skippable_step_names() -> set[str]:
     """Steps that have nothing useful to do when the intake folder is empty."""
     return {"process"}
@@ -251,40 +243,6 @@ def empty_inbox_skippable_step_names() -> set[str]:
 
 def cleanup_holding_count() -> int:
     return count_files(SOURCE_REVIEW)
-
-
-def offer_backup_before_cleanup(noninteractive: bool) -> int:
-    if noninteractive:
-        print("Backup prompt skipped because this run is non-interactive.")
-        return 0
-    if cleanup_holding_count() == 0:
-        print("Backup prompt skipped: _source_review is empty.")
-        return 0
-    if not shutil.which("rsync"):
-        print("WARNING: rsync was not found; skipping backup prompt.")
-        return 0
-    print()
-    print("Safety backup")
-    print("=" * 60)
-    print(f"_source_review currently contains {count_files(SOURCE_REVIEW):,} files.")
-    print("Before cleanup/move steps, you can snapshot it to the external drive.")
-    print("The backup script verifies the copy and asks again before deleting local files.")
-    try:
-        ans = input("Run verified _source_review backup now? [y/N]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print("Backup prompt cancelled; continuing without backup.")
-        return 0
-    if ans not in {"y", "yes"}:
-        print("Continuing without pre-cleanup backup.")
-        return 0
-    cmd = [
-        sys.executable,
-        str(SCRIPT_DIR / "backup_source_review.py"),
-        "--snapshot",
-        "--checksum-verify",
-        "--ask-delete-local",
-    ]
-    return run_command(cmd, SUMMARY_DIR / f"daily_backup_{run_id()}.log")
 
 
 def step_list(batch_size: int) -> list[dict]:
@@ -377,7 +335,7 @@ def print_summary(before: dict, after: dict, summary_path: Path) -> None:
 
 
 def print_dry_run(steps: list[dict], before: dict, profile: dict,
-                  full_maintenance: bool, backup_prompt: bool) -> None:
+                  full_maintenance: bool) -> None:
     empty_inbox = (
         int(before.get("to_process_images", 0)) == 0
         and int(before.get("to_process_videos", 0)) == 0
@@ -394,7 +352,6 @@ def print_dry_run(steps: list[dict], before: dict, profile: dict,
         print(f"Memory mode:                {profile['message']} ({profile['available_mb']} MB), batch {profile['batch_size']}")
     else:
         print(f"Memory mode:                {profile['message']}, batch {profile['batch_size']}")
-    print(f"Pre-cleanup backup prompt:  {'yes' if backup_prompt else 'no'}")
     print()
     print("Steps that would run")
     skip_when_empty = empty_inbox_skippable_step_names()
@@ -404,7 +361,7 @@ def print_dry_run(steps: list[dict], before: dict, profile: dict,
         print(f"[{index}/{len(steps)}] {status:18} {step['desc']}")
         print(f"    {' '.join(step['cmd'])}")
     print()
-    print("DRY-RUN only. No files were moved, renamed, deleted, or backed up.")
+    print("DRY-RUN only. No files were moved, renamed, or deleted.")
 
 
 def main() -> int:
@@ -419,10 +376,6 @@ def main() -> int:
                         help="Run maintenance steps even when To Process has no images.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print what daily would do without running any step.")
-    parser.add_argument("--no-backup-prompt", action="store_true",
-                        help="Do not offer _source_review backup before cleanup/move steps.")
-    parser.add_argument("--noninteractive", action="store_true",
-                        help="Skip prompts; useful for scheduled runs.")
     args = parser.parse_args()
 
     if args.dry_run:
@@ -433,7 +386,6 @@ def main() -> int:
             before,
             profile,
             args.full_maintenance,
-            not args.no_backup_prompt and not args.noninteractive,
         )
         return 0
 
@@ -475,19 +427,6 @@ def main() -> int:
         and int(before.get("to_process_videos", 0)) == 0
     )
     skip_when_empty = empty_inbox_skippable_step_names()
-    will_run_destructive = any(
-        not (empty_inbox and not args.full_maintenance and step["name"] in skip_when_empty)
-        and step["name"] in destructive_step_names()
-        and state["steps"].get(step["name"], {}).get("status") != "completed"
-        for step in steps
-    )
-    if will_run_destructive and not args.no_backup_prompt:
-        rc = offer_backup_before_cleanup(args.noninteractive)
-        if rc != 0:
-            print(f"ERROR: pre-cleanup backup failed (exit {rc}).")
-            print("Daily run stopped before cleanup/move steps.")
-            return rc
-
     for index, step in enumerate(steps, start=1):
         if state["steps"].get(step["name"], {}).get("status") == "completed":
             print(f"[{index}/{len(steps)}] Skipping completed step: {step['desc']}")

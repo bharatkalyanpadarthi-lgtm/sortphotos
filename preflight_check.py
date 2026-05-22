@@ -3,13 +3,11 @@
 Preflight health checks for the photo sorting pipeline.
 
 This is intentionally read-only. It checks the folders, cache files, free disk
-space, duplicate face.py/sort_photos.py processes, rsync availability, and the
-external _source_review backup drive when requested.
+space, duplicate face.py/sort_photos.py processes, and memory readiness.
 """
 
 from __future__ import annotations
 
-import argparse
 import os
 import pickle
 import shutil
@@ -30,7 +28,6 @@ CACHE_FILES = {
     "fingerprint cache": CACHE_DIR / "advanced_duplicate_fingerprints.json",
     "smart album state": CACHE_DIR / "smart_album_person_state.json",
 }
-EXTERNAL_REVIEW_BACKUP = Path("/Volumes/Photos & Videos  Backup/photo_source_review_backup/_source_review")
 MIN_FREE_GB = 20
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -156,20 +153,6 @@ def memory_check() -> Check:
     return Check("OK", "available memory", f"{mb} MB available")
 
 
-def rsync_check() -> Check:
-    found = shutil.which("rsync")
-    if not found:
-        return Check("FAIL", "rsync", "not found; backup-review cannot run")
-    return Check("OK", "rsync", found)
-
-
-def external_backup_check(required: bool) -> Check:
-    if EXTERNAL_REVIEW_BACKUP.exists():
-        return Check("OK", "external _source_review backup", str(EXTERNAL_REVIEW_BACKUP))
-    level = "FAIL" if required else "WARN"
-    return Check(level, "external _source_review backup", f"missing: {EXTERNAL_REVIEW_BACKUP}")
-
-
 def print_checks(checks: list[Check]) -> None:
     width = max(len(c.name) for c in checks)
     for c in checks:
@@ -177,11 +160,6 @@ def print_checks(checks: list[Check]) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--require-external", action="store_true",
-                        help="Fail if the external _source_review backup folder is not mounted.")
-    args = parser.parse_args()
-
     checks = [
         folder_check(SORTED, "sorted_all_pictures"),
         folder_check(PEOPLE, "photos_by_person"),
@@ -191,8 +169,6 @@ def main() -> int:
         free_space_check(SORTED),
         memory_check(),
         process_check(),
-        rsync_check(),
-        external_backup_check(args.require_external),
     ]
     checks.extend(cache_check(name, path) for name, path in CACHE_FILES.items())
 

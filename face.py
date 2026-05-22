@@ -16,7 +16,7 @@ Run:
     python face.py clean-refs  # clean/compact Face References then rebuild
     python face.py nudity      # scan sorted people folders for nudity
     python face.py bad-images  # move unreadable recovered artifacts to review
-    python face.py recover-bad-images # recover quarantined bad images from backups
+    python face.py recover-bad-images # recover quarantined bad images from valid sources
     python face.py rename      # name/number files inside person folders
     python face.py all-views   # build all/all nude hardlink views in each person folder
     python face.py structure   # audit/repair canonical person folder structure
@@ -24,7 +24,6 @@ Run:
     python face.py smart-albums # create hardlinked smart album views
     python face.py people-cleanup # apply reusable person-folder merge/rename/remove rules
     python face.py identity-audit # compare identity DB to current person folders
-    python face.py backup-review # back up _source_review to external drive
     python face.py review-dashboard # one HTML dashboard for review queues
     python face.py duplicate-review # browser review for near-visual duplicates
     python face.py unknown-triage # HTML report for unlabeled face clusters
@@ -155,7 +154,7 @@ ACTIONS = [
         "key": "recover-bad-images",
         "aliases": ["recover-bad", "repair-bad-images"],
         "label": "Recover Bad Image Files",
-        "desc": "Dry-run recovery of quarantined bad person images from valid backup/source files",
+        "desc": "Dry-run recovery of quarantined bad person images from valid source folders",
         "script": "recover_bad_person_images.py",
         "args": ["--phash-threshold", "0"],
     },
@@ -218,14 +217,6 @@ ACTIONS = [
         "label": "Identity Audit",
         "desc": "Check whether the identity DB matches current person folders after cleanup or renames",
         "script": "identity_audit.py",
-    },
-    {
-        "key": "backup-review",
-        "aliases": ["backup", "backup-source-review"],
-        "label": "Backup Source Review",
-        "desc": "Snapshot _source_review to external drive, verify, then ask before deleting local copy",
-        "script": "backup_source_review.py",
-        "args": ["--snapshot", "--checksum-verify", "--ask-delete-local"],
     },
     {
         "key": "review-dashboard",
