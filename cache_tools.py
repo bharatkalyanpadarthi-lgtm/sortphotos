@@ -169,6 +169,13 @@ def save_cache_with_backup(cache: sort_photos.CacheState, backup: Path | None) -
     return backup
 
 
+def signature_matches_current_file(src: str, sig: tuple[float, int]) -> bool:
+    try:
+        return Path(src).exists() and sort_photos.file_signature(Path(src)) == sig
+    except OSError:
+        return False
+
+
 def rehydrate(people_dir: Path, person: str | None, apply: bool,
               replace: bool, max_images: int | None, batch_size: int) -> int:
     candidates = person_folder_images(people_dir, person)
@@ -223,14 +230,14 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
         for src, sig in old_cache.file_signatures.items():
             if not should_keep_existing(src):
                 continue
-            if not Path(src).exists():
+            if not signature_matches_current_file(src, sig):
                 continue
             new_cache.file_signatures[src] = sig
             kept_existing_files += 1
         for face in old_cache.faces:
             if not should_keep_existing(face.src_str):
                 continue
-            if not Path(face.src_str).exists():
+            if face.src_str not in new_cache.file_signatures:
                 continue
             new_cache.faces.append(face)
             kept_existing_faces += 1
@@ -238,14 +245,14 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
         for src, sig in old_cache.file_signatures.items():
             if not should_keep_existing(src):
                 continue
-            if not Path(src).exists():
+            if not signature_matches_current_file(src, sig):
                 continue
             new_cache.file_signatures[src] = sig
             kept_existing_files += 1
         for face in old_cache.faces:
             if not should_keep_existing(face.src_str):
                 continue
-            if not Path(face.src_str).exists():
+            if face.src_str not in new_cache.file_signatures:
                 continue
             new_cache.faces.append(face)
             kept_existing_faces += 1

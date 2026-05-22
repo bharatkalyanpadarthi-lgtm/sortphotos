@@ -188,6 +188,15 @@ def test_full_rehydrate_keeps_cached_candidates(tmp: Path) -> None:
                     "full dry-run rehydrate changed cache paths")
 
 
+def test_cache_signature_mismatch_is_not_preserved(tmp: Path) -> None:
+    image = tmp / "Person" / "photos" / "Person_0001.jpg"
+    make_image(image, (20, 30, 40))
+    old_sig = sort_photos.file_signature(image)
+    make_image(image, (90, 110, 130))
+    assert_true(not cache_tools.signature_matches_current_file(str(image), old_sig),
+                "changed image still matched old cache signature")
+
+
 def test_generated_views_do_not_recover_bad_images(tmp: Path) -> None:
     people = tmp / "people"
     bad = people / "BadCase" / "all" / "bad.jpg"
@@ -247,6 +256,42 @@ def test_intake_fingerprint_accepts_pillow_readable_images(tmp: Path) -> None:
                 f"intake duplicate fingerprint counted a decode error: {stats}")
 
 
+def test_nudity_check_uses_normalized_fallback(tmp: Path) -> None:
+    class FakeNudityDetector:
+        def __init__(self):
+            self.paths: list[str] = []
+
+        def detect(self, path: str) -> list[dict]:
+            self.paths.append(path)
+            if Path(path).suffix.lower() != ".jpg":
+                raise AttributeError("'NoneType' object has no attribute 'shape'")
+            return [{"class": "FEMALE_BREAST_EXPOSED", "score": 0.99}]
+
+    person_dir = tmp / "people" / "Person"
+    image = person_dir / "photos" / "candidate.heic"
+    image.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (32, 32), (180, 80, 120)).save(image, format="GIF")
+
+    old_detector = sort_photos._NUDITY_DETECTOR
+    old_enabled = sort_photos.NUDITY_SORT_ENABLED
+    detector = FakeNudityDetector()
+    sort_photos._NUDITY_DETECTOR = detector
+    sort_photos.NUDITY_SORT_ENABLED = True
+    try:
+        with quiet_output():
+            dest, status = sort_photos.maybe_move_to_nudity_subfolder(image, person_dir)
+    finally:
+        sort_photos._NUDITY_DETECTOR = old_detector
+        sort_photos.NUDITY_SORT_ENABLED = old_enabled
+
+    assert_true(status == sort_photos.NUDITY_POSSIBLE_DIR,
+                f"nudity fallback did not classify possible nudity: {status}")
+    assert_true(dest.exists(), "nudity fallback destination does not exist")
+    assert_true(dest.parent == person_dir / "photos" / "nude",
+                f"nudity fallback moved to wrong folder: {dest}")
+    assert_true(len(detector.paths) == 2, f"expected original + fallback detector calls, got {detector.paths}")
+
+
 def test_incremental_smart_albums_skip_without_heavy_models(tmp: Path) -> None:
     people = tmp / "people"
     person = people / "Person"
@@ -290,9 +335,11 @@ TESTS = [
     ("Daily step ordering is safe", test_daily_order_is_safe),
     ("Person rehydrate preserves global cache", test_person_rehydrate_preserves_global_cache),
     ("Cache dry-run is non-destructive", test_full_rehydrate_keeps_cached_candidates),
+    ("Changed cache signatures are refreshed", test_cache_signature_mismatch_is_not_preserved),
     ("Generated bad views are not recovered", test_generated_views_do_not_recover_bad_images),
     ("Duplicate matching accepts Pillow-readable images", test_duplicate_matching_accepts_pillow_readable_images),
     ("Intake fingerprint accepts Pillow-readable images", test_intake_fingerprint_accepts_pillow_readable_images),
+    ("Nudity check uses normalized fallback", test_nudity_check_uses_normalized_fallback),
     ("Incremental smart albums skip heavy dry-run work", test_incremental_smart_albums_skip_without_heavy_models),
 ]
 

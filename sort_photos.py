@@ -644,6 +644,37 @@ def _nudity_category(detections: list[dict]) -> tuple[str | None, str, float]:
     return None, best_class, best_score
 
 
+def _detect_nudity_with_fallback(detector, path: Path) -> list[dict]:
+    try:
+        return detector.detect(str(path))
+    except Exception as first_error:  # noqa: BLE001
+        img = imread_unicode(path)
+        if img is None:
+            raise first_error
+
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix="nudity_input_",
+                suffix=".jpg",
+                delete=False,
+            ) as tmp:
+                tmp_path = Path(tmp.name)
+            ok, encoded = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 94])
+            if not ok:
+                raise first_error
+            tmp_path.write_bytes(encoded.tobytes())
+            return detector.detect(str(tmp_path))
+        except Exception as fallback_error:  # noqa: BLE001
+            raise fallback_error from first_error
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+
+
 def maybe_move_to_nudity_subfolder(path: Path, person_dir: Path) -> tuple[Path, str | None]:
     detector = _get_nudity_detector()
     if detector is None or not path.exists():
@@ -663,9 +694,9 @@ def maybe_move_to_nudity_subfolder(path: Path, person_dir: Path) -> tuple[Path, 
     ):
         return path, None
     try:
-        detections = detector.detect(str(path))
+        detections = _detect_nudity_with_fallback(detector, path)
     except Exception as e:  # noqa: BLE001
-        log.warning("Nudity check failed for %s: %s", path.name, e)
+        log.debug("Nudity check skipped for %s: %s", path.name, e)
         return path, "error"
     subdir, _best_class, _best_score = _nudity_category(detections)
     if not subdir:
