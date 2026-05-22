@@ -60,24 +60,12 @@ def person_dirs(people_dir: Path, person: str | None = None) -> list[Path]:
 
 def person_folder_images(people_dir: Path, person: str | None = None) -> list[tuple[Path, str]]:
     out: list[tuple[Path, str]] = []
-    seen: set[tuple[int, int] | Path] = set()
     for person_dir in person_dirs(people_dir, person):
         photos_dir = person_dir / "photos"
         roots = [photos_dir] if photos_dir.exists() else [person_dir]
         excluded = {"_smart_albums", "all", "review", "best", "quality", "duplicates"}
         for root in roots:
             for image in sort_photos.iter_images(root, excluded_dir_names=excluded):
-                try:
-                    stat = image.stat()
-                    key: tuple[int, int] | Path = (stat.st_dev, stat.st_ino)
-                except OSError:
-                    try:
-                        key = image.resolve()
-                    except OSError:
-                        key = image
-                if key in seen:
-                    continue
-                seen.add(key)
                 out.append((image, person_dir.name))
     return sorted(out, key=lambda item: (item[1].casefold(), str(item[0]).casefold()))
 
@@ -185,6 +173,10 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
               replace: bool, max_images: int | None, batch_size: int) -> int:
     candidates = person_folder_images(people_dir, person)
     all_candidate_paths = {str(path) for path, _person in candidates}
+    selected_person_dir: Path | None = None
+    if person:
+        matches = person_dirs(people_dir, person)
+        selected_person_dir = matches[0].resolve() if matches else None
     if max_images is not None:
         candidates = candidates[:max(0, max_images)]
 
@@ -210,20 +202,48 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
         config_fingerprint=sort_photos.config_fingerprint(),
     )
     candidate_paths = {str(path) for path, _person in candidates}
-    retain_paths = candidate_paths if max_images is None else all_candidate_paths
+
+    def should_keep_existing(src: str) -> bool:
+        if selected_person_dir is not None:
+            try:
+                is_selected_person = Path(src).resolve().is_relative_to(selected_person_dir)
+            except (OSError, ValueError):
+                is_selected_person = False
+            if replace:
+                return not is_selected_person
+            return True
+        if replace:
+            return False
+        retain_paths = candidate_paths if max_images is None else all_candidate_paths
+        return src in retain_paths
 
     kept_existing_faces = 0
     kept_existing_files = 0
     if not replace and old_cache.config_fingerprint == sort_photos.config_fingerprint():
         for src, sig in old_cache.file_signatures.items():
-            if src not in retain_paths:
+            if not should_keep_existing(src):
                 continue
             if not Path(src).exists():
                 continue
             new_cache.file_signatures[src] = sig
             kept_existing_files += 1
         for face in old_cache.faces:
-            if face.src_str not in retain_paths:
+            if not should_keep_existing(face.src_str):
+                continue
+            if not Path(face.src_str).exists():
+                continue
+            new_cache.faces.append(face)
+            kept_existing_faces += 1
+    elif replace and selected_person_dir is not None and old_cache.config_fingerprint == sort_photos.config_fingerprint():
+        for src, sig in old_cache.file_signatures.items():
+            if not should_keep_existing(src):
+                continue
+            if not Path(src).exists():
+                continue
+            new_cache.file_signatures[src] = sig
+            kept_existing_files += 1
+        for face in old_cache.faces:
+            if not should_keep_existing(face.src_str):
                 continue
             if not Path(face.src_str).exists():
                 continue
