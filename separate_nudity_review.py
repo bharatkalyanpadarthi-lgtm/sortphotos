@@ -6,7 +6,7 @@ The script scans person folders and copies flagged images to:
   ~/Pictures/sorted_all_pictures/_nudity_review/possible_nudity
 
 It leaves photos_by_person untouched unless --move is used. The follow-up
-placer moves flagged originals into per-person review/nudity_possible folders.
+placer moves flagged originals into per-person photos/nude folders.
 Default is dry-run; use --apply to copy/move files.
 """
 
@@ -29,6 +29,7 @@ DEFAULT_OUTPUT = Path.home() / "Pictures" / "sorted_all_pictures" / "_nudity_rev
 POLICY_VERSION = "3"
 EXCLUDED_DIRS = {
     "all",
+    "photos/nude",
     "photos_nude",
     "_possible_nudity",
     "_smart_albums",
@@ -59,11 +60,22 @@ def iter_images(root: Path) -> list[Path]:
     if not root.exists():
         return out
     for dirpath, dirnames, filenames in os.walk(root):
+        base = Path(dirpath)
+        try:
+            rel = base.relative_to(root)
+        except ValueError:
+            rel = Path()
+        if (
+            len(rel.parts) >= 2 and rel.parts[:2] == ("photos", "nude")
+        ) or (
+            len(rel.parts) >= 3 and rel.parts[1:3] == ("photos", "nude")
+        ):
+            dirnames[:] = []
+            continue
         dirnames[:] = [
             d for d in dirnames
             if not d.startswith(".") and d.casefold() not in EXCLUDED_DIRS
         ]
-        base = Path(dirpath)
         for filename in filenames:
             p = base / filename
             if p.is_file() and p.suffix.lower() in IMAGE_EXTS:

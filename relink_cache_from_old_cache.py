@@ -64,7 +64,7 @@ def canonical_label(label: str | None, aliases: dict[str, str], removed: set[str
 
 def person_photo_files(people_root: Path):
     for person_dir in sorted([p for p in people_root.iterdir() if p.is_dir()], key=lambda p: p.name.casefold()):
-        for subdir_name in ("photos", "photos_nude"):
+        for subdir_name in ("photos", "photos/nude", "photos_nude"):
             subdir = person_dir / subdir_name
             if not subdir.exists():
                 continue

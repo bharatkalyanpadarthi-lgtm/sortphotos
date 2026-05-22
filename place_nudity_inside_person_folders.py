@@ -5,7 +5,7 @@ Move NudeNet-flagged originals into subfolders inside each person folder.
 Reads a nudity review CSV produced by separate_nudity_review.py and moves:
   photos_by_person/<person>/<file>
 to:
-  photos_by_person/<person>/review/nudity_possible/<file>
+  photos_by_person/<person>/photos/nude/<file>
 
 Default is dry-run. Use --apply to move files.
 """
@@ -44,7 +44,7 @@ def latest_report(review_dir: Path) -> Path | None:
 
 def target_subdir(category: str, confirm_possible: bool) -> str | None:
     if category in {"possible_nudity", "uncertain"}:
-        return "photos_nude" if confirm_possible else "review/nudity_possible"
+        return "photos/nude"
     return None
 
 
@@ -59,7 +59,7 @@ def main() -> int:
     parser.add_argument("--remove-review-copies", action="store_true",
                         help="After moving originals, remove copied _nudity_review image folders.")
     parser.add_argument("--confirm-possible", action="store_true",
-                        help="Move possible_nudity rows to photos_nude instead of review/nudity_possible.")
+                        help="Deprecated; flagged rows always move to photos/nude.")
     parser.add_argument("--allow-legacy-report", action="store_true",
                         help="Accepted for old workflows; legacy reports are allowed by default.")
     parser.add_argument("--quiet", action="store_true")
@@ -111,6 +111,9 @@ def main() -> int:
             if parts[1] in {"photos_nude", "_possible_nudity", "_uncertain_nudity"}:
                 skipped += 1
                 continue
+            if len(parts) >= 3 and parts[1] == "photos" and parts[2] == "nude":
+                skipped += 1
+                continue
             if len(parts) >= 3 and parts[1] == "review" and parts[2] in {"nudity_possible", "uncertain_nudity"}:
                 skipped += 1
                 continue
@@ -126,7 +129,7 @@ def main() -> int:
     print(f"Files to move:          {len(actions)}")
     print(f"  possible_nudity:      {possible}")
     print(f"  lower-confidence:     {uncertain}")
-    print(f"Possible target:        {'photos_nude' if args.confirm_possible else 'review/nudity_possible'}")
+    print("Possible target:        photos/nude")
     print(f"Missing source files:   {missing}")
     print(f"Skipped report rows:    {skipped}")
     print(f"Legacy/old-policy rows: {skipped_legacy}")

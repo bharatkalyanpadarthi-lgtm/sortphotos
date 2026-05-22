@@ -118,16 +118,15 @@ DUPLICATES_DIR  = "review/duplicates"
 LEGACY_DUPLICATES_DIR = "_duplicates"
 BLURRED_DIR     = "_blurred"
 PERSON_PHOTOS_DIR = "photos"
-PERSON_NUDE_DIR = "photos_nude"
+PERSON_NUDE_DIR = "nude"
 PERSON_REVIEW_DIR = "review"
 
 INTERACTIVE_LABELING = True
 DEDUP_DUPLICATES     = True
 REVIEW_CLOSE_PAIRS   = True
 USE_AI_SUGGESTIONS   = True
-# New scans automatically place detector hits in each person's
-# review/nudity_possible folder. The normal all/nude hardlink view is rebuilt
-# after daily runs.
+# New scans automatically place detector hits in each person's photos/nude
+# folder. The normal all/nude hardlink view is rebuilt after daily runs.
 NUDITY_SORT_ENABLED  = True
 
 MAKE_MONTAGES   = True
@@ -137,7 +136,7 @@ INCLUDE_UNKNOWN = True
 
 NUDITY_THRESHOLD = 0.70
 NUDITY_UNCERTAIN_THRESHOLD = 0.45
-NUDITY_POSSIBLE_DIR = f"{PERSON_REVIEW_DIR}/nudity_possible"
+NUDITY_POSSIBLE_DIR = f"{PERSON_PHOTOS_DIR}/{PERSON_NUDE_DIR}"
 NUDITY_UNCERTAIN_DIR = NUDITY_POSSIBLE_DIR
 NUDITY_CLASS_THRESHOLDS = {
     "FEMALE_BREAST_EXPOSED": 0.72,
@@ -615,6 +614,8 @@ def maybe_move_to_nudity_subfolder(path: Path, person_dir: Path) -> tuple[Path, 
         rel_parts = path.parts
     if (
         PERSON_NUDE_DIR in rel_parts
+        or (len(rel_parts) >= 2 and rel_parts[0] == PERSON_PHOTOS_DIR and rel_parts[1] == PERSON_NUDE_DIR)
+        or rel_parts[0] == "photos_nude"
         or (len(rel_parts) >= 2 and rel_parts[0] == PERSON_REVIEW_DIR and rel_parts[1] == "nudity_possible")
         or (len(rel_parts) >= 2 and rel_parts[0] == PERSON_REVIEW_DIR and rel_parts[1] == "uncertain_nudity")
         or "_possible_nudity" in rel_parts
@@ -2841,7 +2842,7 @@ def main() -> int:
     parser.add_argument("--no-ai", action="store_true",
                         help="Disable Claude auto-name suggestions")
     parser.add_argument("--no-nudity-sort", action="store_true",
-                        help="Do not auto-place flagged images into review/nudity_possible subfolders.")
+                        help="Do not auto-place flagged images into photos/nude subfolders.")
     parser.add_argument("--no-person-match", action="store_true",
                         help="Do not auto-label new clusters from the existing person identity DB.")
     parser.add_argument("--no-reference-match", action="store_true",

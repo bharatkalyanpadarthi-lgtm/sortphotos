@@ -50,7 +50,7 @@ DEFAULT_FRAMING_CACHE = Path.home() / ".face_sort_cache" / "smart_album_framing_
 DEFAULT_SMART_STATE = Path.home() / ".face_sort_cache" / "smart_album_person_state.json"
 NUDITY_CACHE_VERSION = 2
 FRAMING_CACHE_VERSION = 2
-SMART_ALBUM_LOGIC_VERSION = 10
+SMART_ALBUM_LOGIC_VERSION = 11
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
 SMART_DIR = "_smart_albums"
 EXCLUDED_DIRS = {
@@ -61,6 +61,7 @@ EXCLUDED_DIRS = {
     "_blurred",
 }
 NUDITY_NESTED_DIRS = {
+    "photos/nude": "_nudity_possible",
     "photos_nude": "_nudity_possible",
     "_possible_nudity": "_nudity_possible",
     "_uncertain_nudity": "_nudity_uncertain",
@@ -226,6 +227,8 @@ def save_smart_state(path: Path, data: dict) -> None:
 def path_nudity_status(rel: Path) -> str:
     if not rel.parts:
         return ""
+    if len(rel.parts) >= 2 and rel.parts[0] == "photos" and rel.parts[1] == "nude":
+        return "possible"
     if rel.parts[0] in {"photos_nude", "_possible_nudity"}:
         return "possible"
     if rel.parts[0] == "_uncertain_nudity":
@@ -872,6 +875,8 @@ def nudity_nested_dir(info: ImageInfo) -> str | None:
 
 
 def visible_rel_name(rel: Path) -> Path:
+    if len(rel.parts) > 2 and rel.parts[:2] == ("photos", "nude"):
+        return Path(*rel.parts[2:])
     if len(rel.parts) > 2 and rel.parts[:2] == ("review", "nudity_possible"):
         return Path(*rel.parts[2:])
     if rel.parts and rel.parts[0] in NUDITY_NESTED_DIRS and len(rel.parts) > 1:

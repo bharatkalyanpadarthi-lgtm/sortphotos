@@ -110,7 +110,7 @@ ACTIONS = [
         "key": "nudity",
         "aliases": ["nudity-check", "scan-nudity"],
         "label": "Run Nudity Check",
-        "desc": "Optional manual command: scan people folders and move detector hits into per-person nudity review folders",
+        "desc": "Optional manual command: scan people folders and move detector hits into per-person photos/nude folders",
         "steps": [
             {
                 "script": "quarantine_bad_person_images.py",
@@ -131,6 +131,10 @@ ACTIONS = [
             {
                 "script": "build_all_person_views.py",
                 "args": ["--apply", "--quiet"],
+            },
+            {
+                "script": "build_smart_albums.py",
+                "args": ["--apply", "--incremental", "--no-detect-nudity", "--framing-det-size", "640"],
             },
         ],
     },
@@ -161,10 +165,9 @@ ACTIONS = [
     {
         "key": "nudity-confirm",
         "aliases": ["confirm-nudity", "promote-nudity"],
-        "label": "Confirm Nudity Review",
-        "desc": "Dry-run by default: move latest possible_nudity report rows into photos_nude when you add --apply",
+        "label": "Place Latest Nudity Report",
+        "desc": "Dry-run by default: move latest possible_nudity report rows into photos/nude when you add --apply",
         "script": "place_nudity_inside_person_folders.py",
-        "args": ["--confirm-possible"],
     },
     {
         "key": "rename",

@@ -143,6 +143,8 @@ def category_label(rel: Path) -> str:
     if not rel.parts:
         return "photo"
     first = rel.parts[0]
+    if len(rel.parts) >= 2 and first == "photos" and rel.parts[1] == "nude":
+        return "nudity_possible"
     if first in {"photos_nude", "_possible_nudity"}:
         return "nudity_possible"
     if first == "_uncertain_nudity":

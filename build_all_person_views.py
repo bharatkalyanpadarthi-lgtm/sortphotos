@@ -35,8 +35,10 @@ NUDE_DIR = "nude"
 BEST_DIR = "best"
 QUALITY_DIR = "by_quality"
 SKIP_DIRS = {VIEW_DIR, "_smart_albums", "_duplicates", "_near_visual_review"}
-NUDE_SOURCE_DIRS = {"photos_nude"}
-NUDE_REVIEW_PARTS: set[tuple[str, str]] = {
+NUDE_SOURCE_PARTS: set[tuple[str, ...]] = {
+    ("photos", "nude"),
+    ("photos_nude",),
+    ("_possible_nudity",),
     ("review", "nudity_possible"),
     ("review", "uncertain_nudity"),
 }
@@ -66,7 +68,9 @@ def iter_source_images(person_dir: Path) -> list[Path]:
             if not is_image(path):
                 continue
             rel = path.relative_to(person_dir)
-            if rel.parts and rel.parts[0] == "review" and tuple(rel.parts[:2]) not in NUDE_REVIEW_PARTS:
+            if rel.parts and rel.parts[0] == "review" and not any(
+                tuple(rel.parts[:len(prefix)]) == prefix for prefix in NUDE_SOURCE_PARTS
+            ):
                 continue
             if is_image(path):
                 out.append(path)
@@ -127,7 +131,7 @@ def best_rank(path: Path, person_dir: Path) -> tuple:
 
 def category_rank(path: Path, person_dir: Path) -> tuple[int, str]:
     rel = path.relative_to(person_dir)
-    if rel.parts and rel.parts[0] in NUDE_SOURCE_DIRS:
+    if is_nude_source(path, person_dir):
         return (1, str(rel).lower())
     if rel.parts and rel.parts[0].startswith("_"):
         return (2, str(rel).lower())
@@ -138,9 +142,7 @@ def is_nude_source(path: Path, person_dir: Path) -> bool:
     rel = path.relative_to(person_dir)
     if not rel.parts:
         return False
-    if rel.parts[0] in NUDE_SOURCE_DIRS:
-        return True
-    return tuple(rel.parts[:2]) in NUDE_REVIEW_PARTS
+    return any(tuple(rel.parts[:len(prefix)]) == prefix for prefix in NUDE_SOURCE_PARTS)
 
 
 def hardlink_or_symlink(src: Path, dest: Path, apply: bool) -> bool:

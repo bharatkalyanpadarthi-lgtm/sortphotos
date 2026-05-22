@@ -6,12 +6,10 @@ Canonical layout per person:
 
   Person/
     photos/              real non-nude person images
-    photos_nude/         real nudity-possible images
+      nude/              real nudity-possible images
     review/
       duplicates/
       near_visual/
-      nudity_possible/
-      uncertain_nudity/
     all/                 generated hardlink view
     _smart_albums/       generated hardlink albums
 
@@ -36,10 +34,10 @@ DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_p
 DEFAULT_REVIEW = Path.home() / "Pictures" / "sorted_all_pictures" / "_source_review" / "structure_review"
 
 PHOTOS_DIR = "photos"
-NUDE_DIR = "photos_nude"
+NUDE_DIR = "nude"
 REVIEW_DIR = "review"
 GENERATED_DIRS = {"all", "_smart_albums"}
-CANONICAL_TOPS = {PHOTOS_DIR, NUDE_DIR, REVIEW_DIR}
+CANONICAL_TOPS = {PHOTOS_DIR, REVIEW_DIR}
 LEGACY_TOPS = {"_possible_nudity", "_uncertain_nudity", "_duplicates", "_near_visual_review"}
 
 
@@ -122,21 +120,23 @@ def canonical_target(person_dir: Path, src: Path) -> Path | None:
 
     if top in GENERATED_DIRS:
         return None
-    if top == PHOTOS_DIR or top == NUDE_DIR or top == REVIEW_DIR:
+    if top == PHOTOS_DIR or top == REVIEW_DIR:
         return None
+    if top == "photos_nude":
+        return person_dir / PHOTOS_DIR / NUDE_DIR / Path(*rel.parts[1:])
     if top == "_possible_nudity":
-        return person_dir / REVIEW_DIR / "nudity_possible" / Path(*rel.parts[1:])
+        return person_dir / PHOTOS_DIR / NUDE_DIR / Path(*rel.parts[1:])
     if top == "_uncertain_nudity":
-        return person_dir / REVIEW_DIR / "uncertain_nudity" / Path(*rel.parts[1:])
+        return person_dir / PHOTOS_DIR / NUDE_DIR / Path(*rel.parts[1:])
     if top == "_duplicates":
         return person_dir / REVIEW_DIR / "duplicates" / Path(*rel.parts[1:])
     if top == "_near_visual_review":
         return person_dir / REVIEW_DIR / "near_visual" / Path(*rel.parts[1:])
     if len(rel.parts) == 1:
         if "nudity_possible" in name_lower or "nude" in name_lower:
-            return person_dir / REVIEW_DIR / "nudity_possible" / src.name
+            return person_dir / PHOTOS_DIR / NUDE_DIR / src.name
         if "nudity_uncertain" in name_lower:
-            return person_dir / REVIEW_DIR / "uncertain_nudity" / src.name
+            return person_dir / PHOTOS_DIR / NUDE_DIR / src.name
         return person_dir / PHOTOS_DIR / src.name
     if top.startswith("_"):
         return person_dir / REVIEW_DIR / "other" / Path(*rel.parts)

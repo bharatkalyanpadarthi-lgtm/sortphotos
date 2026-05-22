@@ -435,7 +435,7 @@ def sha256_file(path: Path) -> str:
 
 def existing_person_hashes(person_dir: Path) -> set[str]:
     hashes: set[str] = set()
-    for sub in ("photos", "photos_nude", "review/nudity_possible", "review/uncertain_nudity"):
+    for sub in ("photos", "photos/nude", "photos_nude", "review/nudity_possible", "review/uncertain_nudity"):
         folder = person_dir / sub
         if not folder.exists():
             continue

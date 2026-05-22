@@ -103,6 +103,7 @@ def nudity_count() -> int:
     if not PEOPLE.exists():
         return 0
     review_parts = {
+        ("photos", "nude"),
         ("review", "nudity_possible"),
         ("review", "uncertain_nudity"),
         ("photos_nude",),
