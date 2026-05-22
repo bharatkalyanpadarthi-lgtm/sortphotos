@@ -15,11 +15,13 @@ CSV but not moved unless --move-near is explicitly set.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import hashlib
 import json
 import os
 import shutil
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +38,28 @@ DEFAULT_REPORT = DEFAULT_SORTED / "_source_review" / "duplicate_reports" / "adva
 DEFAULT_CACHE = Path.home() / ".face_sort_cache" / "advanced_duplicate_fingerprints.json"
 CACHE_VERSION = 1
 ALWAYS_EXCLUDED_DIRS = {"all", "videos", "_duplicates", "_near_visual_review", "_smart_albums", "review"}
+
+
+@contextlib.contextmanager
+def suppress_native_stderr(enabled: bool = True):
+    """Hide noisy native decoder warnings while still counting failed reads."""
+    if not enabled:
+        yield
+        return
+    try:
+        sys.stderr.flush()
+        fd = sys.stderr.fileno()
+        saved = os.dup(fd)
+        with open(os.devnull, "w") as devnull:
+            os.dup2(devnull.fileno(), fd)
+            try:
+                yield
+            finally:
+                sys.stderr.flush()
+                os.dup2(saved, fd)
+                os.close(saved)
+    except Exception:
+        yield
 
 
 @dataclass(frozen=True)
@@ -121,7 +145,8 @@ def imread(path: Path) -> np.ndarray | None:
     data = np.fromfile(str(path), dtype=np.uint8)
     if data.size == 0:
         return None
-    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+    with suppress_native_stderr():
+        return cv2.imdecode(data, cv2.IMREAD_COLOR)
 
 
 def pixel_sha256(img: np.ndarray) -> str:

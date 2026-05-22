@@ -327,6 +327,8 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
         except OSError:
             pass
 
+    backup = save_cache_with_backup(new_cache, backup)
+
     print()
     print("Rehydrate complete.")
     if backup:

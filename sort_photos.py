@@ -233,6 +233,28 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger("sort_photos")
 
 
+@contextlib.contextmanager
+def suppress_native_stderr(enabled: bool = True):
+    """Hide noisy native decoder warnings while still returning read failures."""
+    if not enabled:
+        yield
+        return
+    try:
+        sys.stderr.flush()
+        fd = sys.stderr.fileno()
+        saved = os.dup(fd)
+        with open(os.devnull, "w") as devnull:
+            os.dup2(devnull.fileno(), fd)
+            try:
+                yield
+            finally:
+                sys.stderr.flush()
+                os.dup2(saved, fd)
+                os.close(saved)
+    except Exception:
+        yield
+
+
 # ============================================================================
 # DATACLASSES
 # ============================================================================
@@ -258,8 +280,9 @@ class FaceRecord:
             return self._crop_array
         if not self.crop_jpeg:
             return np.zeros((CROP_SIZE, CROP_SIZE, 3), dtype=np.uint8)
-        arr = cv2.imdecode(np.frombuffer(self.crop_jpeg, dtype=np.uint8),
-                           cv2.IMREAD_COLOR)
+        with suppress_native_stderr():
+            arr = cv2.imdecode(np.frombuffer(self.crop_jpeg, dtype=np.uint8),
+                               cv2.IMREAD_COLOR)
         if arr is None:
             return np.zeros((CROP_SIZE, CROP_SIZE, 3), dtype=np.uint8)
         return arr
@@ -402,7 +425,8 @@ def move_to_process_videos(input_dir: Path, videos_dir: Path = VIDEOS_DIR) -> in
 def imread_unicode(path: Path) -> np.ndarray | None:
     try:
         data = np.fromfile(str(path), dtype=np.uint8)
-        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        with suppress_native_stderr():
+            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
         if img is not None:
             return img
     except Exception:
@@ -410,7 +434,7 @@ def imread_unicode(path: Path) -> np.ndarray | None:
     try:
         from PIL import Image
         import pillow_heif  # noqa: F401
-        with Image.open(path) as im:
+        with suppress_native_stderr(), Image.open(path) as im:
             return cv2.cvtColor(np.array(im.convert("RGB")), cv2.COLOR_RGB2BGR)
     except Exception:
         return None
@@ -2646,24 +2670,36 @@ def finish_pipeline(all_records: list[FaceRecord],
     write_manifest(all_records, name_map, centroids, csv_path)
     run_post_process(output_dir)
 
-    new_cache = CacheState(version=CACHE_VERSION,
-                           config_fingerprint=config_fingerprint())
-    for r in all_records:
-        s = str(r.src)
-        if s not in new_cache.file_signatures:
-            try:
-                new_cache.file_signatures[s] = file_signature(r.src)
-            except OSError:
-                continue
-        final_name = name_map.get(r.cluster_id)
-        is_real_label = is_real_person_label(final_name) or final_name == "__junk__"
-        new_cache.faces.append(record_to_cached(
-            r, label=final_name if is_real_label else None))
+    # In archive mode the source files are about to be moved out of the inbox.
+    # Replacing the organized-photo cache here with soon-stale inbox paths makes
+    # the next daily run expensive. Keep the batch cache intact and let the
+    # daily cache-rehydrate step reconcile only real person-folder originals.
+    if ARCHIVE_SCANNED_SOURCES and scanned_sources is not None:
+        live_cache = load_cache()
+        log.info("Preserved existing face cache before source archive: %d files, "
+                 "%d faces (%d labeled). Cache refresh will reconcile organized "
+                 "person-folder originals.",
+                 len(live_cache.file_signatures), len(live_cache.faces),
+                 sum(1 for c in live_cache.faces if c.label))
+    else:
+        new_cache = CacheState(version=CACHE_VERSION,
+                               config_fingerprint=config_fingerprint())
+        for r in all_records:
+            s = str(r.src)
+            if s not in new_cache.file_signatures:
+                try:
+                    new_cache.file_signatures[s] = file_signature(r.src)
+                except OSError:
+                    continue
+            final_name = name_map.get(r.cluster_id)
+            is_real_label = is_real_person_label(final_name) or final_name == "__junk__"
+            new_cache.faces.append(record_to_cached(
+                r, label=final_name if is_real_label else None))
 
-    save_cache(new_cache)
-    log.info("Cache saved: %d files, %d faces (%d labeled).",
-             len(new_cache.file_signatures), len(new_cache.faces),
-             sum(1 for c in new_cache.faces if c.label))
+        save_cache(new_cache)
+        log.info("Cache saved: %d files, %d faces (%d labeled).",
+                 len(new_cache.file_signatures), len(new_cache.faces),
+                 sum(1 for c in new_cache.faces if c.label))
 
     if ARCHIVE_SCANNED_SOURCES and scanned_sources is not None:
         moved = archive_scanned_sources(scanned_sources, input_dir, output_dir)
