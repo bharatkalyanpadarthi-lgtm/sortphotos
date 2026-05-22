@@ -131,6 +131,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--dest-root", type=Path, default=DEFAULT_DEST_ROOT)
+    parser.add_argument("--snapshot", action="store_true",
+                        help="Write to a timestamped backup folder instead of reusing _source_review.")
     parser.add_argument("--mirror-destination", action="store_true",
                         help="Use rsync --delete so destination exactly mirrors local _source_review.")
     parser.add_argument("--checksum-verify", action="store_true",
@@ -145,7 +147,10 @@ def main() -> int:
 
     source = args.source.expanduser().resolve()
     dest_root = args.dest_root.expanduser().resolve()
-    dest = dest_root / source.name
+    if args.snapshot:
+        dest = dest_root / f"{source.name}_{time.strftime('%Y%m%d_%H%M%S')}"
+    else:
+        dest = dest_root / source.name
 
     if not source.exists():
         print(f"ERROR: source folder not found: {source}")
@@ -161,6 +166,15 @@ def main() -> int:
 
     print(f"Source:      {source}", flush=True)
     print(f"Destination: {dest}", flush=True)
+    if args.mirror_destination:
+        print()
+        print("WARNING: --mirror-destination uses rsync --delete and can remove files")
+        print("from the destination that are not currently present in the local source.")
+        if not args.yes:
+            ans = input("Type mirror-delete to continue with destination deletion: ").strip()
+            if ans != "mirror-delete":
+                print("Mirror backup cancelled before rsync.")
+                return 1
     print(flush=True)
 
     print("Starting rsync backup. Per-file progress will be shown below.", flush=True)

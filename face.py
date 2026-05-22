@@ -177,9 +177,9 @@ ACTIONS = [
         "key": "backup-review",
         "aliases": ["backup", "backup-source-review"],
         "label": "Backup Source Review",
-        "desc": "Mirror _source_review to external drive, verify, then ask before deleting local copy",
+        "desc": "Snapshot _source_review to external drive, verify, then ask before deleting local copy",
         "script": "backup_source_review.py",
-        "args": ["--mirror-destination", "--checksum-verify", "--ask-delete-local"],
+        "args": ["--snapshot", "--checksum-verify", "--ask-delete-local"],
     },
     {
         "key": "review-dashboard",
@@ -210,6 +210,20 @@ ACTIONS = [
         "desc": "Show whether the detector cache is useful or points at moved source files",
         "script": "cache_tools.py",
         "args": ["status"],
+    },
+    {
+        "key": "recover-old-cache",
+        "aliases": ["recover-missing", "recover-labeled"],
+        "label": "Recover Labeled Sources",
+        "desc": "Audit or restore still-available labeled originals from an older cache backup",
+        "script": "recover_labeled_sources_from_cache.py",
+    },
+    {
+        "key": "cache-relink",
+        "aliases": ["relink-cache", "fast-cache"],
+        "label": "Fast Cache Relink",
+        "desc": "Rebuild cache and identity DB from old cached embeddings matched to current files",
+        "script": "relink_cache_from_old_cache.py",
     },
     {
         "key": "cache-rehydrate",

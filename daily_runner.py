@@ -267,7 +267,7 @@ def offer_backup_before_cleanup(noninteractive: bool) -> int:
     print("Safety backup")
     print("=" * 60)
     print(f"_source_review currently contains {count_files(SOURCE_REVIEW):,} files.")
-    print("Before cleanup/move steps, you can mirror it to the external drive.")
+    print("Before cleanup/move steps, you can snapshot it to the external drive.")
     print("The backup script verifies the copy and asks again before deleting local files.")
     try:
         ans = input("Run verified _source_review backup now? [y/N]: ").strip().lower()
@@ -280,7 +280,7 @@ def offer_backup_before_cleanup(noninteractive: bool) -> int:
     cmd = [
         sys.executable,
         str(SCRIPT_DIR / "backup_source_review.py"),
-        "--mirror-destination",
+        "--snapshot",
         "--checksum-verify",
         "--ask-delete-local",
     ]
