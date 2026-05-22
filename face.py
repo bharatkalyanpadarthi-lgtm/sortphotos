@@ -78,6 +78,7 @@ ADVANCED_MENU_KEYS = {
     "rename",
     "rebuild-id",
     "structure",
+    "synthetic-tests",
     "unknown-triage",
 }
 
@@ -355,13 +356,22 @@ ACTIONS = [
         "script": "integration_audit.py",
     },
     {
+        "key": "synthetic-tests",
+        "aliases": ["test-flow", "flow-tests"],
+        "label": "Synthetic Integration Tests",
+        "desc": "Run temporary-workspace edge-case tests without touching real photos",
+        "script": "synthetic_integration_tests.py",
+        "hidden": True,
+    },
+    {
         "key": "health",
         "aliases": ["validate", "dedupe", "optimize", "cleanup"],
         "label": "Health Check",
-        "desc": "Preflight folders/cache/memory, validate cache, and check duplicate status without moving files",
+        "desc": "Preflight folders/cache/memory, synthetic tests, cache validation, and duplicate status",
         "steps": [
             {"script": "preflight_check.py"},
             {"script": "integration_audit.py"},
+            {"script": "synthetic_integration_tests.py"},
             {"script": "validate_cache.py"},
             {"script": "delete_person_folder_duplicates.py"},
             {"script": "advanced_duplicate_matching.py", "args": ["--quiet"]},
