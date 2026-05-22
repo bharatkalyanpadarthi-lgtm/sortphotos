@@ -102,10 +102,23 @@ def nudity_count() -> int:
     total = 0
     if not PEOPLE.exists():
         return 0
-    for folder in ("_possible_nudity", "_uncertain_nudity"):
-        for p in PEOPLE.glob(f"*/{folder}/**/*"):
-            if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
-                total += 1
+    review_parts = {
+        ("review", "nudity_possible"),
+        ("review", "uncertain_nudity"),
+        ("photos_nude",),
+        ("_possible_nudity",),
+        ("_uncertain_nudity",),
+    }
+    for p in PEOPLE.rglob("*"):
+        if not p.is_file() or p.suffix.lower() not in IMAGE_EXTS:
+            continue
+        try:
+            rel = p.relative_to(PEOPLE)
+        except ValueError:
+            continue
+        parts = rel.parts[1:]
+        if any(tuple(parts[:len(prefix)]) == prefix for prefix in review_parts):
+            total += 1
     return total
 
 

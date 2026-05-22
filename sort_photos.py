@@ -125,10 +125,10 @@ INTERACTIVE_LABELING = True
 DEDUP_DUPLICATES     = True
 REVIEW_CLOSE_PAIRS   = True
 USE_AI_SUGGESTIONS   = True
-# Keep new scans conservative by default. Nudity detection can be useful, but
-# false positives previously moved normal photos out of each person's main
-# `photos/` folder. Use explicit nudity commands when you want to review it.
-NUDITY_SORT_ENABLED  = False
+# New scans automatically place detector hits in each person's
+# review/nudity_possible folder. The normal all/nude hardlink view is rebuilt
+# after daily runs.
+NUDITY_SORT_ENABLED  = True
 
 MAKE_MONTAGES   = True
 MONTAGE_COLS    = 6
@@ -138,7 +138,7 @@ INCLUDE_UNKNOWN = True
 NUDITY_THRESHOLD = 0.70
 NUDITY_UNCERTAIN_THRESHOLD = 0.45
 NUDITY_POSSIBLE_DIR = f"{PERSON_REVIEW_DIR}/nudity_possible"
-NUDITY_UNCERTAIN_DIR = f"{PERSON_REVIEW_DIR}/uncertain_nudity"
+NUDITY_UNCERTAIN_DIR = NUDITY_POSSIBLE_DIR
 NUDITY_CLASS_THRESHOLDS = {
     "FEMALE_BREAST_EXPOSED": 0.72,
     "BUTTOCKS_EXPOSED": 0.72,
@@ -601,7 +601,7 @@ def _nudity_category(detections: list[dict]) -> tuple[str | None, str, float]:
     if best_score >= class_threshold:
         return NUDITY_POSSIBLE_DIR, best_class, best_score
     if best_score >= NUDITY_UNCERTAIN_THRESHOLD:
-        return NUDITY_UNCERTAIN_DIR, best_class, best_score
+        return NUDITY_POSSIBLE_DIR, best_class, best_score
     return None, best_class, best_score
 
 
@@ -2418,8 +2418,7 @@ def organize_originals(records: list[FaceRecord],
     counts = {"sharp_keep": 0, "sharp_dup": 0,
               "blurred_keep": 0, "blurred_dup": 0,
               "missing": 0, "skipped_existing": 0,
-              "nudity_possible": 0, "nudity_uncertain": 0,
-              "nudity_errors": 0}
+              "nudity_possible": 0, "nudity_errors": 0}
     per_person: dict[str, dict[str, int]] = defaultdict(
         lambda: {"sharp_keep": 0, "sharp_dup": 0,
                  "blurred_keep": 0, "blurred_dup": 0})
@@ -2462,8 +2461,6 @@ def organize_originals(records: list[FaceRecord],
                     continue
                 if nudity_status == NUDITY_POSSIBLE_DIR:
                     counts["nudity_possible"] += 1
-                elif nudity_status == NUDITY_UNCERTAIN_DIR:
-                    counts["nudity_uncertain"] += 1
                 elif nudity_status == "error":
                     counts["nudity_errors"] += 1
                 organized_sources.add(src)
@@ -2496,8 +2493,6 @@ def organize_originals(records: list[FaceRecord],
                         continue
                     if nudity_status == NUDITY_POSSIBLE_DIR:
                         counts["nudity_possible"] += 1
-                    elif nudity_status == NUDITY_UNCERTAIN_DIR:
-                        counts["nudity_uncertain"] += 1
                     elif nudity_status == "error":
                         counts["nudity_errors"] += 1
                     organized_sources.add(src)
@@ -2530,9 +2525,8 @@ def organize_originals(records: list[FaceRecord],
              counts["blurred_keep"], counts["blurred_dup"],
              counts["missing"], counts["skipped_existing"])
     if NUDITY_SORT_ENABLED:
-        log.info("Nudity subfolder sort: possible=%d, uncertain=%d, errors=%d",
-                 counts["nudity_possible"], counts["nudity_uncertain"],
-                 counts["nudity_errors"])
+        log.info("Nudity subfolder sort: possible=%d, errors=%d",
+                 counts["nudity_possible"], counts["nudity_errors"])
     if ARCHIVE_ORGANIZED_SOURCES and input_dir is not None and output_dir is not None:
         moved = archive_organized_sources(organized_sources, input_dir, output_dir)
         log.info("Archived %d organized source image(s) to %s",
@@ -2847,7 +2841,7 @@ def main() -> int:
     parser.add_argument("--no-ai", action="store_true",
                         help="Disable Claude auto-name suggestions")
     parser.add_argument("--no-nudity-sort", action="store_true",
-                        help="Do not auto-place flagged images into _possible_nudity/_uncertain_nudity subfolders.")
+                        help="Do not auto-place flagged images into review/nudity_possible subfolders.")
     parser.add_argument("--no-person-match", action="store_true",
                         help="Do not auto-label new clusters from the existing person identity DB.")
     parser.add_argument("--no-reference-match", action="store_true",

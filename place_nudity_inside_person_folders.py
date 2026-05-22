@@ -6,10 +6,7 @@ Reads a nudity review CSV produced by separate_nudity_review.py and moves:
   photos_by_person/<person>/<file>
 to:
   photos_by_person/<person>/review/nudity_possible/<file>
-or:
-  photos_by_person/<person>/review/uncertain_nudity/<file>
 
-Use --confirm-possible to send possible_nudity rows directly to photos_nude.
 Default is dry-run. Use --apply to move files.
 """
 
@@ -21,7 +18,7 @@ import shutil
 from pathlib import Path
 
 DEFAULT_SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
-SUPPORTED_POLICY_VERSION = "2"
+SUPPORTED_POLICY_VERSIONS = {"2", "3", ""}
 
 
 def unique_dest(dest: Path) -> Path:
@@ -46,10 +43,8 @@ def latest_report(review_dir: Path) -> Path | None:
 
 
 def target_subdir(category: str, confirm_possible: bool) -> str | None:
-    if category == "possible_nudity":
+    if category in {"possible_nudity", "uncertain"}:
         return "photos_nude" if confirm_possible else "review/nudity_possible"
-    if category == "uncertain":
-        return "review/uncertain_nudity"
     return None
 
 
@@ -66,7 +61,7 @@ def main() -> int:
     parser.add_argument("--confirm-possible", action="store_true",
                         help="Move possible_nudity rows to photos_nude instead of review/nudity_possible.")
     parser.add_argument("--allow-legacy-report", action="store_true",
-                        help="Allow old reports without the conservative policy_version marker.")
+                        help="Accepted for old workflows; legacy reports are allowed by default.")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -96,7 +91,7 @@ def main() -> int:
                 skipped += 1
                 continue
             policy_version = row.get("policy_version", "")
-            if policy_version != SUPPORTED_POLICY_VERSION and not args.allow_legacy_report:
+            if policy_version not in SUPPORTED_POLICY_VERSIONS and not args.allow_legacy_report:
                 skipped += 1
                 skipped_legacy += 1
                 continue
@@ -130,7 +125,7 @@ def main() -> int:
     print(f"Person folders:         {people_root}")
     print(f"Files to move:          {len(actions)}")
     print(f"  possible_nudity:      {possible}")
-    print(f"  uncertain:            {uncertain}")
+    print(f"  lower-confidence:     {uncertain}")
     print(f"Possible target:        {'photos_nude' if args.confirm_possible else 'review/nudity_possible'}")
     print(f"Missing source files:   {missing}")
     print(f"Skipped report rows:    {skipped}")
@@ -138,10 +133,7 @@ def main() -> int:
     print()
 
     if skipped_legacy:
-        print("Legacy report rows were ignored because they were created before the")
-        print("conservative nudity policy. Run `python face.py nudity` to create a")
-        print("fresh report, or pass --allow-legacy-report if you intentionally want")
-        print("to use the old report.")
+        print("Report rows with an unsupported policy version were ignored.")
         print()
 
     if not args.quiet:

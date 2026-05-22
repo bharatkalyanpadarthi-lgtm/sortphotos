@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Separate possible nudity images into review folders using NudeNet.
+Separate possible nudity images into a review folder using NudeNet.
 
 The script scans person folders and copies flagged images to:
   ~/Pictures/sorted_all_pictures/_nudity_review/possible_nudity
-  ~/Pictures/sorted_all_pictures/_nudity_review/uncertain
 
 It leaves photos_by_person untouched unless --move is used. The follow-up
-placer moves flagged originals into per-person review folders by default;
-confirmed nude folders are never populated directly from a detector-only pass.
+placer moves flagged originals into per-person review/nudity_possible folders.
 Default is dry-run; use --apply to copy/move files.
 """
 
@@ -28,7 +26,7 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
               ".tif", ".tiff", ".heic", ".heif"}
 DEFAULT_INPUT = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
 DEFAULT_OUTPUT = Path.home() / "Pictures" / "sorted_all_pictures" / "_nudity_review"
-POLICY_VERSION = "2"
+POLICY_VERSION = "3"
 EXCLUDED_DIRS = {
     "all",
     "photos_nude",
@@ -222,7 +220,7 @@ def classify_detections(detections: list[dict],
     if best_score >= class_threshold:
         return "possible_nudity", best_class, best_score
     if best_score >= uncertain_threshold:
-        return "uncertain", best_class, best_score
+        return "possible_nudity", best_class, best_score
     return "safe", best_class, best_score
 
 
@@ -246,7 +244,7 @@ def main() -> int:
     parser.add_argument("--threshold", type=float, default=NUDITY_THRESHOLD,
                         help=f"Score needed for possible_nudity. Default: {NUDITY_THRESHOLD:.2f}")
     parser.add_argument("--uncertain-threshold", type=float, default=NUDITY_UNCERTAIN_THRESHOLD,
-                        help=f"Lower score sent to uncertain. Default: {NUDITY_UNCERTAIN_THRESHOLD:.2f}")
+                        help=f"Lower score still sent to possible_nudity. Default: {NUDITY_UNCERTAIN_THRESHOLD:.2f}")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--limit", type=int, default=0,
                         help="Only scan first N images, useful for testing.")
@@ -288,7 +286,7 @@ def main() -> int:
     print(f"Output:             {output_dir}")
     print(f"Images to scan:     {len(images)}")
     print(f"Mode:               {'MOVE' if args.move else 'COPY'} {'APPLY' if args.apply else 'DRY-RUN'}")
-    print(f"Thresholds:         possible={args.threshold:.2f}, uncertain={args.uncertain_threshold:.2f}")
+    print(f"Thresholds:         possible={args.threshold:.2f}, lower_possible={args.uncertain_threshold:.2f}")
     print()
 
     detector = NudeDetector()
@@ -332,7 +330,7 @@ def main() -> int:
                 "detections": detail,
             })
 
-            should_export = category in {"possible_nudity", "uncertain"} or (
+            should_export = category == "possible_nudity" or (
                 category == "safe" and args.copy_safe)
             if should_export:
                 dest = unique_dest(output_dir / category / rel)
@@ -341,7 +339,7 @@ def main() -> int:
         if not args.quiet and (scanned == len(images) or scanned % 250 == 0):
             print(f"Scanned {scanned}/{len(images)} "
                   f"(possible={counts['possible_nudity']}, "
-                  f"uncertain={counts['uncertain']}, safe={counts['safe']}, "
+                  f"safe={counts['safe']}, "
                   f"errors={counts['error']})")
 
     if args.apply:
@@ -358,7 +356,6 @@ def main() -> int:
     print()
     print("---- Results ----")
     print(f"Possible nudity: {counts['possible_nudity']}")
-    print(f"Uncertain:       {counts['uncertain']}")
     print(f"Safe:            {counts['safe']}")
     print(f"Errors:          {counts['error']}")
     print(f"Files to export: {len(actions)}")
