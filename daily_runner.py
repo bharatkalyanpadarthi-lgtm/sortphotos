@@ -259,7 +259,6 @@ def step_list(batch_size: int) -> list[dict]:
                 "--archive-sources-to-ready-delete",
                 "--archive-scanned-sources",
                 "--merge-existing-output",
-                "--no-nudity-sort",
                 "--batch-size", str(batch_size),
                 "--detect-workers", "1",
             ],
