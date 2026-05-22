@@ -1927,7 +1927,7 @@ def main() -> int:
         "nudity_images": 0,
         "outfit_links": 0,
     }
-    smart_state = load_smart_state(args.smart_state.expanduser()) if args.incremental and args.apply else None
+    smart_state = load_smart_state(args.smart_state.expanduser()) if args.incremental else None
     signatures: dict[str, dict[str, int | str]] = {}
     build_dirs = dirs
     skipped_count = 0
@@ -2025,7 +2025,7 @@ def main() -> int:
     print()
     print(f"People folder:       {root}")
     print(f"Person folders:      {len(dirs)}")
-    if args.incremental and args.apply:
+    if args.incremental:
         print(f"Rebuilt people:      {len(build_dirs)}")
         print(f"Skipped unchanged:   {skipped_count}")
     print(f"Images scanned:      {total['images']}")

@@ -50,6 +50,7 @@ def main() -> int:
     if args.apply:
         steps = [
             ("Preflight", [py, str(SCRIPT_DIR / "preflight_check.py")]),
+            ("Integration audit", [py, str(SCRIPT_DIR / "integration_audit.py")]),
             ("Cache validation", [py, str(SCRIPT_DIR / "validate_cache.py")]),
             ("Face cache status", [py, str(SCRIPT_DIR / "cache_tools.py"), "status"]),
             ("Person structure repair", [py, str(SCRIPT_DIR / "person_structure.py"), "--apply", "--quiet"]),
@@ -66,6 +67,7 @@ def main() -> int:
     else:
         steps = [
             ("Preflight", [py, str(SCRIPT_DIR / "preflight_check.py")]),
+            ("Integration audit", [py, str(SCRIPT_DIR / "integration_audit.py")]),
             ("Cache validation", [py, str(SCRIPT_DIR / "validate_cache.py")]),
             ("Face cache status", [py, str(SCRIPT_DIR / "cache_tools.py"), "status"]),
             ("Person structure audit", [py, str(SCRIPT_DIR / "person_structure.py"), "--quiet"]),

@@ -344,9 +344,17 @@ class IdentityDB:
 # ============================================================================
 
 def iter_images(root: Path,
-                excluded_dir_names: set[str] | None = None) -> Iterable[Path]:
+                excluded_dir_names: set[str] | None = None,
+                always_excluded_dir_names: set[str] | None = None) -> Iterable[Path]:
     excluded = DEFAULT_EXCLUDED_SCAN_DIRS if excluded_dir_names is None else excluded_dir_names
-    excluded_casefold = {d.casefold() for d in excluded} | ALWAYS_EXCLUDED_SCAN_DIRS
+    always_excluded = (
+        ALWAYS_EXCLUDED_SCAN_DIRS
+        if always_excluded_dir_names is None
+        else always_excluded_dir_names
+    )
+    excluded_casefold = {d.casefold() for d in excluded} | {
+        d.casefold() for d in always_excluded
+    }
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [
             d for d in dirnames
@@ -355,7 +363,7 @@ def iter_images(root: Path,
         base = Path(dirpath)
         for filename in filenames:
             p = base / filename
-            if p.suffix.lower() in IMAGE_EXTS:
+            if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
                 yield p
 
 
@@ -365,7 +373,7 @@ def iter_videos(root: Path) -> Iterable[Path]:
         base = Path(dirpath)
         for filename in filenames:
             p = base / filename
-            if p.suffix.lower() in VIDEO_EXTS:
+            if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
                 yield p
 
 
@@ -3069,8 +3077,21 @@ def main() -> int:
              len(cache.file_signatures), len(cache.faces),
              sum(1 for c in cache.faces if c.label))
 
-    excluded_scan_dirs = set() if args.scan_all_dirs else None
-    images = list(iter_images(input_dir, excluded_dir_names=excluded_scan_dirs))
+    try:
+        is_to_process = input_dir.resolve() == TO_PROCESS_DIR.expanduser().resolve()
+    except OSError:
+        is_to_process = False
+    if is_to_process:
+        # To Process is a real inbox: scan every user-dropped subfolder, even
+        # when a source folder happens to be named like a generated view.
+        excluded_scan_dirs = set()
+        always_excluded_scan_dirs = set()
+    else:
+        excluded_scan_dirs = set() if args.scan_all_dirs else None
+        always_excluded_scan_dirs = None
+    images = list(iter_images(input_dir,
+                              excluded_dir_names=excluded_scan_dirs,
+                              always_excluded_dir_names=always_excluded_scan_dirs))
     log.info("Found %d images under %s", len(images), input_dir)
     if not images:
         return 0

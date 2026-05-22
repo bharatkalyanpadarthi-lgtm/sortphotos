@@ -29,6 +29,7 @@ Run:
     python face.py unknown-triage # HTML report for unlabeled face clusters
     python face.py cache-status # inspect detector cache usefulness
     python face.py cache-rehydrate # rebuild detector cache from current person folders
+    python face.py integration-audit # cross-script safety audit
     python face.py health      # validate cache and duplicate status
     python face.py repair      # run full audit/repair workflow
 """
@@ -308,12 +309,20 @@ ACTIONS = [
         "hidden": True,
     },
     {
+        "key": "integration-audit",
+        "aliases": ["audit-flow", "flow-audit"],
+        "label": "Integration Audit",
+        "desc": "Read-only cross-script safety checks for daily ordering, cache, duplicates, and inbox visibility",
+        "script": "integration_audit.py",
+    },
+    {
         "key": "health",
         "aliases": ["validate", "dedupe", "optimize", "cleanup"],
         "label": "Health Check",
         "desc": "Preflight folders/cache/memory, validate cache, and check duplicate status without moving files",
         "steps": [
             {"script": "preflight_check.py"},
+            {"script": "integration_audit.py"},
             {"script": "validate_cache.py"},
             {"script": "delete_person_folder_duplicates.py"},
             {"script": "advanced_duplicate_matching.py", "args": ["--quiet"]},

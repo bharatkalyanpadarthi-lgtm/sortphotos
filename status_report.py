@@ -44,24 +44,24 @@ EXCLUDED_DIRS = {
 }
 
 
-def count_images(root: Path) -> int:
+def count_images(root: Path, exclude_generated_dirs: bool = True) -> int:
     if not root.exists():
         return 0
     total = 0
     for p in root.rglob("*"):
-        if any(part in EXCLUDED_DIRS for part in p.parts):
+        if exclude_generated_dirs and any(part in EXCLUDED_DIRS for part in p.parts):
             continue
         if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
             total += 1
     return total
 
 
-def count_videos(root: Path) -> int:
+def count_videos(root: Path, exclude_generated_dirs: bool = True) -> int:
     if not root.exists():
         return 0
     total = 0
     for p in root.rglob("*"):
-        if any(part in EXCLUDED_DIRS for part in p.parts):
+        if exclude_generated_dirs and any(part in EXCLUDED_DIRS for part in p.parts):
             continue
         if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
             total += 1
@@ -74,12 +74,12 @@ def count_dirs(root: Path) -> int:
     return sum(1 for p in root.iterdir() if p.is_dir() and not p.name.startswith("_"))
 
 
-def size_bytes(root: Path) -> int:
+def size_bytes(root: Path, exclude_generated_dirs: bool = True) -> int:
     if not root.exists():
         return 0
     total = 0
     for p in root.rglob("*"):
-        if any(part in EXCLUDED_DIRS for part in p.parts):
+        if exclude_generated_dirs and any(part in EXCLUDED_DIRS for part in p.parts):
             continue
         if p.is_file():
             try:
@@ -252,8 +252,12 @@ def main() -> int:
         f"{face_cache['files']} files / {face_cache['faces']} faces / "
         f"{face_cache['labeled']} labeled"
     )
-    print(f"To Process images:      {count_images(TO_PROCESS)} ({human_size(size_bytes(TO_PROCESS))})")
-    print(f"To Process videos:      {count_videos(TO_PROCESS)}")
+    print(
+        "To Process images:      "
+        f"{count_images(TO_PROCESS, exclude_generated_dirs=False)} "
+        f"({human_size(size_bytes(TO_PROCESS, exclude_generated_dirs=False))})"
+    )
+    print(f"To Process videos:      {count_videos(TO_PROCESS, exclude_generated_dirs=False)}")
     print()
     print("Smart albums")
     print(f"  Incremental tracked:  {smart_state_count()} people")

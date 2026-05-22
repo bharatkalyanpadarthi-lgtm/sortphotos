@@ -44,24 +44,24 @@ def run_id() -> str:
     return time.strftime("%Y%m%d_%H%M%S")
 
 
-def count_images(root: Path) -> int:
+def count_images(root: Path, exclude_generated_dirs: bool = True) -> int:
     if not root.exists():
         return 0
     total = 0
     for p in root.rglob("*"):
-        if any(part in SMART_DIRS for part in p.parts):
+        if exclude_generated_dirs and any(part in SMART_DIRS for part in p.parts):
             continue
         if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
             total += 1
     return total
 
 
-def count_videos(root: Path) -> int:
+def count_videos(root: Path, exclude_generated_dirs: bool = True) -> int:
     if not root.exists():
         return 0
     total = 0
     for p in root.rglob("*"):
-        if any(part in SMART_DIRS for part in p.parts):
+        if exclude_generated_dirs and any(part in SMART_DIRS for part in p.parts):
             continue
         if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
             total += 1
@@ -167,8 +167,8 @@ def snapshot() -> dict:
     dups = duplicate_counts()
     labels = labeling_remaining()
     return {
-        "to_process_images": count_images(TO_PROCESS),
-        "to_process_videos": count_videos(TO_PROCESS),
+        "to_process_images": count_images(TO_PROCESS, exclude_generated_dirs=False),
+        "to_process_videos": count_videos(TO_PROCESS, exclude_generated_dirs=False),
         "organized_images": count_images(PEOPLE),
         "nudity_images": nudity_count(),
         "ready_to_delete_files": count_files(READY),
@@ -263,6 +263,11 @@ def step_list(batch_size: int) -> list[dict]:
     py = sys.executable
     return [
         {
+            "name": "preflight",
+            "desc": "Preflight folders, memory, disk, and process safety",
+            "cmd": [py, str(SCRIPT_DIR / "preflight_check.py")],
+        },
+        {
             "name": "process",
             "desc": "Process new inbox images",
             "cmd": [
@@ -284,18 +289,20 @@ def step_list(batch_size: int) -> list[dict]:
          "cmd": [py, str(SCRIPT_DIR / "rename_person_folder_files.py"), "--apply", "--quiet"]},
         {"name": "exact-dedupe", "desc": "Move exact person-folder duplicates",
          "cmd": [py, str(SCRIPT_DIR / "delete_person_folder_duplicates.py"), "--apply", "--quiet"]},
-        {"name": "cache-rehydrate", "desc": "Refresh face cache against current organized person folders",
-         "cmd": [py, str(SCRIPT_DIR / "cache_tools.py"), "rehydrate", "--apply", "--batch-size", str(batch_size)], "heavy": True},
         {"name": "advanced-dedupe", "desc": "Refresh advanced duplicate report",
          "cmd": [py, str(SCRIPT_DIR / "advanced_duplicate_matching.py"), "--apply", "--quiet"], "heavy": True},
         {"name": "cleanup-empty", "desc": "Move empty person folders to ready_to_delete",
          "cmd": [py, str(SCRIPT_DIR / "cleanup_empty_person_folders.py"), "--apply", "--quiet"]},
+        {"name": "cache-rehydrate", "desc": "Refresh face cache after all file-moving cleanup",
+         "cmd": [py, str(SCRIPT_DIR / "cache_tools.py"), "rehydrate", "--apply", "--batch-size", str(batch_size)], "heavy": True},
         {"name": "all-views", "desc": "Rebuild per-person all/nude hardlink views",
          "cmd": [py, str(SCRIPT_DIR / "build_all_person_views.py"), "--apply", "--quiet"]},
         {"name": "smart-albums", "desc": "Refresh changed smart albums",
          "cmd": [py, str(SCRIPT_DIR / "build_smart_albums.py"), "--apply", "--incremental"], "heavy": True},
         {"name": "unknown-triage", "desc": "Write unknown-cluster triage report",
          "cmd": [py, str(SCRIPT_DIR / "unknown_triage.py"), "--quiet"]},
+        {"name": "integration-audit", "desc": "Verify final cross-script invariants",
+         "cmd": [py, str(SCRIPT_DIR / "integration_audit.py")]},
         {"name": "status", "desc": "Print final dashboard",
          "cmd": [py, str(SCRIPT_DIR / "status_report.py")]},
     ]
