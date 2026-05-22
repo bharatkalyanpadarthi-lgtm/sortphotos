@@ -6,8 +6,10 @@ The script scans person folders and copies flagged images to:
   ~/Pictures/sorted_all_pictures/_nudity_review/possible_nudity
   ~/Pictures/sorted_all_pictures/_nudity_review/uncertain
 
-It leaves photos_by_person untouched unless --move is used. A CSV report is
-always written. Default is dry-run; use --apply to copy/move files.
+It leaves photos_by_person untouched unless --move is used. The follow-up
+placer moves flagged originals into per-person review folders by default;
+confirmed nude folders are never populated directly from a detector-only pass.
+Default is dry-run; use --apply to copy/move files.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
               ".tif", ".tiff", ".heic", ".heif"}
 DEFAULT_INPUT = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
 DEFAULT_OUTPUT = Path.home() / "Pictures" / "sorted_all_pictures" / "_nudity_review"
+POLICY_VERSION = "2"
 EXCLUDED_DIRS = {
     "all",
     "photos_nude",
@@ -30,6 +33,15 @@ EXCLUDED_DIRS = {
     "_smart_albums",
     "_uncertain_nudity",
     "review",
+}
+NUDITY_THRESHOLD = 0.70
+NUDITY_UNCERTAIN_THRESHOLD = 0.45
+CLASS_THRESHOLDS = {
+    "FEMALE_BREAST_EXPOSED": 0.72,
+    "BUTTOCKS_EXPOSED": 0.72,
+    "FEMALE_GENITALIA_EXPOSED": 0.55,
+    "MALE_GENITALIA_EXPOSED": 0.55,
+    "ANUS_EXPOSED": 0.55,
 }
 
 EXPLICIT_CLASSES = {
@@ -90,8 +102,9 @@ def classify_detections(detections: list[dict],
     best = max(explicit, key=lambda d: float(d.get("score", 0.0)))
     best_class = str(best.get("class", ""))
     best_score = float(best.get("score", 0.0))
+    class_threshold = max(threshold, CLASS_THRESHOLDS.get(best_class, threshold))
 
-    if best_score >= threshold:
+    if best_score >= class_threshold:
         return "possible_nudity", best_class, best_score
     if best_score >= uncertain_threshold:
         return "uncertain", best_class, best_score
@@ -115,10 +128,10 @@ def main() -> int:
                         help="Copy flagged images to review folders. Default is dry-run.")
     parser.add_argument("--move", action="store_true",
                         help="Move flagged images instead of copying them. Use carefully.")
-    parser.add_argument("--threshold", type=float, default=0.35,
-                        help="Score needed for possible_nudity. Default: 0.35")
-    parser.add_argument("--uncertain-threshold", type=float, default=0.20,
-                        help="Lower score sent to uncertain. Default: 0.20")
+    parser.add_argument("--threshold", type=float, default=NUDITY_THRESHOLD,
+                        help=f"Score needed for possible_nudity. Default: {NUDITY_THRESHOLD:.2f}")
+    parser.add_argument("--uncertain-threshold", type=float, default=NUDITY_UNCERTAIN_THRESHOLD,
+                        help=f"Lower score sent to uncertain. Default: {NUDITY_UNCERTAIN_THRESHOLD:.2f}")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--limit", type=int, default=0,
                         help="Only scan first N images, useful for testing.")
@@ -194,9 +207,12 @@ def main() -> int:
             counts[category] += 1
             rel = src.relative_to(input_dir)
             rows.append({
+                "policy_version": POLICY_VERSION,
                 "category": category,
                 "best_class": best_class,
                 "best_score": f"{best_score:.3f}",
+                "threshold": f"{args.threshold:.3f}",
+                "uncertain_threshold": f"{args.uncertain_threshold:.3f}",
                 "source": str(src),
                 "relative_path": str(rel),
                 "detections": detail,
@@ -218,8 +234,9 @@ def main() -> int:
         with report_path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(
                 f,
-                fieldnames=["category", "best_class", "best_score",
-                            "source", "relative_path", "detections"],
+                fieldnames=["policy_version", "category", "best_class", "best_score",
+                            "threshold", "uncertain_threshold", "source",
+                            "relative_path", "detections"],
             )
             writer.writeheader()
             writer.writerows(rows)

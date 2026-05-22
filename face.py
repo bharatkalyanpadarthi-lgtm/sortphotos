@@ -109,7 +109,7 @@ ACTIONS = [
         "key": "nudity",
         "aliases": ["nudity-check", "scan-nudity"],
         "label": "Run Nudity Check",
-        "desc": "Optional manual command: scan sorted person folders and move reviewed flagged images into nudity subfolders",
+        "desc": "Optional manual command: scan people folders and move detector hits into per-person nudity review folders",
         "steps": [
             {
                 "script": "separate_nudity_review.py",
@@ -119,7 +119,23 @@ ACTIONS = [
                 "script": "place_nudity_inside_person_folders.py",
                 "args": ["--apply", "--remove-review-copies", "--quiet"],
             },
+            {
+                "script": "rename_person_folder_files.py",
+                "args": ["--apply", "--quiet"],
+            },
+            {
+                "script": "build_all_person_views.py",
+                "args": ["--apply", "--quiet"],
+            },
         ],
+    },
+    {
+        "key": "nudity-confirm",
+        "aliases": ["confirm-nudity", "promote-nudity"],
+        "label": "Confirm Nudity Review",
+        "desc": "Dry-run by default: move latest possible_nudity report rows into photos_nude when you add --apply",
+        "script": "place_nudity_inside_person_folders.py",
+        "args": ["--confirm-possible"],
     },
     {
         "key": "rename",

@@ -10,6 +10,7 @@ Canonical layout per person:
     review/
       duplicates/
       near_visual/
+      nudity_possible/
       uncertain_nudity/
     all/                 generated hardlink view
     _smart_albums/       generated hardlink albums
@@ -124,7 +125,7 @@ def canonical_target(person_dir: Path, src: Path) -> Path | None:
     if top == PHOTOS_DIR or top == NUDE_DIR or top == REVIEW_DIR:
         return None
     if top == "_possible_nudity":
-        return person_dir / NUDE_DIR / Path(*rel.parts[1:])
+        return person_dir / REVIEW_DIR / "nudity_possible" / Path(*rel.parts[1:])
     if top == "_uncertain_nudity":
         return person_dir / REVIEW_DIR / "uncertain_nudity" / Path(*rel.parts[1:])
     if top == "_duplicates":
@@ -133,7 +134,7 @@ def canonical_target(person_dir: Path, src: Path) -> Path | None:
         return person_dir / REVIEW_DIR / "near_visual" / Path(*rel.parts[1:])
     if len(rel.parts) == 1:
         if "nudity_possible" in name_lower or "nude" in name_lower:
-            return person_dir / NUDE_DIR / src.name
+            return person_dir / REVIEW_DIR / "nudity_possible" / src.name
         if "nudity_uncertain" in name_lower:
             return person_dir / REVIEW_DIR / "uncertain_nudity" / src.name
         return person_dir / PHOTOS_DIR / src.name

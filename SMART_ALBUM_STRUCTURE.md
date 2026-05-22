@@ -79,6 +79,18 @@ This keeps scene, outfit, quality, and framing folders useful while still separa
 
 Automatic nudity movement is disabled in the normal scan and daily flow. New images stay in each person's normal `photos/` folder unless you explicitly run `python face.py nudity` for a separate review pass.
 
+Nudity detection is conservative and review-first:
+
+```text
+photos/                       normal originals
+review/nudity_possible/       detector hits to inspect
+review/uncertain_nudity/      weak detector hits
+photos_nude/                  manually confirmed nude originals
+all/nude/                     hardlink view of photos_nude only
+```
+
+Run `python face.py nudity` to create per-person review folders. After checking the review folders, run `python face.py nudity-confirm --apply` only when you want the latest reviewed possible-nudity report promoted into `photos_nude/`.
+
 ## Why Visual Similar And Same Scene Are Separate
 
 `04_visual_similar/` is stricter. It is best for near duplicates and same-looking frames.

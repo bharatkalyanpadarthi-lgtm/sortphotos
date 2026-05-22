@@ -135,10 +135,17 @@ MONTAGE_COLS    = 6
 MONTAGE_TILE_PX = 160
 INCLUDE_UNKNOWN = True
 
-NUDITY_THRESHOLD = 0.35
-NUDITY_UNCERTAIN_THRESHOLD = 0.20
-NUDITY_POSSIBLE_DIR = PERSON_NUDE_DIR
+NUDITY_THRESHOLD = 0.70
+NUDITY_UNCERTAIN_THRESHOLD = 0.45
+NUDITY_POSSIBLE_DIR = f"{PERSON_REVIEW_DIR}/nudity_possible"
 NUDITY_UNCERTAIN_DIR = f"{PERSON_REVIEW_DIR}/uncertain_nudity"
+NUDITY_CLASS_THRESHOLDS = {
+    "FEMALE_BREAST_EXPOSED": 0.72,
+    "BUTTOCKS_EXPOSED": 0.72,
+    "FEMALE_GENITALIA_EXPOSED": 0.55,
+    "MALE_GENITALIA_EXPOSED": 0.55,
+    "ANUS_EXPOSED": 0.55,
+}
 NUDITY_EXPLICIT_CLASSES = {
     "FEMALE_BREAST_EXPOSED",
     "FEMALE_GENITALIA_EXPOSED",
@@ -590,7 +597,8 @@ def _nudity_category(detections: list[dict]) -> tuple[str | None, str, float]:
     best = max(explicit, key=lambda d: float(d.get("score", 0.0)))
     best_class = str(best.get("class", ""))
     best_score = float(best.get("score", 0.0))
-    if best_score >= NUDITY_THRESHOLD:
+    class_threshold = max(NUDITY_THRESHOLD, NUDITY_CLASS_THRESHOLDS.get(best_class, NUDITY_THRESHOLD))
+    if best_score >= class_threshold:
         return NUDITY_POSSIBLE_DIR, best_class, best_score
     if best_score >= NUDITY_UNCERTAIN_THRESHOLD:
         return NUDITY_UNCERTAIN_DIR, best_class, best_score
@@ -607,6 +615,7 @@ def maybe_move_to_nudity_subfolder(path: Path, person_dir: Path) -> tuple[Path, 
         rel_parts = path.parts
     if (
         PERSON_NUDE_DIR in rel_parts
+        or (len(rel_parts) >= 2 and rel_parts[0] == PERSON_REVIEW_DIR and rel_parts[1] == "nudity_possible")
         or (len(rel_parts) >= 2 and rel_parts[0] == PERSON_REVIEW_DIR and rel_parts[1] == "uncertain_nudity")
         or "_possible_nudity" in rel_parts
         or "_uncertain_nudity" in rel_parts

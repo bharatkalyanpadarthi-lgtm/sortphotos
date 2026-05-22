@@ -35,8 +35,8 @@ NUDE_DIR = "nude"
 BEST_DIR = "best"
 QUALITY_DIR = "by_quality"
 SKIP_DIRS = {VIEW_DIR, "_smart_albums", "_duplicates", "_near_visual_review", "review"}
-NUDE_SOURCE_DIRS = {"photos_nude", "_possible_nudity", "_uncertain_nudity"}
-NUDE_REVIEW_PARTS = {("review", "uncertain_nudity")}
+NUDE_SOURCE_DIRS = {"photos_nude"}
+NUDE_REVIEW_PARTS: set[tuple[str, str]] = set()
 QUALITY_ORDER = {"q_high": 0, "q_good": 1, "q_review": 2, "q_unknown": 3}
 
 

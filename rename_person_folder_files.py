@@ -130,6 +130,8 @@ def category_label(rel: Path) -> str:
             return "duplicate_review"
         if rel.parts[1] == "near_visual":
             return "near_visual_review"
+        if rel.parts[1] == "nudity_possible":
+            return "nudity_possible"
         if rel.parts[1] == "uncertain_nudity":
             return "nudity_uncertain"
         return "review"

@@ -5,10 +5,11 @@ Move NudeNet-flagged originals into subfolders inside each person folder.
 Reads a nudity review CSV produced by separate_nudity_review.py and moves:
   photos_by_person/<person>/<file>
 to:
-  photos_by_person/<person>/photos_nude/<file>
+  photos_by_person/<person>/review/nudity_possible/<file>
 or:
   photos_by_person/<person>/review/uncertain_nudity/<file>
 
+Use --confirm-possible to send possible_nudity rows directly to photos_nude.
 Default is dry-run. Use --apply to move files.
 """
 
@@ -20,6 +21,7 @@ import shutil
 from pathlib import Path
 
 DEFAULT_SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
+SUPPORTED_POLICY_VERSION = "2"
 
 
 def unique_dest(dest: Path) -> Path:
@@ -43,9 +45,9 @@ def latest_report(review_dir: Path) -> Path | None:
     return reports[0] if reports else None
 
 
-def target_subdir(category: str) -> str | None:
+def target_subdir(category: str, confirm_possible: bool) -> str | None:
     if category == "possible_nudity":
-        return "photos_nude"
+        return "photos_nude" if confirm_possible else "review/nudity_possible"
     if category == "uncertain":
         return "review/uncertain_nudity"
     return None
@@ -61,6 +63,10 @@ def main() -> int:
                         help="Move flagged originals. Default is dry-run.")
     parser.add_argument("--remove-review-copies", action="store_true",
                         help="After moving originals, remove copied _nudity_review image folders.")
+    parser.add_argument("--confirm-possible", action="store_true",
+                        help="Move possible_nudity rows to photos_nude instead of review/nudity_possible.")
+    parser.add_argument("--allow-legacy-report", action="store_true",
+                        help="Allow old reports without the conservative policy_version marker.")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -79,14 +85,20 @@ def main() -> int:
     actions: list[tuple[Path, Path, str]] = []
     missing = 0
     skipped = 0
+    skipped_legacy = 0
 
     with report.open("r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             category = row.get("category", "")
-            subdir = target_subdir(category)
+            subdir = target_subdir(category, args.confirm_possible)
             if not subdir:
                 skipped += 1
+                continue
+            policy_version = row.get("policy_version", "")
+            if policy_version != SUPPORTED_POLICY_VERSION and not args.allow_legacy_report:
+                skipped += 1
+                skipped_legacy += 1
                 continue
             src = Path(row.get("source", "")).expanduser()
             if not src.exists():
@@ -104,7 +116,7 @@ def main() -> int:
             if parts[1] in {"photos_nude", "_possible_nudity", "_uncertain_nudity"}:
                 skipped += 1
                 continue
-            if len(parts) >= 3 and parts[1] == "review" and parts[2] == "uncertain_nudity":
+            if len(parts) >= 3 and parts[1] == "review" and parts[2] in {"nudity_possible", "uncertain_nudity"}:
                 skipped += 1
                 continue
             person_dir = people_root / parts[0]
@@ -119,9 +131,18 @@ def main() -> int:
     print(f"Files to move:          {len(actions)}")
     print(f"  possible_nudity:      {possible}")
     print(f"  uncertain:            {uncertain}")
+    print(f"Possible target:        {'photos_nude' if args.confirm_possible else 'review/nudity_possible'}")
     print(f"Missing source files:   {missing}")
     print(f"Skipped report rows:    {skipped}")
+    print(f"Legacy/old-policy rows: {skipped_legacy}")
     print()
+
+    if skipped_legacy:
+        print("Legacy report rows were ignored because they were created before the")
+        print("conservative nudity policy. Run `python face.py nudity` to create a")
+        print("fresh report, or pass --allow-legacy-report if you intentionally want")
+        print("to use the old report.")
+        print()
 
     if not args.quiet:
         for src, dest, _category in actions[:80]:

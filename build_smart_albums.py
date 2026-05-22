@@ -47,6 +47,7 @@ DEFAULT_NUDITY_CACHE = Path.home() / ".face_sort_cache" / "smart_album_nudity_ca
 DEFAULT_NUDITY_OVERRIDES = Path.home() / ".face_sort_cache" / "smart_album_nudity_overrides.json"
 DEFAULT_FRAMING_CACHE = Path.home() / ".face_sort_cache" / "smart_album_framing_cache.json"
 DEFAULT_SMART_STATE = Path.home() / ".face_sort_cache" / "smart_album_person_state.json"
+NUDITY_CACHE_VERSION = 2
 FRAMING_CACHE_VERSION = 2
 SMART_ALBUM_LOGIC_VERSION = 9
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
@@ -84,8 +85,15 @@ EXPLICIT_NUDITY_CLASSES = {
     "BUTTOCKS_EXPOSED",
     "ANUS_EXPOSED",
 }
-NUDITY_THRESHOLD = 0.35
-NUDITY_UNCERTAIN_THRESHOLD = 0.20
+NUDITY_THRESHOLD = 0.70
+NUDITY_UNCERTAIN_THRESHOLD = 0.45
+NUDITY_CLASS_THRESHOLDS = {
+    "FEMALE_BREAST_EXPOSED": 0.72,
+    "BUTTOCKS_EXPOSED": 0.72,
+    "FEMALE_GENITALIA_EXPOSED": 0.55,
+    "MALE_GENITALIA_EXPOSED": 0.55,
+    "ANUS_EXPOSED": 0.55,
+}
 
 
 @dataclass
@@ -139,11 +147,11 @@ def load_nudity_cache(path: Path) -> dict:
     try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        if data.get("version") == 1 and isinstance(data.get("items"), dict):
+        if data.get("version") == NUDITY_CACHE_VERSION and isinstance(data.get("items"), dict):
             return data
     except Exception:
         pass
-    return {"version": 1, "items": {}}
+    return {"version": NUDITY_CACHE_VERSION, "items": {}}
 
 
 def load_framing_cache(path: Path) -> dict:
@@ -222,6 +230,8 @@ def path_nudity_status(rel: Path) -> str:
         return "possible"
     if rel.parts[0] == "_uncertain_nudity":
         return "uncertain"
+    if len(rel.parts) >= 2 and rel.parts[0] == "review" and rel.parts[1] == "nudity_possible":
+        return "possible"
     if len(rel.parts) >= 2 and rel.parts[0] == "review" and rel.parts[1] == "uncertain_nudity":
         return "uncertain"
     return ""
@@ -234,7 +244,8 @@ def classify_nudity_detections(detections: list[dict]) -> tuple[str, str, float]
     best = max(explicit, key=lambda d: float(d.get("score", 0.0)))
     best_class = str(best.get("class", ""))
     best_score = float(best.get("score", 0.0))
-    if best_score >= NUDITY_THRESHOLD:
+    class_threshold = max(NUDITY_THRESHOLD, NUDITY_CLASS_THRESHOLDS.get(best_class, NUDITY_THRESHOLD))
+    if best_score >= class_threshold:
         return "possible", best_class, best_score
     if best_score >= NUDITY_UNCERTAIN_THRESHOLD:
         return "uncertain", best_class, best_score
@@ -1885,7 +1896,7 @@ def main() -> int:
         return 0
 
     detector = None
-    nudity_cache = {"version": 1, "items": {}}
+    nudity_cache = {"version": NUDITY_CACHE_VERSION, "items": {}}
     nudity_overrides = load_nudity_overrides(args.nudity_overrides.expanduser())
     framing_cache_path = args.framing_cache.expanduser()
     if not args.no_detect_nudity:
