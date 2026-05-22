@@ -4,34 +4,20 @@ face.py — Simple launcher for the photo sorting pipeline.
 Use the first option for normal day-to-day work: dump new images into
 ~/Pictures/To Process, then run `python face.py daily`.
 
-Run:
-    python face.py             # show compact menu
-    python face.py daily       # full daily end-to-end workflow
-    python face.py dry-run     # preview daily workflow without moving files
-    python face.py process     # alias for daily; kept for muscle memory
-    python face.py review      # optional: label only larger unknown clusters
-    python face.py finish      # finalize labels you already entered
+Daily:
+    python face.py daily       # full safe workflow for ~/Pictures/To Process
+    python face.py dry-run     # preview the daily workflow
     python face.py status      # quick dashboard
-    python face.py refs        # rebuild optional Face References DB
-    python face.py clean-refs  # clean/compact Face References then rebuild
-    python face.py nudity      # scan sorted people folders for nudity
-    python face.py bad-images  # move unreadable recovered artifacts to review
-    python face.py recover-bad-images # recover quarantined bad images from valid sources
-    python face.py rename      # name/number files inside person folders
-    python face.py all-views   # build all/all nude hardlink views in each person folder
-    python face.py structure   # audit/repair canonical person folder structure
-    python face.py cleanup-empty # move empty person folders to ready_to_delete
-    python face.py smart-albums # create hardlinked smart album views
-    python face.py people-cleanup # apply reusable person-folder merge/rename/remove rules
-    python face.py identity-audit # compare identity DB to current person folders
-    python face.py review-dashboard # one HTML dashboard for review queues
-    python face.py duplicate-review # browser review for near-visual duplicates
-    python face.py unknown-triage # HTML report for unlabeled face clusters
-    python face.py cache-status # inspect detector cache usefulness
-    python face.py cache-rehydrate # rebuild detector cache from current person folders
-    python face.py integration-audit # cross-script safety audit
-    python face.py health      # validate cache and duplicate status
-    python face.py repair      # run full audit/repair workflow
+    python face.py health      # read-only safety checks
+
+Useful manual tools:
+    python face.py review-dashboard
+    python face.py review
+    python face.py nudity
+    python face.py repair
+
+Advanced commands remain available by name. Run `python face.py` and type `?`
+to see every command keyword.
 """
 
 from __future__ import annotations
@@ -41,6 +27,59 @@ import sys
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+
+MENU_GROUPS = [
+    (
+        "Daily",
+        [
+            "daily",
+            "dry-run",
+            "status",
+            "health",
+        ],
+    ),
+    (
+        "Review",
+        [
+            "review-dashboard",
+            "review",
+            "finish",
+            "duplicate-review",
+        ],
+    ),
+    (
+        "Maintenance",
+        [
+            "nudity",
+            "smart-albums",
+            "repair",
+            "integration-audit",
+        ],
+    ),
+]
+
+ADVANCED_MENU_KEYS = {
+    "all-views",
+    "bad-images",
+    "cache-rehydrate",
+    "cache-relink",
+    "cache-status",
+    "cleanup-empty",
+    "clean-refs",
+    "fix",
+    "identity-audit",
+    "nudity-confirm",
+    "people-cleanup",
+    "process",
+    "process-all",
+    "recover-bad-images",
+    "recover-old-cache",
+    "refs",
+    "rename",
+    "rebuild-id",
+    "structure",
+    "unknown-triage",
+}
 
 ACTIONS = [
     {
@@ -337,11 +376,20 @@ def show_menu() -> dict | None:
     print("  Photo Sorting Pipeline")
     print("=" * 60)
     print()
-    visible_actions = [a for a in ACTIONS if not a.get("hidden")]
-    for i, action in enumerate(visible_actions, start=1):
-        print(f"  [{i}] {action['label']}")
-        print(f"      {action['desc']}")
+    visible_actions: list[dict] = []
+    action_by_key = {a["key"]: a for a in ACTIONS}
+    for heading, keys in MENU_GROUPS:
+        print(f"  {heading}")
+        for key in keys:
+            action = action_by_key.get(key)
+            if action is None:
+                continue
+            visible_actions.append(action)
+            print(f"    [{len(visible_actions)}] {action['label']}")
+            print(f"        {action['desc']}")
         print()
+    print("  Type a command name directly for advanced tools.")
+    print("  Type ? to list every command keyword.")
     print(f"  [q] Quit")
     print()
     while True:
@@ -351,6 +399,9 @@ def show_menu() -> dict | None:
             return None
         if ans in ("q", "quit", "exit"):
             return None
+        if ans in ("?", "list", "commands"):
+            print_all_commands()
+            continue
         if not ans:
             continue
         # Numeric
@@ -359,10 +410,46 @@ def show_menu() -> dict | None:
             if 0 <= idx < len(visible_actions):
                 return visible_actions[idx]
         # Keyword
-        for a in ACTIONS:
-            if a["key"] == ans:
-                return a
+        action = find_action_by_key(ans)
+        if action is not None:
+            return action
         print(f"  Unknown choice: {ans}")
+
+
+def print_all_commands() -> None:
+    visible = {key for _heading, keys in MENU_GROUPS for key in keys}
+    regular = [
+        a for a in ACTIONS
+        if not a.get("hidden") and a["key"] not in visible and a["key"] not in ADVANCED_MENU_KEYS
+    ]
+    advanced = [
+        a for a in ACTIONS
+        if a["key"] in ADVANCED_MENU_KEYS or a.get("hidden")
+    ]
+
+    def line(action: dict) -> str:
+        aliases = action.get("aliases") or []
+        alias_text = f" ({', '.join(aliases)})" if aliases else ""
+        return f"    {action['key']}{alias_text}: {action['label']}"
+
+    print()
+    print("  Command keywords")
+    print("  " + "-" * 56)
+    print("  Main menu:")
+    for _heading, keys in MENU_GROUPS:
+        for key in keys:
+            action = find_action_by_key(key)
+            if action:
+                print(line(action))
+    if regular:
+        print("  Other:")
+        for action in regular:
+            print(line(action))
+    if advanced:
+        print("  Advanced / recovery:")
+        for action in advanced:
+            print(line(action))
+    print()
 
 
 def find_action_by_key(key: str) -> dict | None:
