@@ -29,6 +29,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import time
 import warnings
 from collections import defaultdict
@@ -261,9 +262,29 @@ def load_nudity_detector():
 
 
 @contextlib.contextmanager
+def suppress_native_stderr(enabled: bool = True):
+    if not enabled:
+        yield
+        return
+    try:
+        fd = sys.stderr.fileno()
+    except Exception:
+        yield
+        return
+    saved_fd = os.dup(fd)
+    try:
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            os.dup2(devnull.fileno(), fd)
+            yield
+    finally:
+        os.dup2(saved_fd, fd)
+        os.close(saved_fd)
+
+
+@contextlib.contextmanager
 def quiet_model_startup():
     with open(os.devnull, "w", encoding="utf-8") as devnull:
-        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull), suppress_native_stderr():
             yield
 
 
@@ -294,7 +315,8 @@ def imread(path: Path) -> np.ndarray | None:
     data = np.fromfile(str(path), dtype=np.uint8)
     if data.size == 0:
         return None
-    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+    with suppress_native_stderr():
+        return cv2.imdecode(data, cv2.IMREAD_COLOR)
 
 
 def phash64(img: np.ndarray) -> int:
@@ -526,7 +548,8 @@ def detect_face_stats_insightface(img: np.ndarray, app) -> tuple[int, float, str
     h, w = img.shape[:2]
     image_area = max(1, w * h)
     try:
-        faces = app.get(img)
+        with suppress_native_stderr():
+            faces = app.get(img)
     except Exception:
         return 0, 0.0, "", 0.0, 0.5, 0.5, 0.0, 0.0
 
@@ -784,12 +807,14 @@ def annotate_nudity(infos: list[ImageInfo],
         batch = pending[start:start + max(1, batch_size)]
         paths = [str(i.path) for i in batch]
         try:
-            results = detector.detect_batch(paths, batch_size=len(paths))
+            with suppress_native_stderr():
+                results = detector.detect_batch(paths, batch_size=len(paths))
         except Exception:
             results = []
             for info in batch:
                 try:
-                    results.append(detector.detect(str(info.path)))
+                    with suppress_native_stderr():
+                        results.append(detector.detect(str(info.path)))
                 except Exception:
                     results.append([])
 

@@ -12,8 +12,10 @@ Default is dry-run. Use --apply to rename files.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
+import sys
 from pathlib import Path
 
 import cv2
@@ -38,6 +40,27 @@ class ImageMeta:
         self.width = width
         self.height = height
         self.sharpness = sharpness
+
+
+@contextlib.contextmanager
+def suppress_native_stderr(enabled: bool = True):
+    """Hide noisy libjpeg/libpng warnings emitted while reading recovered files."""
+    if not enabled:
+        yield
+        return
+    try:
+        fd = sys.stderr.fileno()
+    except Exception:
+        yield
+        return
+    saved_fd = os.dup(fd)
+    try:
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            os.dup2(devnull.fileno(), fd)
+            yield
+    finally:
+        os.dup2(saved_fd, fd)
+        os.close(saved_fd)
 
 
 def iter_images(person_dir: Path) -> list[Path]:
@@ -68,27 +91,30 @@ def clean_prefix(folder_name: str) -> str:
 
 
 def read_image_meta(path: Path) -> ImageMeta:
-    try:
-        data = np.fromfile(str(path), dtype=np.uint8)
-        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-        if img is not None:
-            h, w = img.shape[:2]
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
-            sharp = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-            return ImageMeta(w, h, sharp)
-    except Exception:
-        pass
-    try:
-        from PIL import Image
-        with Image.open(path) as im:
-            w, h = im.size
-            frame = im.convert("RGB")
-            arr = cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR)
-            gray = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
-            sharp = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-            return ImageMeta(w, h, sharp)
-    except Exception:
-        return ImageMeta()
+    with suppress_native_stderr():
+        try:
+            data = np.fromfile(str(path), dtype=np.uint8)
+            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            if img is not None:
+                h, w = img.shape[:2]
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+                sharp = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                return ImageMeta(w, h, sharp)
+        except Exception:
+            pass
+        try:
+            from PIL import Image, ImageFile
+
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+            with Image.open(path) as im:
+                w, h = im.size
+                frame = im.convert("RGB")
+                arr = cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR)
+                gray = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+                sharp = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                return ImageMeta(w, h, sharp)
+        except Exception:
+            return ImageMeta()
 
 
 def orientation_label(meta: ImageMeta) -> str:

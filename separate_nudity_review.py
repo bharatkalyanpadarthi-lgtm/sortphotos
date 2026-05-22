@@ -15,11 +15,14 @@ Default is dry-run; use --apply to copy/move files.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
+from typing import Any
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
               ".tif", ".tiff", ".heic", ".heif"}
@@ -73,6 +76,118 @@ def iter_images(root: Path) -> list[Path]:
 def chunks(items: list[Path], size: int):
     for i in range(0, len(items), size):
         yield items[i:i + size]
+
+
+@contextlib.contextmanager
+def suppress_native_stderr(enabled: bool = True):
+    """Hide noisy libjpeg/libpng warnings emitted below Python's warnings layer."""
+    if not enabled:
+        yield
+        return
+    try:
+        fd = sys.stderr.fileno()
+    except Exception:
+        yield
+        return
+    saved_fd = os.dup(fd)
+    try:
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            os.dup2(devnull.fileno(), fd)
+            yield
+    finally:
+        os.dup2(saved_fd, fd)
+        os.close(saved_fd)
+
+
+def _cv2_to_rgba(mat: Any) -> Any | None:
+    import cv2
+
+    if mat is None or getattr(mat, "size", 0) == 0:
+        return None
+    if mat.ndim == 2:
+        return cv2.cvtColor(mat, cv2.COLOR_GRAY2RGBA)
+    if mat.ndim != 3:
+        return None
+    channels = mat.shape[2]
+    if channels == 4:
+        return cv2.cvtColor(mat, cv2.COLOR_BGRA2RGBA)
+    if channels == 3:
+        return cv2.cvtColor(mat, cv2.COLOR_BGR2RGBA)
+    if channels == 1:
+        return cv2.cvtColor(mat, cv2.COLOR_GRAY2RGBA)
+    return None
+
+
+def decode_for_detector(path: Path, suppress_warnings: bool = True) -> tuple[Any | None, str]:
+    """Decode an image to RGBA for NudeNet, falling back to Pillow when needed."""
+    errors: list[str] = []
+
+    with suppress_native_stderr(suppress_warnings):
+        try:
+            import cv2
+            import numpy as np
+
+            data = np.fromfile(str(path), dtype=np.uint8)
+            mat = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+            rgba = _cv2_to_rgba(mat)
+            if rgba is not None:
+                return rgba, ""
+            errors.append("opencv_decoder_returned_no_pixels")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"opencv:{e}")
+
+        try:
+            import numpy as np
+            from PIL import Image, ImageFile
+
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+            with Image.open(path) as im:
+                im.load()
+                return np.array(im.convert("RGBA")), ""
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"pillow:{e}")
+
+    return None, "; ".join(errors) if errors else "unreadable_image"
+
+
+def detect_batch_safely(detector: Any,
+                        batch: list[Path],
+                        batch_size: int,
+                        suppress_warnings: bool = True) -> list[Any]:
+    prepared: list[Any] = []
+    prepared_paths: list[Path] = []
+    results: list[Any] = [None] * len(batch)
+
+    for i, path in enumerate(batch):
+        image, error = decode_for_detector(path, suppress_warnings=suppress_warnings)
+        if image is None:
+            results[i] = {"__error__": error}
+            continue
+        prepared.append(image)
+        prepared_paths.append(path)
+
+    if not prepared:
+        return results
+
+    try:
+        with suppress_native_stderr(suppress_warnings):
+            detected = detector.detect_batch(prepared, batch_size=batch_size)
+    except Exception as batch_error:  # noqa: BLE001
+        detected = []
+        for image in prepared:
+            try:
+                with suppress_native_stderr(suppress_warnings):
+                    detected.append(detector.detect(image))
+            except Exception as e:  # noqa: BLE001
+                detected.append({"__error__": f"detector:{e}; batch:{batch_error}"})
+
+    detected_iter = iter(detected)
+    by_path = {path: next(detected_iter, {"__error__": "missing_detector_result"})
+               for path in prepared_paths}
+    for i, path in enumerate(batch):
+        if results[i] is None:
+            results[i] = by_path.get(path, {"__error__": "missing_detector_result"})
+    return results
 
 
 def unique_dest(dest: Path) -> Path:
@@ -138,6 +253,8 @@ def main() -> int:
     parser.add_argument("--copy-safe", action="store_true",
                         help="Also copy safe images to _nudity_review/safe.")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--show-codec-warnings", action="store_true",
+                        help="Show low-level JPEG/PNG decoder warnings.")
     args = parser.parse_args()
 
     if args.move and not args.apply:
@@ -181,15 +298,12 @@ def main() -> int:
 
     scanned = 0
     for batch in chunks(images, max(1, args.batch_size)):
-        try:
-            results = detector.detect_batch([str(p) for p in batch], batch_size=len(batch))
-        except Exception:
-            results = []
-            for p in batch:
-                try:
-                    results.append(detector.detect(str(p)))
-                except Exception as e:  # noqa: BLE001
-                    results.append({"__error__": str(e)})
+        results = detect_batch_safely(
+            detector,
+            batch,
+            batch_size=len(batch),
+            suppress_warnings=not args.show_codec_warnings,
+        )
 
         for src, detections in zip(batch, results):
             scanned += 1

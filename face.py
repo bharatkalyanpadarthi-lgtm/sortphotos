@@ -15,6 +15,7 @@ Run:
     python face.py refs        # rebuild optional Face References DB
     python face.py clean-refs  # clean/compact Face References then rebuild
     python face.py nudity      # scan sorted people folders for nudity
+    python face.py bad-images  # move unreadable recovered artifacts to review
     python face.py rename      # name/number files inside person folders
     python face.py all-views   # build all/all nude hardlink views in each person folder
     python face.py structure   # audit/repair canonical person folder structure
@@ -112,6 +113,10 @@ ACTIONS = [
         "desc": "Optional manual command: scan people folders and move detector hits into per-person nudity review folders",
         "steps": [
             {
+                "script": "quarantine_bad_person_images.py",
+                "args": ["--apply", "--quiet"],
+            },
+            {
                 "script": "separate_nudity_review.py",
                 "args": ["--apply", "--quiet"],
             },
@@ -121,6 +126,22 @@ ACTIONS = [
             },
             {
                 "script": "rename_person_folder_files.py",
+                "args": ["--apply", "--quiet"],
+            },
+            {
+                "script": "build_all_person_views.py",
+                "args": ["--apply", "--quiet"],
+            },
+        ],
+    },
+    {
+        "key": "bad-images",
+        "aliases": ["quarantine-bad", "bad-person-images", "clean-bad-images"],
+        "label": "Quarantine Bad Image Files",
+        "desc": "Move unreadable .jpg/.png recovery artifacts out of person folders, then rebuild all views",
+        "steps": [
+            {
+                "script": "quarantine_bad_person_images.py",
                 "args": ["--apply", "--quiet"],
             },
             {

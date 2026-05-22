@@ -13,6 +13,7 @@ This is intentionally conservative:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import json
 import os
@@ -38,6 +39,49 @@ RULES_FILE = Path(__file__).with_name("person_folder_rules.json")
 REPORT_DIR = SORTED / "_source_review" / "recovery_reports"
 DEFAULT_RECOVERED_BACKUP = Path("/Volumes/ssd 1/Photos Recovered/Photos & Videos  Backup/photo_source_review_backup")
 DEFAULT_EXTERNAL_BACKUP = Path("/Volumes/Photos & Videos  Backup/photo_source_review_backup")
+
+
+@contextlib.contextmanager
+def suppress_native_stderr(enabled: bool = True):
+    if not enabled:
+        yield
+        return
+    try:
+        fd = sys.stderr.fileno()
+    except Exception:
+        yield
+        return
+    saved_fd = os.dup(fd)
+    try:
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            os.dup2(devnull.fileno(), fd)
+            yield
+    finally:
+        os.dup2(saved_fd, fd)
+        os.close(saved_fd)
+
+
+def can_decode_image(path: Path) -> bool:
+    with suppress_native_stderr():
+        try:
+            import cv2
+            import numpy as np
+
+            data = np.fromfile(str(path), dtype=np.uint8)
+            img = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+            if img is not None and getattr(img, "size", 0) > 0:
+                return True
+        except Exception:
+            pass
+        try:
+            from PIL import Image, ImageFile
+
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+            with Image.open(path) as im:
+                im.load()
+                return im.size[0] > 0 and im.size[1] > 0
+        except Exception:
+            return False
 
 
 def load_rules() -> tuple[dict[str, str], set[str]]:
@@ -94,11 +138,12 @@ def image_files(root: Path):
 def index_candidates(
     roots: list[tuple[str, Path]],
     target_sigs: set[tuple[int, int]],
-) -> tuple[dict[tuple[int, int], list[tuple[str, Path]]], dict[str, set[tuple[int, int]]], Counter, Counter]:
+) -> tuple[dict[tuple[int, int], list[tuple[str, Path]]], dict[str, set[tuple[int, int]]], Counter, Counter, Counter]:
     by_sig: dict[tuple[int, int], list[tuple[str, Path]]] = defaultdict(list)
     existing_by_person: dict[str, set[tuple[int, int]]] = defaultdict(set)
     scanned_counts: Counter = Counter()
     matched_counts: Counter = Counter()
+    rejected_counts: Counter = Counter()
     for root_name, root in roots:
         if not root.exists():
             continue
@@ -112,6 +157,9 @@ def index_candidates(
             sig = (int(st.st_mtime), int(st.st_size))
             if sig not in target_sigs:
                 continue
+            if not can_decode_image(path):
+                rejected_counts[root_name] += 1
+                continue
             by_sig[sig].append((root_name, path))
             matched_counts[root_name] += 1
             if root_name == "people":
@@ -120,7 +168,7 @@ def index_candidates(
                 except (ValueError, IndexError):
                     continue
                 existing_by_person[person].add(sig)
-    return by_sig, existing_by_person, scanned_counts, matched_counts
+    return by_sig, existing_by_person, scanned_counts, matched_counts, rejected_counts
 
 
 def load_cache(path: Path):
@@ -235,12 +283,14 @@ def main() -> int:
 
     print("Indexing currently available images for old labeled signatures...")
     print(f"  target signatures: {len(target_sigs):,}")
-    by_sig, existing_by_person, scanned_counts, matched_counts = index_candidates(roots, target_sigs)
+    by_sig, existing_by_person, scanned_counts, matched_counts, rejected_counts = index_candidates(roots, target_sigs)
     for root_name, _root in roots:
         scanned = scanned_counts[root_name]
         matched = matched_counts[root_name]
-        if scanned or matched:
-            print(f"  {root_name:<18} scanned={scanned:>8,} matched={matched:>8,}")
+        rejected = rejected_counts[root_name]
+        if scanned or matched or rejected:
+            print(f"  {root_name:<18} scanned={scanned:>8,} matched={matched:>8,} "
+                  f"rejected_bad={rejected:>8,}")
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     report = args.report or REPORT_DIR / "recover_labeled_sources_from_old_cache.csv"

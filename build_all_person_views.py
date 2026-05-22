@@ -34,9 +34,12 @@ VIEW_DIR = "all"
 NUDE_DIR = "nude"
 BEST_DIR = "best"
 QUALITY_DIR = "by_quality"
-SKIP_DIRS = {VIEW_DIR, "_smart_albums", "_duplicates", "_near_visual_review", "review"}
+SKIP_DIRS = {VIEW_DIR, "_smart_albums", "_duplicates", "_near_visual_review"}
 NUDE_SOURCE_DIRS = {"photos_nude"}
-NUDE_REVIEW_PARTS: set[tuple[str, str]] = set()
+NUDE_REVIEW_PARTS: set[tuple[str, str]] = {
+    ("review", "nudity_possible"),
+    ("review", "uncertain_nudity"),
+}
 QUALITY_ORDER = {"q_high": 0, "q_good": 1, "q_review": 2, "q_unknown": 3}
 
 
@@ -60,6 +63,11 @@ def iter_source_images(person_dir: Path) -> list[Path]:
         base = Path(dirpath)
         for filename in filenames:
             path = base / filename
+            if not is_image(path):
+                continue
+            rel = path.relative_to(person_dir)
+            if rel.parts and rel.parts[0] == "review" and tuple(rel.parts[:2]) not in NUDE_REVIEW_PARTS:
+                continue
             if is_image(path):
                 out.append(path)
     return sorted(out, key=lambda p: str(p.relative_to(person_dir)).lower())
