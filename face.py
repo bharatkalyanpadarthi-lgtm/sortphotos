@@ -16,6 +16,7 @@ Run:
     python face.py clean-refs  # clean/compact Face References then rebuild
     python face.py nudity      # scan sorted people folders for nudity
     python face.py bad-images  # move unreadable recovered artifacts to review
+    python face.py recover-bad-images # recover quarantined bad images from backups
     python face.py rename      # name/number files inside person folders
     python face.py all-views   # build all/all nude hardlink views in each person folder
     python face.py structure   # audit/repair canonical person folder structure
@@ -149,6 +150,14 @@ ACTIONS = [
                 "args": ["--apply", "--quiet"],
             },
         ],
+    },
+    {
+        "key": "recover-bad-images",
+        "aliases": ["recover-bad", "repair-bad-images"],
+        "label": "Recover Bad Image Files",
+        "desc": "Dry-run recovery of quarantined bad person images from valid backup/source files",
+        "script": "recover_bad_person_images.py",
+        "args": ["--phash-threshold", "0"],
     },
     {
         "key": "nudity-confirm",
