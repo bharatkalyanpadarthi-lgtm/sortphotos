@@ -284,6 +284,8 @@ def step_list(batch_size: int) -> list[dict]:
          "cmd": [py, str(SCRIPT_DIR / "rename_person_folder_files.py"), "--apply", "--quiet"]},
         {"name": "exact-dedupe", "desc": "Move exact person-folder duplicates",
          "cmd": [py, str(SCRIPT_DIR / "delete_person_folder_duplicates.py"), "--apply", "--quiet"]},
+        {"name": "cache-rehydrate", "desc": "Refresh face cache against current organized person folders",
+         "cmd": [py, str(SCRIPT_DIR / "cache_tools.py"), "rehydrate", "--apply", "--batch-size", str(batch_size)], "heavy": True},
         {"name": "advanced-dedupe", "desc": "Refresh advanced duplicate report",
          "cmd": [py, str(SCRIPT_DIR / "advanced_duplicate_matching.py"), "--apply", "--quiet"], "heavy": True},
         {"name": "cleanup-empty", "desc": "Move empty person folders to ready_to_delete",

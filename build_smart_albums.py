@@ -1165,9 +1165,29 @@ def scene_confidence(group: list[ImageInfo]) -> str:
     return "review"
 
 
-def split_large_scene_group(group: list[ImageInfo], eps: float, min_group: int, max_group: int) -> list[list[ImageInfo]]:
+def chunk_large_group(group: list[ImageInfo], max_group: int, min_group: int) -> list[list[ImageInfo]]:
+    ordered = sorted(
+        group,
+        key=lambda i: (
+            round(i.context_hue / 8.0),
+            round(i.brightness / 16.0),
+            round(i.largest_face_ratio, 3),
+            str(i.rel).lower(),
+        ),
+    )
+    chunks = [ordered[i:i + max_group] for i in range(0, len(ordered), max_group)]
+    return [chunk for chunk in chunks if len(chunk) >= min_group]
+
+
+def split_large_scene_group(group: list[ImageInfo],
+                            eps: float,
+                            min_group: int,
+                            max_group: int,
+                            depth: int = 0) -> list[list[ImageInfo]]:
     if len(group) <= max_group:
         return [group]
+    if depth >= 8 or eps <= 0.0125:
+        return chunk_large_group(group, max_group, min_group)
     vectors = np.stack([current_scene_vector(i) for i in group])
     sub_labels = DBSCAN(
         eps=max(eps * 0.62, 0.012),
@@ -1178,6 +1198,10 @@ def split_large_scene_group(group: list[ImageInfo], eps: float, min_group: int, 
     for info, label in zip(group, sub_labels):
         if label >= 0:
             subgroups[int(label)].append(info)
+    if not subgroups:
+        return chunk_large_group(group, max_group, min_group)
+    if len(subgroups) == 1 and len(next(iter(subgroups.values()))) == len(group):
+        return chunk_large_group(group, max_group, min_group)
     out: list[list[ImageInfo]] = []
     for subgroup in subgroups.values():
         if len(subgroup) < min_group:
@@ -1185,9 +1209,9 @@ def split_large_scene_group(group: list[ImageInfo], eps: float, min_group: int, 
         if len(subgroup) <= max_group:
             out.append(subgroup)
         else:
-            out.extend(g for g in split_large_scene_group(subgroup, eps * 0.62, min_group, max_group)
+            out.extend(g for g in split_large_scene_group(subgroup, eps * 0.62, min_group, max_group, depth + 1)
                        if len(g) <= max_group)
-    return out
+    return out or chunk_large_group(group, max_group, min_group)
 
 
 def group_same_scene(infos: list[ImageInfo],

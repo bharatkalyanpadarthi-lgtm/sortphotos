@@ -60,17 +60,25 @@ def person_dirs(people_dir: Path, person: str | None = None) -> list[Path]:
 
 def person_folder_images(people_dir: Path, person: str | None = None) -> list[tuple[Path, str]]:
     out: list[tuple[Path, str]] = []
-    seen: set[Path] = set()
+    seen: set[tuple[int, int] | Path] = set()
     for person_dir in person_dirs(people_dir, person):
-        for image in sort_photos.iter_images(person_dir, excluded_dir_names=set()):
-            try:
-                resolved = image.resolve()
-            except OSError:
-                resolved = image
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            out.append((image, person_dir.name))
+        photos_dir = person_dir / "photos"
+        roots = [photos_dir] if photos_dir.exists() else [person_dir]
+        excluded = {"_smart_albums", "all", "review", "best", "quality", "duplicates"}
+        for root in roots:
+            for image in sort_photos.iter_images(root, excluded_dir_names=excluded):
+                try:
+                    stat = image.stat()
+                    key: tuple[int, int] | Path = (stat.st_dev, stat.st_ino)
+                except OSError:
+                    try:
+                        key = image.resolve()
+                    except OSError:
+                        key = image
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append((image, person_dir.name))
     return sorted(out, key=lambda item: (item[1].casefold(), str(item[0]).casefold()))
 
 
@@ -176,6 +184,7 @@ def save_cache_with_backup(cache: sort_photos.CacheState, backup: Path | None) -
 def rehydrate(people_dir: Path, person: str | None, apply: bool,
               replace: bool, max_images: int | None, batch_size: int) -> int:
     candidates = person_folder_images(people_dir, person)
+    all_candidate_paths = {str(path) for path, _person in candidates}
     if max_images is not None:
         candidates = candidates[:max(0, max_images)]
 
@@ -201,16 +210,21 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
         config_fingerprint=sort_photos.config_fingerprint(),
     )
     candidate_paths = {str(path) for path, _person in candidates}
+    retain_paths = candidate_paths if max_images is None else all_candidate_paths
 
     kept_existing_faces = 0
     kept_existing_files = 0
     if not replace and old_cache.config_fingerprint == sort_photos.config_fingerprint():
         for src, sig in old_cache.file_signatures.items():
+            if src not in retain_paths:
+                continue
             if not Path(src).exists():
                 continue
             new_cache.file_signatures[src] = sig
             kept_existing_files += 1
         for face in old_cache.faces:
+            if face.src_str not in retain_paths:
+                continue
             if not Path(face.src_str).exists():
                 continue
             new_cache.faces.append(face)
@@ -254,9 +268,14 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
             proc = subprocess.run(
                 [sys.executable, str(script_path), "--detect-batch", str(job_path)],
                 check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
             )
             if proc.returncode != 0:
                 print(f"ERROR: detection worker failed for batch {batch_index + 1} (exit {proc.returncode}).")
+                if proc.stdout:
+                    print(proc.stdout[-4000:])
                 print("Cache has been saved through the last completed batch.")
                 return proc.returncode
             if not out_path.exists():

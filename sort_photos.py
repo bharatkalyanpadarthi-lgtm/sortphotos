@@ -1187,7 +1187,13 @@ def detect_in_batches_subprocess(new_images: list[Path],
                        "--detect-batch", str(job_path)]
 
                 try:
-                    proc = subprocess.run(cmd, check=False)
+                    proc = subprocess.run(
+                        cmd,
+                        check=False,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                    )
                 except KeyboardInterrupt:
                     log.warning("Interrupted. Cache up to last completed batch is saved.")
                     return all_new_records
@@ -1195,6 +1201,8 @@ def detect_in_batches_subprocess(new_images: list[Path],
                 if proc.returncode != 0:
                     log.error("Worker for batch %d exited with code %d.",
                               batch_idx + 1, proc.returncode)
+                    if proc.stdout:
+                        log.error("Worker output:\n%s", proc.stdout[-4000:])
                     return all_new_records
 
                 if not out_path.exists():
@@ -1239,7 +1247,11 @@ def detect_in_batches_subprocess(new_images: list[Path],
                                  batch_idx + 1, n_batches, start + 1, end)
                         cmd = [sys.executable, str(script_path),
                                "--detect-batch", str(job_path)]
-                        active[subprocess.Popen(cmd)] = job_info
+                        active[subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.STDOUT,
+                        )] = job_info
 
                     time.sleep(0.5)
                     for proc, job_info in list(active.items()):
@@ -2634,11 +2646,6 @@ def finish_pipeline(all_records: list[FaceRecord],
     write_manifest(all_records, name_map, centroids, csv_path)
     run_post_process(output_dir)
 
-    if ARCHIVE_SCANNED_SOURCES and scanned_sources is not None:
-        moved = archive_scanned_sources(scanned_sources, input_dir, output_dir)
-        log.info("Archived %d scanned source image(s) to %s",
-                 moved, output_dir / "_source_review" / SCANNED_SOURCE_ARCHIVE_DIR_NAME)
-
     new_cache = CacheState(version=CACHE_VERSION,
                            config_fingerprint=config_fingerprint())
     for r in all_records:
@@ -2657,6 +2664,11 @@ def finish_pipeline(all_records: list[FaceRecord],
     log.info("Cache saved: %d files, %d faces (%d labeled).",
              len(new_cache.file_signatures), len(new_cache.faces),
              sum(1 for c in new_cache.faces if c.label))
+
+    if ARCHIVE_SCANNED_SOURCES and scanned_sources is not None:
+        moved = archive_scanned_sources(scanned_sources, input_dir, output_dir)
+        log.info("Archived %d scanned source image(s) to %s",
+                 moved, output_dir / "_source_review" / SCANNED_SOURCE_ARCHIVE_DIR_NAME)
 
     if preserve_labeling_state:
         save_labeling_state(all_records, name_map, output_dir, input_dir)
