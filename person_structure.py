@@ -19,9 +19,11 @@ Default is read-only. Use --apply to move/link files into the canonical layout.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
 import shutil
+import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -49,6 +51,7 @@ class Stats:
     legacy_files: int = 0
     custom_files: int = 0
     generated_only: int = 0
+    generated_only_unreadable: int = 0
     dot_files: int = 0
     empty_dirs: int = 0
     moved_files: int = 0
@@ -60,6 +63,51 @@ class Stats:
 
 def is_image(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in IMAGE_EXTS
+
+
+@contextlib.contextmanager
+def suppress_native_stderr(enabled: bool = True):
+    if not enabled:
+        yield
+        return
+    try:
+        fd = sys.stderr.fileno()
+    except Exception:
+        yield
+        return
+    saved_fd = os.dup(fd)
+    try:
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            os.dup2(devnull.fileno(), fd)
+            yield
+    finally:
+        os.dup2(saved_fd, fd)
+        os.close(saved_fd)
+
+
+def can_decode_image(path: Path) -> bool:
+    with suppress_native_stderr():
+        try:
+            import cv2
+            import numpy as np
+
+            data = np.fromfile(str(path), dtype=np.uint8)
+            img = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+            if img is not None and getattr(img, "size", 0) > 0:
+                return True
+        except Exception:
+            pass
+
+        try:
+            from PIL import Image, ImageFile
+            import pillow_heif  # noqa: F401
+
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+            with Image.open(path) as im:
+                im.load()
+                return im.size[0] > 0 and im.size[1] > 0
+        except Exception:
+            return False
 
 
 def clean_prefix(name: str) -> str:
@@ -222,8 +270,10 @@ def audit_or_repair(people_dir: Path, review_root: Path, apply: bool, quiet: boo
 
         stats.people += 1
 
-        recover = generated_only_images(person_dir)
+        recover_candidates = generated_only_images(person_dir)
+        recover = [src for src in recover_candidates if can_decode_image(src)]
         stats.generated_only += len(recover)
+        stats.generated_only_unreadable += len(recover_candidates) - len(recover)
         for i, src in enumerate(recover, start=1):
             dest = person_dir / PHOTOS_DIR / f"{clean_prefix(person_dir.name)}_recovered_{i:04d}{src.suffix.lower()}"
             if hardlink_recovery(src, dest, apply):
@@ -275,6 +325,7 @@ def print_stats(stats: Stats, people_dir: Path, review_root: Path, apply: bool) 
     print(f"Legacy folder files to move: {stats.legacy_files}")
     print(f"Custom folder files to move: {stats.custom_files}")
     print(f"Generated-only images:       {stats.generated_only}")
+    print(f"Generated-only unreadable:   {stats.generated_only_unreadable}")
     print(f"Dot/metadata files:          {stats.dot_files}")
     print(f"Empty dirs found:            {stats.empty_dirs}")
     if apply:

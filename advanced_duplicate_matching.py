@@ -142,11 +142,26 @@ def sha256_file(path: Path) -> str:
 
 
 def imread(path: Path) -> np.ndarray | None:
-    data = np.fromfile(str(path), dtype=np.uint8)
-    if data.size == 0:
-        return None
     with suppress_native_stderr():
-        return cv2.imdecode(data, cv2.IMREAD_COLOR)
+        try:
+            data = np.fromfile(str(path), dtype=np.uint8)
+            if data.size == 0:
+                return None
+            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            if img is not None and getattr(img, "size", 0) > 0:
+                return img
+        except Exception:
+            pass
+
+        try:
+            from PIL import Image, ImageFile
+            import pillow_heif  # noqa: F401
+
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+            with Image.open(path) as im:
+                return cv2.cvtColor(np.array(im.convert("RGB")), cv2.COLOR_RGB2BGR)
+        except Exception:
+            return None
 
 
 def pixel_sha256(img: np.ndarray) -> str:

@@ -121,7 +121,24 @@ def process_check() -> Check:
     except Exception as exc:
         return Check("WARN", "duplicate running process", f"could not inspect processes: {exc}")
     current = os.getpid()
-    parent = os.getppid()
+    parent_by_pid: dict[int, int] = {}
+    try:
+        parent_output = subprocess.check_output(["ps", "-axo", "pid=,ppid=,command="], text=True)
+        for line in parent_output.splitlines():
+            parts = line.strip().split(None, 2)
+            if len(parts) < 3:
+                continue
+            pid = int(parts[0])
+            parent_by_pid[pid] = int(parts[1])
+    except Exception:
+        parent_by_pid = {}
+
+    ancestors = {current}
+    pid = os.getppid()
+    while pid and pid not in ancestors:
+        ancestors.add(pid)
+        pid = parent_by_pid.get(pid, 0)
+
     matches = []
     for line in output.splitlines():
         line = line.strip()
@@ -132,7 +149,7 @@ def process_check() -> Check:
             pid = int(pid_raw)
         except ValueError:
             continue
-        if pid in {current, parent}:
+        if pid in ancestors:
             continue
         if "face.py" in command or "sort_photos.py" in command or "daily_runner.py" in command:
             if "preflight_check.py" not in command:
