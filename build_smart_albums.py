@@ -50,7 +50,7 @@ DEFAULT_FRAMING_CACHE = Path.home() / ".face_sort_cache" / "smart_album_framing_
 DEFAULT_SMART_STATE = Path.home() / ".face_sort_cache" / "smart_album_person_state.json"
 NUDITY_CACHE_VERSION = 2
 FRAMING_CACHE_VERSION = 2
-SMART_ALBUM_LOGIC_VERSION = 9
+SMART_ALBUM_LOGIC_VERSION = 10
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
 SMART_DIR = "_smart_albums"
 EXCLUDED_DIRS = {
@@ -59,7 +59,6 @@ EXCLUDED_DIRS = {
     "_duplicates",
     "_near_visual_review",
     "_blurred",
-    "review",
 }
 NUDITY_NESTED_DIRS = {
     "photos_nude": "_nudity_possible",
@@ -601,11 +600,26 @@ def hamming(a: int, b: int) -> int:
 def iter_images(person_dir: Path) -> list[Path]:
     out: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(person_dir):
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in EXCLUDED_DIRS and not d.startswith(".")
-        ]
         base = Path(dirpath)
+        try:
+            rel = base.relative_to(person_dir)
+        except ValueError:
+            rel = Path()
+        if rel.parts == ("review",):
+            dirnames[:] = [
+                d for d in dirnames
+                if d == "nudity_possible" and not d.startswith(".")
+            ]
+        elif len(rel.parts) >= 1 and rel.parts[0] == "review":
+            if rel.parts[:2] != ("review", "nudity_possible"):
+                dirnames[:] = []
+                continue
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        else:
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in EXCLUDED_DIRS and not d.startswith(".")
+            ]
         for filename in filenames:
             p = base / filename
             if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
@@ -852,14 +866,14 @@ def safe_name(path: Path) -> str:
 def nudity_nested_dir(info: ImageInfo) -> str | None:
     if info.nudity_status == "possible":
         return "_nudity_possible"
-    if info.nudity_status == "uncertain":
-        return "_nudity_uncertain"
     if info.rel.parts and info.rel.parts[0] in NUDITY_NESTED_DIRS:
         return NUDITY_NESTED_DIRS[info.rel.parts[0]]
     return None
 
 
 def visible_rel_name(rel: Path) -> Path:
+    if len(rel.parts) > 2 and rel.parts[:2] == ("review", "nudity_possible"):
+        return Path(*rel.parts[2:])
     if rel.parts and rel.parts[0] in NUDITY_NESTED_DIRS and len(rel.parts) > 1:
         return Path(*rel.parts[1:])
     if rel.parts and rel.parts[0] == "photos" and len(rel.parts) > 1:
