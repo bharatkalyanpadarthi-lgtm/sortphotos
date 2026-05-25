@@ -18,7 +18,7 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
               ".tif", ".tiff", ".heic", ".heif"}
 DEFAULT_SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
 EXCLUDED_DIRS = {"all", "_duplicates", "_smart_albums", "_near_visual_review", "review"}

@@ -22,7 +22,7 @@ import tempfile
 from collections import defaultdict
 from pathlib import Path
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
               ".tif", ".tiff", ".heic", ".heif"}
 DEFAULT_PHOTOS = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
 

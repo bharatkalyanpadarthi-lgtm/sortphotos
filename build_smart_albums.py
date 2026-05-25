@@ -51,7 +51,7 @@ DEFAULT_SMART_STATE = Path.home() / ".face_sort_cache" / "smart_album_person_sta
 NUDITY_CACHE_VERSION = 2
 FRAMING_CACHE_VERSION = 2
 SMART_ALBUM_LOGIC_VERSION = 11
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
 SMART_DIR = "_smart_albums"
 EXCLUDED_DIRS = {
     "all",
@@ -314,11 +314,39 @@ def load_insightface_detector(det_size: int):
 
 
 def imread(path: Path) -> np.ndarray | None:
-    data = np.fromfile(str(path), dtype=np.uint8)
-    if data.size == 0:
-        return None
+    def valid_bgr(img: np.ndarray | None) -> np.ndarray | None:
+        if img is None or getattr(img, "size", 0) <= 0:
+            return None
+        if img.ndim != 3 or img.shape[0] <= 0 or img.shape[1] <= 0 or img.shape[2] < 3:
+            return None
+        return img
+
     with suppress_native_stderr():
-        return cv2.imdecode(data, cv2.IMREAD_COLOR)
+        try:
+            data = np.fromfile(str(path), dtype=np.uint8)
+            if data.size == 0:
+                return None
+            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            valid = valid_bgr(img)
+            if valid is not None:
+                return valid
+        except Exception:
+            pass
+
+        try:
+            from PIL import Image, ImageFile
+            import pillow_heif
+
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+            if hasattr(pillow_heif, "register_heif_opener"):
+                pillow_heif.register_heif_opener()
+            with Image.open(path) as im:
+                im.seek(0)
+                im.load()
+                img = cv2.cvtColor(np.array(im.convert("RGB")), cv2.COLOR_RGB2BGR)
+                return valid_bgr(img)
+        except Exception:
+            return None
 
 
 def phash64(img: np.ndarray) -> int:
@@ -491,11 +519,14 @@ def detect_face_stats(img: np.ndarray,
     if cascade is None:
         return 0, 0.0
     h, w = img.shape[:2]
+    if h <= 0 or w <= 0:
+        return 0, 0.0
     max_dim = max(h, w)
     scale = min(1.0, 900.0 / max(1, max_dim))
     work = img
     if scale < 1.0:
-        work = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        target = (max(1, int(w * scale)), max(1, int(h * scale)))
+        work = cv2.resize(img, target, interpolation=cv2.INTER_AREA)
     gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
     gray = cv2.equalizeHist(gray)
     min_side = max(24, int(min(gray.shape[:2]) * 0.035))
@@ -739,6 +770,25 @@ def annotate_framing(infos: list[ImageInfo],
         print(f"  framing: {cache_hits} cached, {len(pending)} new InsightFace checks...", flush=True)
 
     for idx, (info, key, sig) in enumerate(pending, start=1):
+        if info.path.suffix.lower() == ".gif":
+            items[key] = {
+                "sig": sig,
+                "face_count": info.face_count,
+                "largest_face_ratio": round(info.largest_face_ratio, 8),
+                "face_angle": info.face_angle,
+                "face_roll": round(info.face_roll, 4),
+                "face_center_x": round(info.face_center_x, 6),
+                "face_center_y": round(info.face_center_y, 6),
+                "face_width_ratio": round(info.face_width_ratio, 6),
+                "face_height_ratio": round(info.face_height_ratio, 6),
+                "source": info.face_source or "opencv_gif",
+            }
+            changed += 1
+            if not quiet and (idx % 250 == 0 or idx == len(pending)):
+                print(f"  framing: checked {idx}/{len(pending)}", flush=True)
+            if cache_path is not None and (idx % 250 == 0 or idx == len(pending)):
+                save_framing_cache(cache_path, cache)
+            continue
         img = imread(info.path)
         if img is None:
             continue

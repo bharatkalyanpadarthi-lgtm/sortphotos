@@ -54,7 +54,7 @@ CROP_FILENAME_RE = re.compile(
     r"^(?P<stem>.+?)__face(?P<idx>\d+)_.*\.(?:jpg|jpeg|png|webp)$",
     re.IGNORECASE,
 )
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 
 def main() -> int:

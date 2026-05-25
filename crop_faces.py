@@ -58,7 +58,7 @@ SAVE_ALL_FACES  = True   # False = save only the largest qualifying face per ima
 SKIP_EXISTING   = True   # don't re-process if any crop already exists for an image
 WRITE_REPORT    = True   # write a CSV manifest of what happened
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
 
 # =============================================================================
 

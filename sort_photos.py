@@ -193,7 +193,7 @@ AI_PROMPT = (
     "no 'I think', no parentheses, no notes."
 )
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
               ".tif", ".tiff", ".heic", ".heif"}
 VIDEO_EXTS = {
     ".3g2", ".3gp", ".avi", ".m4v", ".mkv", ".mov", ".mp4",

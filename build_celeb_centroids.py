@@ -51,7 +51,7 @@ from sort_photos import (  # type: ignore
     _build_app,
 )
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".heic", ".heif"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".heic", ".heif"}
 DEFAULT_REF_DIR = Path.home() / "Pictures" / "Face References"
 DEFAULT_CHUNK_SIZE = 25
 

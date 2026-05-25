@@ -32,7 +32,7 @@ TO_PROCESS = Path.home() / "Pictures" / "To Process"
 STATE_FILE = Path.home() / ".face_sort_cache" / "daily_run_state.json"
 SUMMARY_DIR = SOURCE_REVIEW / "daily_run_summaries"
 ADV_REPORT = SOURCE_REVIEW / "duplicate_reports" / "advanced_duplicates.csv"
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
 VIDEO_EXTS = {
     ".3g2", ".3gp", ".avi", ".m4v", ".mkv", ".mov", ".mp4",
     ".mpeg", ".mpg", ".mts", ".m2ts", ".webm", ".wmv",

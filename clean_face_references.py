@@ -30,7 +30,7 @@ import cv2
 import numpy as np
 
 DEFAULT_REF_DIR = Path.home() / "Pictures" / "Face References"
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
 REVIEW_DIR_NAME = "_reference_review"
 REPORT_NAME = "face_reference_quality_report.csv"
 _FACE_CASCADE = None

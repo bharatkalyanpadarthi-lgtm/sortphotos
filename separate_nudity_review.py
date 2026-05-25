@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
               ".tif", ".tiff", ".heic", ".heif"}
 DEFAULT_INPUT = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
 DEFAULT_OUTPUT = Path.home() / "Pictures" / "sorted_all_pictures" / "_nudity_review"

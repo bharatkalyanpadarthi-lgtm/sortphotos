@@ -26,7 +26,7 @@ NEAR_VISUAL_HTML = SOURCE_REVIEW / "near_visual_review" / "near_visual_review.ht
 ADV_REPORT = SOURCE_REVIEW / "duplicate_reports" / "advanced_duplicates.csv"
 REF_REPORT = Path.home() / "Pictures" / "Face References" / "_reference_review" / "face_reference_quality_report.csv"
 DASHBOARD = SOURCE_REVIEW / "review_dashboard.html"
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
 
 
 def count_files(root: Path) -> int:

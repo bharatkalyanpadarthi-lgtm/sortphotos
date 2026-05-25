@@ -23,7 +23,7 @@ DEFAULT_DB = Path.home() / ".face_sort_cache" / "person_identity_db.pkl"
 DEFAULT_REPORT = (
     Path.home() / "Pictures" / "sorted_all_pictures" / "_source_review" / "identity_audit.csv"
 )
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
 
 
 def norm(name: str) -> str:

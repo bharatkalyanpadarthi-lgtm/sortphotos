@@ -23,7 +23,7 @@ DEFAULT_CLEANUP_ROOT = (
     Path.home() / "Pictures" / "sorted_all_pictures" / "_source_review" / "ready_to_delete"
 )
 DEFAULT_RULES = Path(__file__).resolve().with_name("person_folder_rules.json")
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
 SKIP_DIRS = {"all", "_smart_albums"}
 
 

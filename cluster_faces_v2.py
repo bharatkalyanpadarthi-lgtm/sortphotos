@@ -74,7 +74,7 @@ MAKE_MONTAGES   = True
 MONTAGE_COLS    = 6
 MONTAGE_TILE_PX = 160
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
 
 # =============================================================================
 

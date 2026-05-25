@@ -29,7 +29,7 @@ FINGERPRINT_CACHE = Path.home() / ".face_sort_cache" / "advanced_duplicate_finge
 SMART_STATE = Path.home() / ".face_sort_cache" / "smart_album_person_state.json"
 IDENTITY_DB = Path.home() / ".face_sort_cache" / "person_identity_db.pkl"
 REFERENCE_DB = Path.home() / ".face_sort_cache" / "reference_centroids.pkl"
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
               ".tif", ".tiff", ".heic", ".heif"}
 VIDEO_EXTS = {
     ".3g2", ".3gp", ".avi", ".m4v", ".mkv", ".mov", ".mp4",

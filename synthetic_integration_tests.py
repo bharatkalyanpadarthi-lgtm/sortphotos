@@ -97,16 +97,20 @@ def test_to_process_generated_names_are_visible(tmp: Path) -> None:
     make_image(inbox / "review" / "b.jpg", (0, 255, 0))
     make_image(inbox / "_smart_albums" / "c.jpg", (0, 0, 255))
     make_image(inbox / "normal" / "d.jpg", (255, 255, 0))
+    make_image(inbox / "normal" / "animated_input.gif", (120, 30, 180), fmt="GIF")
 
     visible = list(sort_photos.iter_images(
         inbox,
         excluded_dir_names=set(),
         always_excluded_dir_names=set(),
     ))
-    assert_true(len(visible) == 4, f"expected 4 visible inbox images, got {len(visible)}")
+    assert_true(len(visible) == 5, f"expected 5 visible inbox images, got {len(visible)}")
 
     count = daily_runner.count_images(inbox, exclude_generated_dirs=False)
-    assert_true(count == 4, f"daily preview should see 4 images, got {count}")
+    assert_true(count == 5, f"daily preview should see 5 images, got {count}")
+
+    gif = inbox / "normal" / "animated_input.gif"
+    assert_true(sort_photos.imread_unicode(gif) is not None, "GIF intake image did not decode")
 
 
 def test_daily_order_is_safe(tmp: Path) -> None:

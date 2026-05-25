@@ -29,7 +29,7 @@ DEFAULT_PEOPLE = DEFAULT_SORTED / "photos_by_person"
 DEFAULT_REPORT = DEFAULT_SORTED / "_source_review" / "duplicate_reports" / "advanced_duplicates.csv"
 DEFAULT_REVIEW_DIR = DEFAULT_SORTED / "_source_review" / "ready_to_delete" / "near_visual_duplicates"
 DEFAULT_DECISIONS = Path.home() / ".face_sort_cache" / "near_visual_review_decisions.json"
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
 
 
 @dataclass
