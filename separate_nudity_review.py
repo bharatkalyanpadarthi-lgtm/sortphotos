@@ -36,6 +36,7 @@ EXCLUDED_DIRS = {
     "_possible_nudity",
     "_smart_albums",
     "_smart_albums_v2",
+    "_smart_albums_simple_preview",
     "_duplicates",
     "_near_visual_review",
     "_uncertain_nudity",

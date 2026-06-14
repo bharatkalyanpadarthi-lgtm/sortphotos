@@ -33,6 +33,7 @@ SKIP_DIRS = {
     "all",
     "_smart_albums",
     "_smart_albums_v2",
+    "_smart_albums_simple_preview",
 }
 SOURCE_TOP_DIRS = {
     "photos",

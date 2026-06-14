@@ -42,7 +42,15 @@ VIDEO_EXTS = {
     ".3g2", ".3gp", ".avi", ".m4v", ".mkv", ".mov", ".mp4",
     ".mpeg", ".mpg", ".mts", ".m2ts", ".webm", ".wmv",
 }
-SMART_DIRS = {"all", "_smart_albums", "_smart_albums_v2", "_duplicates", "_near_visual_review", "review"}
+SMART_DIRS = {
+    "all",
+    "_smart_albums",
+    "_smart_albums_v2",
+    "_smart_albums_simple_preview",
+    "_duplicates",
+    "_near_visual_review",
+    "review",
+}
 SOURCE_GUARD_EXIT = 3
 
 

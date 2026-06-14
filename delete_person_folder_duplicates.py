@@ -28,6 +28,7 @@ EXCLUDED_DIRS = {
     "_duplicates",
     "_smart_albums",
     "_smart_albums_v2",
+    "_smart_albums_simple_preview",
     "_near_visual_review",
     "_blurred",
     "review",

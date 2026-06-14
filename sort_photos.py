@@ -219,6 +219,7 @@ DEFAULT_EXCLUDED_SCAN_DIRS = {
     "_nudity_review",
     "_smart_albums",
     "_smart_albums_v2",
+    "_smart_albums_simple_preview",
     "_source_review",
     "duplicate_to_review",
     "Face References",
@@ -235,6 +236,7 @@ ALWAYS_EXCLUDED_SCAN_DIRS = {
     "_near_visual_review",
     "_smart_albums",
     "_smart_albums_v2",
+    "_smart_albums_simple_preview",
     "_blurred",
     "review",
     "videos",
@@ -912,7 +914,18 @@ def build_identity_db_from_person_folders(people_dir: Path,
         embs: list[np.ndarray] = []
         images = [
             p for p in iter_images(person_dir, excluded_dir_names=set())
-            if not any(part in {LEGACY_DUPLICATES_DIR, BLURRED_DIR, PERSON_REVIEW_DIR, "all", "_smart_albums", "_smart_albums_v2"} for part in p.relative_to(person_dir).parts[:-1])
+            if not any(
+                part in {
+                    LEGACY_DUPLICATES_DIR,
+                    BLURRED_DIR,
+                    PERSON_REVIEW_DIR,
+                    "all",
+                    "_smart_albums",
+                    "_smart_albums_v2",
+                    "_smart_albums_simple_preview",
+                }
+                for part in p.relative_to(person_dir).parts[:-1]
+            )
         ]
         images = sorted(images, key=lambda p: (len(p.relative_to(person_dir).parts), str(p).lower()))
         if IDENTITY_MAX_IMAGES_PER_PERSON > 0:

@@ -24,6 +24,7 @@ REQUIRED_GENERATED_EXCLUSIONS = {
     "all",
     "_smart_albums",
     "_smart_albums_v2",
+    "_smart_albums_simple_preview",
     "review",
     "_duplicates",
     "_near_visual_review",

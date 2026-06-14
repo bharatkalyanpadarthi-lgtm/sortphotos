@@ -202,6 +202,7 @@ def test_generated_person_views_are_excluded_from_scanners(tmp: Path) -> None:
         "all",
         "_smart_albums",
         "_smart_albums_v2",
+        "_smart_albums_simple_preview",
         "review",
         "_duplicates",
         "_near_visual_review",
@@ -219,7 +220,14 @@ def test_generated_person_views_are_excluded_from_scanners(tmp: Path) -> None:
     assert_true(len(advanced_seen) == 1, f"advanced duplicate scan saw generated views: {advanced_seen}")
     assert_true(len(cache_seen) == 1, f"cache rehydrate scan saw generated views: {cache_seen}")
     assert_true(len(rename_seen) == 1, f"rename scanner saw generated views: {rename_seen}")
-    for dirname in ["_smart_albums_v2", "_smart_albums", "all", "_duplicates", "_near_visual_review"]:
+    for dirname in [
+        "_smart_albums_v2",
+        "_smart_albums",
+        "_smart_albums_simple_preview",
+        "all",
+        "_duplicates",
+        "_near_visual_review",
+    ]:
         assert_true(dirname in cleanup_empty_person_folders.SKIP_DIRS,
                     f"cleanup-empty does not skip generated folder {dirname}")
 

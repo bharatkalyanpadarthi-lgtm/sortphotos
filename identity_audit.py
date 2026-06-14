@@ -40,7 +40,18 @@ def person_dirs(root: Path) -> list[Path]:
 def image_count(root: Path) -> int:
     total = 0
     for p in root.rglob("*"):
-        if any(part in {"all", "_smart_albums", "review", "_duplicates", "_near_visual_review"} for part in p.parts):
+        if any(
+            part in {
+                "all",
+                "_smart_albums",
+                "_smart_albums_v2",
+                "_smart_albums_simple_preview",
+                "review",
+                "_duplicates",
+                "_near_visual_review",
+            }
+            for part in p.parts
+        ):
             continue
         if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
             total += 1

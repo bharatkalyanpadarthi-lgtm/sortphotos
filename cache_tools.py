@@ -37,6 +37,7 @@ IMAGE_EXTS = sort_photos.IMAGE_EXTS
 CACHE_SCAN_EXCLUDED_DIRS = {
     "_smart_albums",
     "_smart_albums_v2",
+    "_smart_albums_simple_preview",
     "_duplicates",
     "_near_visual_review",
     "_blurred",

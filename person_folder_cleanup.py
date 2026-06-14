@@ -26,7 +26,15 @@ DEFAULT_CLEANUP_ROOT = (
 )
 DEFAULT_RULES = Path(__file__).resolve().with_name("person_folder_rules.json")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
-SKIP_DIRS = {"all", "_smart_albums", "_smart_albums_v2", "_duplicates", "_near_visual_review", "review"}
+SKIP_DIRS = {
+    "all",
+    "_smart_albums",
+    "_smart_albums_v2",
+    "_smart_albums_simple_preview",
+    "_duplicates",
+    "_near_visual_review",
+    "review",
+}
 
 
 def load_rules(path: Path) -> dict:

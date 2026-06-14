@@ -40,7 +40,7 @@ DEFAULT_REVIEW = Path.home() / "Pictures" / "sorted_all_pictures" / "_source_rev
 PHOTOS_DIR = "photos"
 NUDE_DIR = "nude"
 REVIEW_DIR = "review"
-GENERATED_DIRS = {"all", "_smart_albums", "_smart_albums_v2"}
+GENERATED_DIRS = {"all", "_smart_albums", "_smart_albums_v2", "_smart_albums_simple_preview"}
 CANONICAL_TOPS = {PHOTOS_DIR, REVIEW_DIR}
 LEGACY_TOPS = {"_possible_nudity", "_uncertain_nudity", "_duplicates", "_near_visual_review"}
 

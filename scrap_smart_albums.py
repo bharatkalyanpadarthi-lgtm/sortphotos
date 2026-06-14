@@ -2,10 +2,10 @@
 """Remove generated smart album folders after verifying originals are safe.
 
 Smart albums are generated hardlink/copy views. This script verifies that each
-photo-like image in _smart_albums or _smart_albums_v2 is already present in the
-same person's canonical photos/ tree. If a smart-folder photo is unique, it is
-recovered into photos/ or photos/nude/ before generated smart folders are
-removed.
+photo-like image in _smart_albums, _smart_albums_v2, or
+_smart_albums_simple_preview is already present in the same person's canonical
+photos/ tree. If a smart-folder photo is unique, it is recovered into photos/
+or photos/nude/ before generated smart folders are removed.
 
 Default mode is a dry-run. Use --apply to recover unique images and remove the
 generated smart album folders.
@@ -28,7 +28,7 @@ import operation_ledger
 import source_manifest
 
 DEFAULT_SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
-SMART_DIR_NAMES = {"_smart_albums", "_smart_albums_v2"}
+SMART_DIR_NAMES = {"_smart_albums", "_smart_albums_v2", "_smart_albums_simple_preview"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
 SMART_STATE_FILES = [
     Path.home() / ".face_sort_cache" / "smart_album_person_state.json",
@@ -70,7 +70,12 @@ def person_dirs(people_dir: Path) -> list[Path]:
 
 
 def smart_dirs(person_dir: Path) -> list[Path]:
-    return [person_dir / name for name in sorted(SMART_DIR_NAMES) if (person_dir / name).exists()]
+    found = [
+        path
+        for path in person_dir.rglob("*")
+        if path.is_dir() and path.name in SMART_DIR_NAMES
+    ]
+    return sorted(found, key=lambda p: (len(p.parts), str(p).lower()), reverse=True)
 
 
 def canonical_images(person_dir: Path) -> list[Path]:
