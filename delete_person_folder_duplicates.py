@@ -18,10 +18,20 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 
+import operation_ledger
+
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
               ".tif", ".tiff", ".heic", ".heif"}
 DEFAULT_SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
-EXCLUDED_DIRS = {"all", "_duplicates", "_smart_albums", "_near_visual_review", "review"}
+EXCLUDED_DIRS = {
+    "all",
+    "_duplicates",
+    "_smart_albums",
+    "_smart_albums_v2",
+    "_near_visual_review",
+    "_blurred",
+    "review",
+}
 
 
 def iter_images(root: Path) -> list[Path]:
@@ -44,6 +54,22 @@ def sha1_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def nudity_status_for_path(path: Path) -> str:
+    parts = [p.casefold() for p in path.parts]
+    name = path.name.casefold()
+    for i, part in enumerate(parts):
+        next_part = parts[i + 1] if i + 1 < len(parts) else ""
+        if part in {"photos", "all", "review"} and next_part in {"nude", "nudity_possible"}:
+            return "possible"
+        if part in {"photos_nude", "_possible_nudity", "nudity_possible"}:
+            return "possible"
+        if part in {"_uncertain_nudity", "uncertain_nudity"}:
+            return "uncertain"
+    if "nudity_possible" in name or "_nude" in name or "_nudity_" in name:
+        return "possible"
+    return "safe"
 
 
 def same_inode(a: Path, b: Path) -> bool:
@@ -128,13 +154,13 @@ def main() -> int:
             except OSError:
                 continue
 
-        by_hash: dict[str, list[Path]] = defaultdict(list)
+        by_hash: dict[tuple[str, str], list[Path]] = defaultdict(list)
         for same_size in by_size.values():
             if len(same_size) < 2:
                 continue
             for p in same_size:
                 try:
-                    by_hash[sha1_file(p)].append(p)
+                    by_hash[(nudity_status_for_path(p), sha1_file(p))].append(p)
                 except OSError:
                     continue
 
@@ -181,8 +207,14 @@ def main() -> int:
     for src, _keeper, dest in actions:
         if not src.exists():
             continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dest))
+        operation_ledger.move_path(
+            src,
+            dest,
+            sorted_root=sorted_root,
+            operation="delete_person_folder_duplicates.move_duplicate",
+            reason="move exact duplicate person-folder image to ready_to_delete",
+            extra={"keeper": str(_keeper)},
+        )
         moved += 1
 
     print(f"Moved {moved} duplicate image entries out of person folders.")

@@ -2,14 +2,11 @@
 """
 advanced_duplicate_matching.py — layered duplicate detection for sorted photos.
 
-It uses three levels:
+Default duplicate policy is intentionally strict:
   1. SHA-256 of file bytes: exact same file.
-  2. SHA-256 of decoded pixels: same visible image, different metadata/container.
-  3. OpenCV pHash distance: visually similar images, e.g. resized/recompressed.
 
-Default is a dry-run report. With --apply, only exact file and same-pixel
-duplicates are moved to ready_to_delete. Near-duplicates are reported in the
-CSV but not moved unless --move-near is explicitly set.
+Same-pixel and near-visual matches can be reported only with explicit opt-in
+flags. They are not treated as duplicates by default.
 """
 
 from __future__ import annotations
@@ -29,6 +26,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+import operation_ledger
+
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
               ".tif", ".tiff", ".heic", ".heif"}
 DEFAULT_SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
@@ -37,7 +36,16 @@ DEFAULT_REVIEW = DEFAULT_SORTED / "_source_review" / "ready_to_delete" / "advanc
 DEFAULT_REPORT = DEFAULT_SORTED / "_source_review" / "duplicate_reports" / "advanced_duplicates.csv"
 DEFAULT_CACHE = Path.home() / ".face_sort_cache" / "advanced_duplicate_fingerprints.json"
 CACHE_VERSION = 1
-ALWAYS_EXCLUDED_DIRS = {"all", "videos", "_duplicates", "_near_visual_review", "_smart_albums", "review"}
+ALWAYS_EXCLUDED_DIRS = {
+    "all",
+    "videos",
+    "_duplicates",
+    "_near_visual_review",
+    "_smart_albums",
+    "_smart_albums_v2",
+    "_blurred",
+    "review",
+}
 
 
 @contextlib.contextmanager
@@ -66,6 +74,7 @@ def suppress_native_stderr(enabled: bool = True):
 class ImageInfo:
     path: Path
     scope: str
+    nudity_status: str
     size_bytes: int
     width: int
     height: int
@@ -202,11 +211,28 @@ def scope_for(path: Path, root: Path, scope: str) -> str:
     return rel.parts[0] if rel.parts else path.parent.name
 
 
+def nudity_status_for_path(path: Path) -> str:
+    parts = [p.casefold() for p in path.parts]
+    name = path.name.casefold()
+    for i, part in enumerate(parts):
+        next_part = parts[i + 1] if i + 1 < len(parts) else ""
+        if part in {"photos", "all", "review"} and next_part in {"nude", "nudity_possible"}:
+            return "possible"
+        if part in {"photos_nude", "_possible_nudity", "nudity_possible"}:
+            return "possible"
+        if part in {"_uncertain_nudity", "uncertain_nudity"}:
+            return "uncertain"
+    if "nudity_possible" in name or "_nude" in name or "_nudity_" in name:
+        return "possible"
+    return "safe"
+
+
 def info_from_cache(path: Path, scope_name: str, entry: dict) -> ImageInfo | None:
     try:
         return ImageInfo(
             path=path,
             scope=scope_name,
+            nudity_status=nudity_status_for_path(path),
             size_bytes=int(entry["size_bytes"]),
             width=int(entry["width"]),
             height=int(entry["height"]),
@@ -254,9 +280,15 @@ def collect(root: Path, scope: str, cache_path: Path | None = DEFAULT_CACHE,
                         dest = unique_dest(bad_dir / path.name)
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     try:
-                        shutil.move(str(path), str(dest))
+                        operation_ledger.move_path(
+                            path,
+                            dest,
+                            sorted_root=DEFAULT_SORTED,
+                            operation="advanced_duplicate_matching.quarantine_bad",
+                            reason="move unreadable/corrupt image to ready_to_delete",
+                        )
                         stats["bad_moved"] += 1
-                    except OSError as exc:
+                    except Exception as exc:  # noqa: BLE001
                         errors.append((path, f"quarantine_failed: {exc}"))
                 continue
             height, width = img.shape[:2]
@@ -265,6 +297,7 @@ def collect(root: Path, scope: str, cache_path: Path | None = DEFAULT_CACHE,
             info = ImageInfo(
                 path=path,
                 scope=scope_name,
+                nudity_status=nudity_status_for_path(path),
                 size_bytes=size,
                 width=width,
                 height=height,
@@ -291,9 +324,15 @@ def collect(root: Path, scope: str, cache_path: Path | None = DEFAULT_CACHE,
                     dest = unique_dest(bad_dir / path.name)
                 try:
                     dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(path), str(dest))
+                    operation_ledger.move_path(
+                        path,
+                        dest,
+                        sorted_root=DEFAULT_SORTED,
+                        operation="advanced_duplicate_matching.quarantine_bad",
+                        reason="move unreadable/corrupt image to ready_to_delete",
+                    )
                     stats["bad_moved"] += 1
-                except OSError:
+                except Exception:
                     pass
 
     if cache_path:
@@ -344,11 +383,11 @@ def unique_dest(dest: Path) -> Path:
 def add_hash_groups(groups: list[list[ImageInfo]], items: list[ImageInfo],
                     key_name: str) -> set[Path]:
     seen: set[Path] = set()
-    by_key: dict[tuple[str, str | int], list[ImageInfo]] = defaultdict(list)
+    by_key: dict[tuple[str, str, str | int], list[ImageInfo]] = defaultdict(list)
     for info in items:
         value = getattr(info, key_name)
         if value is not None:
-            by_key[(info.scope, value)].append(info)
+            by_key[(info.scope, info.nudity_status, value)].append(info)
     for members in by_key.values():
         unique = [m for m in members if m.path not in seen]
         if len(unique) > 1:
@@ -393,6 +432,8 @@ def find_near_groups(items: list[ImageInfo], threshold: int,
                 ratio_b = b.width / max(1, b.height)
                 if abs(ratio_a - ratio_b) > 0.08:
                     continue
+                if a.nudity_status != b.nudity_status:
+                    continue
                 dist = hamming(a.phash, b.phash)
                 if dist <= threshold:
                     union(i, j, dist)
@@ -413,14 +454,17 @@ def find_near_groups(items: list[ImageInfo], threshold: int,
 
 
 def build_duplicates(items: list[ImageInfo], near_threshold: int,
-                     move_near: bool) -> list[DuplicateMember]:
+                     move_near: bool,
+                     include_same_pixels: bool = False,
+                     include_near_visual: bool = False) -> list[DuplicateMember]:
     groups: list[DuplicateMember] = []
     exact_groups: list[list[ImageInfo]] = []
     grouped = add_hash_groups(exact_groups, items, "sha256")
 
-    pixel_candidates = [i for i in items if i.path not in grouped]
     pixel_groups: list[list[ImageInfo]] = []
-    grouped |= add_hash_groups(pixel_groups, pixel_candidates, "pixel_sha256")
+    if include_same_pixels:
+        pixel_candidates = [i for i in items if i.path not in grouped]
+        grouped |= add_hash_groups(pixel_groups, pixel_candidates, "pixel_sha256")
 
     group_id = 1
     for kind, confidence, hash_groups in (
@@ -437,14 +481,15 @@ def build_duplicates(items: list[ImageInfo], near_threshold: int,
                                               keeper, info.path))
             group_id += 1
 
-    for members, dist in find_near_groups(items, near_threshold, grouped):
-        keeper = choose_keeper(members).path
-        confidence = max(70, int(98 - (dist * 4)))
-        for info in sorted(members, key=lambda x: str(x.path).lower()):
-            action = "keep" if info.path == keeper else ("move" if move_near else "review")
-            groups.append(DuplicateMember(group_id, "visually_similar", confidence,
-                                          action, keeper, info.path, dist))
-        group_id += 1
+    if include_near_visual:
+        for members, dist in find_near_groups(items, near_threshold, grouped):
+            keeper = choose_keeper(members).path
+            confidence = max(70, int(98 - (dist * 4)))
+            for info in sorted(members, key=lambda x: str(x.path).lower()):
+                action = "keep" if info.path == keeper else ("move" if move_near else "review")
+                groups.append(DuplicateMember(group_id, "visually_similar", confidence,
+                                              action, keeper, info.path, dist))
+            group_id += 1
 
     return groups
 
@@ -457,7 +502,7 @@ def write_report(report: Path, infos: dict[Path, ImageInfo],
         w.writerow([
             "group_id", "type", "confidence", "action", "distance",
             "file_path", "keeper_path", "scope", "width", "height",
-            "size_bytes", "sha256", "pixel_sha256", "phash",
+            "size_bytes", "nudity_status", "sha256", "pixel_sha256", "phash",
         ])
         for dup in duplicates:
             info = infos[dup.path]
@@ -465,7 +510,7 @@ def write_report(report: Path, infos: dict[Path, ImageInfo],
                 dup.group_id, dup.kind, dup.confidence, dup.action,
                 "" if dup.distance is None else dup.distance,
                 str(dup.path), str(dup.keeper), info.scope,
-                info.width, info.height, info.size_bytes, info.sha256,
+                info.width, info.height, info.size_bytes, info.nudity_status, info.sha256,
                 info.pixel_sha256 or "",
                 "" if info.phash is None else f"{info.phash:016x}",
             ])
@@ -491,9 +536,13 @@ def main() -> int:
     parser.add_argument("--bad-dir", type=Path,
                         default=DEFAULT_SORTED / "_source_review" / "ready_to_delete" / "bad_images")
     parser.add_argument("--apply", action="store_true",
-                        help="Move exact_file and same_pixels duplicates to review-dir.")
+                        help="Move exact_file duplicates to review-dir.")
+    parser.add_argument("--include-same-pixels", action="store_true",
+                        help="Also report decoded-pixel-identical files. Not enabled by default.")
+    parser.add_argument("--include-near-visual", action="store_true",
+                        help="Also report pHash near-visual candidates. Not enabled by default.")
     parser.add_argument("--move-near", action="store_true",
-                        help="Also move visually_similar candidates. Riskier; default only reports them.")
+                        help="With --include-near-visual, also move visually_similar candidates. Riskier.")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -510,14 +559,20 @@ def main() -> int:
         quarantine_errors=args.quarantine_bad,
         bad_dir=args.bad_dir.expanduser())
     info_by_path = {i.path: i for i in infos}
-    duplicates = build_duplicates(infos, args.near_threshold, args.move_near)
+    duplicates = build_duplicates(
+        infos,
+        args.near_threshold,
+        args.move_near,
+        include_same_pixels=bool(args.include_same_pixels),
+        include_near_visual=bool(args.include_near_visual),
+    )
     write_report(args.report.expanduser(), info_by_path, duplicates)
 
     groups = {d.group_id for d in duplicates}
     to_move = [
         d for d in duplicates
         if d.action == "move"
-        and (d.kind in {"exact_file", "same_pixels"} or args.move_near)
+        and (d.kind == "exact_file" or args.move_near)
     ]
     by_kind = defaultdict(int)
     for d in duplicates:
@@ -562,7 +617,7 @@ def main() -> int:
 
     if not args.apply:
         print("DRY-RUN — no files moved.")
-        print("Use --apply to move exact-file/same-pixel duplicates to review.")
+        print("Use --apply to move exact-file duplicates to review.")
         return 0
 
     moved = 0
@@ -575,8 +630,14 @@ def main() -> int:
         except ValueError:
             rel = Path(d.path.name)
         dest = unique_dest(review_dir / d.kind / rel)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(d.path), str(dest))
+        operation_ledger.move_path(
+            d.path,
+            dest,
+            sorted_root=DEFAULT_SORTED,
+            operation="advanced_duplicate_matching.move_duplicate",
+            reason=f"move {d.kind} duplicate to ready_to_delete",
+            extra={"kind": d.kind, "keeper": str(d.keeper), "distance": d.distance},
+        )
         moved += 1
 
     print(f"Moved {moved} duplicate file(s) to: {review_dir}")

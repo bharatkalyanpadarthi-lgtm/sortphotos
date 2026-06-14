@@ -2,8 +2,8 @@
 """
 Build one local HTML dashboard for the review queues.
 
-It links together the existing near-visual duplicate review, unknown triage,
-Face References quality report, duplicate report, and nudity review folders.
+It links together the duplicate review page, unknown triage, Face References
+quality report, duplicate report, and nudity review folders.
 This script is read-only except for writing the dashboard HTML.
 """
 
@@ -22,7 +22,7 @@ SOURCE_REVIEW = SORTED / "_source_review"
 PEOPLE = SORTED / "photos_by_person"
 UNKNOWN_HTML = SOURCE_REVIEW / "unknown_triage" / "unknown_triage.html"
 UNKNOWN_CSV = SOURCE_REVIEW / "unknown_triage" / "unknown_triage.csv"
-NEAR_VISUAL_HTML = SOURCE_REVIEW / "near_visual_review" / "near_visual_review.html"
+DUPLICATE_REVIEW_HTML = SOURCE_REVIEW / "duplicate_reports" / "near_visual_review.html"
 ADV_REPORT = SOURCE_REVIEW / "duplicate_reports" / "advanced_duplicates.csv"
 REF_REPORT = Path.home() / "Pictures" / "Face References" / "_reference_review" / "face_reference_quality_report.csv"
 DASHBOARD = SOURCE_REVIEW / "review_dashboard.html"
@@ -76,7 +76,7 @@ def file_link(path: Path, label: str | None = None) -> str:
 def ensure_reports() -> None:
     py = sys.executable
     subprocess.run([py, str(Path(__file__).with_name("unknown_triage.py")), "--quiet"], check=False)
-    subprocess.run([py, str(Path(__file__).with_name("near_visual_review.py")), "--no-open"], check=False)
+    subprocess.run([py, str(Path(__file__).with_name("near_visual_review.py")), "--html-only", "--quiet"], check=False)
 
 
 def write_dashboard(path: Path) -> None:
@@ -89,10 +89,10 @@ def write_dashboard(path: Path) -> None:
             "link": file_link(UNKNOWN_HTML, "Open unknown triage"),
         },
         {
-            "title": "Near-visual duplicates",
-            "count": dups["visually_similar"],
-            "detail": "Similar-looking files. Review before deleting.",
-            "link": file_link(NEAR_VISUAL_HTML, "Open duplicate review"),
+            "title": "Duplicate review",
+            "count": dups["exact_file"] + dups["same_pixels"] + dups["visually_similar"],
+            "detail": "Exact, same-pixel, and near-visual candidates grouped for manual review.",
+            "link": file_link(DUPLICATE_REVIEW_HTML, "Open duplicate review preview"),
         },
         {
             "title": "Exact/same-pixel duplicates",

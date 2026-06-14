@@ -22,11 +22,19 @@ to see every command keyword.
 
 from __future__ import annotations
 
+import csv
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+import daily_runner  # noqa: E402
+import source_manifest  # noqa: E402
+
+SOURCE_GUARD_EXIT = 3
 
 MENU_GROUPS = [
     (
@@ -116,6 +124,7 @@ ACTIONS = [
             "--archive-organized-sources",
             "--archive-sources-to-ready-delete",
             "--no-nudity-sort",
+            "--skip-output-cleanup",
             "--batch-size", "50",
             "--detect-workers", "1",
         ],
@@ -170,12 +179,15 @@ ACTIONS = [
                 "args": ["--apply", "--quiet"],
             },
             {
-                "script": "build_all_person_views.py",
-                "args": ["--apply", "--quiet"],
-            },
-            {
                 "script": "build_smart_albums.py",
-                "args": ["--apply", "--incremental", "--no-detect-nudity", "--framing-det-size", "640"],
+                "args": [
+                    "--apply",
+                    "--incremental",
+                    "--no-detect-nudity",
+                    "--framing-det-size", "640",
+                    "--max-framing-checks-per-person", "300",
+                    "--max-people-per-run", "25",
+                ],
             },
         ],
     },
@@ -183,14 +195,10 @@ ACTIONS = [
         "key": "bad-images",
         "aliases": ["quarantine-bad", "bad-person-images", "clean-bad-images"],
         "label": "Quarantine Bad Image Files",
-        "desc": "Move unreadable .jpg/.png recovery artifacts out of person folders, then rebuild all views",
+        "desc": "Move unreadable .jpg/.png recovery artifacts out of person folders",
         "steps": [
             {
                 "script": "quarantine_bad_person_images.py",
-                "args": ["--apply", "--quiet"],
-            },
-            {
-                "script": "build_all_person_views.py",
                 "args": ["--apply", "--quiet"],
             },
         ],
@@ -221,8 +229,8 @@ ACTIONS = [
     {
         "key": "all-views",
         "aliases": ["all", "person-all", "all-photos"],
-        "label": "Build All Person Views",
-        "desc": "Create hardlinked all/ and all/nude views inside each person folder",
+        "label": "Build Legacy All Person Views",
+        "desc": "Legacy/manual only: create hardlinked all/ and all/nude views inside each person folder",
         "script": "build_all_person_views.py",
         "args": ["--apply", "--quiet"],
     },
@@ -246,7 +254,13 @@ ACTIONS = [
         "label": "Build Smart Albums",
         "desc": "Create hardlinked smart views for best, quality, framing, format, same-scene, visual-similar, nudity, and review folders",
         "script": "build_smart_albums.py",
-        "args": ["--apply", "--incremental"],
+        "args": [
+            "--apply",
+            "--incremental",
+            "--framing-det-size", "640",
+            "--max-framing-checks-per-person", "300",
+            "--max-people-per-run", "25",
+        ],
     },
     {
         "key": "people-cleanup",
@@ -273,9 +287,10 @@ ACTIONS = [
     {
         "key": "duplicate-review",
         "aliases": ["review-duplicates", "near-visual-review", "visual-review"],
-        "label": "Review Near-Visual Duplicates",
-        "desc": "Open a local browser review page for near-visual duplicate candidates",
+        "label": "Review Duplicates / Near-Visuals",
+        "desc": "Open a local browser review page grouped by person with batch keep/move controls",
         "script": "near_visual_review.py",
+        "allow_original_count_decrease": True,
     },
     {
         "key": "unknown-triage",
@@ -469,25 +484,149 @@ def find_action_by_key(key: str) -> dict | None:
     return None
 
 
+def source_guard_run_id(action: dict) -> str:
+    safe_key = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in action["key"])
+    return f"face_{safe_key}_{time.strftime('%Y%m%d_%H%M%S')}"
+
+
+def write_guard_csv(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames or ["person"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def count_rows(counts: dict[str, int]) -> list[dict[str, int | str]]:
+    return [
+        {"person": person, "original_photos_count": int(count)}
+        for person, count in sorted(counts.items(), key=lambda item: item[0].lower())
+    ]
+
+
+def source_guard_start(action: dict) -> dict:
+    rid = source_guard_run_id(action)
+    before = daily_runner.original_person_counts()
+    prefix = daily_runner.SUMMARY_DIR / rid
+    paths = {
+        "before": prefix.with_name(prefix.name + "_source_counts_before.csv"),
+        "after": prefix.with_name(prefix.name + "_source_counts_after.csv"),
+        "violations": prefix.with_name(prefix.name + "_source_count_violations.csv"),
+    }
+    write_guard_csv(paths["before"], count_rows(before))
+    print(
+        f"Source guard: {daily_runner.original_person_total(before)} original photos "
+        f"across {len(before)} person folders."
+    )
+    print(f"Source guard before CSV: {paths['before']}")
+    return {"run_id": rid, "before": before, "paths": paths}
+
+
+def source_guard_finish(guard: dict, *, allow_decrease: bool = False) -> int:
+    before = {str(k): int(v) for k, v in guard["before"].items()}
+    after = daily_runner.original_person_counts()
+    paths = guard["paths"]
+    violations = daily_runner.source_count_violations(before, after)
+    write_guard_csv(paths["after"], count_rows(after))
+    if not violations:
+        print(
+            f"Source guard OK: {daily_runner.original_person_total(before)} -> "
+            f"{daily_runner.original_person_total(after)} original photos."
+        )
+        return 0
+    write_guard_csv(paths["violations"], violations)
+    if allow_decrease:
+        print()
+        print("Source guard: original-count decreases allowed for this manual review action.")
+        print(f"Before count CSV:     {paths['before']}")
+        print(f"After count CSV:      {paths['after']}")
+        print(f"Change report CSV:    {paths['violations']}")
+        for row in violations[:10]:
+            print(f"  {row['person']}: {row['before']} -> {row['after']} ({row['delta']})")
+        if len(violations) > 10:
+            print(f"  ... {len(violations) - 10} more")
+        return 0
+    print()
+    print("ERROR: source guard blocked this operation.")
+    print("One or more person folders now have fewer original images under photos/ than before the command.")
+    print(f"Before count CSV:     {paths['before']}")
+    print(f"After count CSV:      {paths['after']}")
+    print(f"Violation report CSV: {paths['violations']}")
+    for row in violations[:10]:
+        print(f"  {row['person']}: {row['before']} -> {row['after']} ({row['delta']})")
+    if len(violations) > 10:
+        print(f"  ... {len(violations) - 10} more")
+    return SOURCE_GUARD_EXIT
+
+
 def run_action(action: dict, extra_args: list[str] | None = None) -> int:
+    allow_original_count_decrease = bool(action.get("allow_original_count_decrease"))
+    manifest_check = source_manifest.validate_current(
+        label=f"face_{action['key']}_start",
+        people_dir=daily_runner.PEOPLE,
+    )
+    source_manifest.print_validation(manifest_check)
+    if not manifest_check.ok:
+        print("ERROR: protected source manifest blocked this command.")
+        print("Fix or recover missing originals before running commands that may refresh cache/indexes.")
+        return SOURCE_GUARD_EXIT
+
+    guard = source_guard_start(action)
+    command_rc = 0
     steps = action.get("steps") or [action]
     try:
         for i, step in enumerate(steps, start=1):
             script_path = SCRIPT_DIR / step["script"]
             if not script_path.exists():
                 print(f"ERROR: missing script {script_path}")
-                return 1
+                command_rc = 1
+                break
             cmd = [sys.executable, str(script_path)] + step.get("args", [])
             if extra_args and len(steps) == 1:
                 cmd.extend(extra_args)
             prefix = f"[{i}/{len(steps)}] " if len(steps) > 1 else ""
             print(f"\n→ {prefix}Running: {' '.join(cmd)}\n", flush=True)
-            result = subprocess.run(cmd)
+            env = os.environ.copy()
+            env["PHOTO_PIPELINE_RUN_ID"] = str(guard["run_id"])
+            result = subprocess.run(cmd, env=env)
             if result.returncode != 0:
-                return result.returncode
-        return 0
+                command_rc = int(result.returncode)
+                break
     except KeyboardInterrupt:
-        return 130
+        command_rc = 130
+
+    guard_rc = source_guard_finish(guard, allow_decrease=allow_original_count_decrease)
+    if guard_rc != 0:
+        return guard_rc
+    if allow_original_count_decrease and command_rc in {130, -2}:
+        print("Manual review server stopped; continuing final manifest update.")
+        command_rc = 0
+    if command_rc != 0:
+        return command_rc
+
+    post_manifest_check = source_manifest.validate_current(
+        label=f"face_{action['key']}_before_promote",
+        people_dir=daily_runner.PEOPLE,
+    )
+    if post_manifest_check.ok:
+        source_manifest.print_validation(post_manifest_check)
+    elif not allow_original_count_decrease:
+        source_manifest.print_validation(post_manifest_check)
+        return SOURCE_GUARD_EXIT
+    else:
+        print("Source manifest changed after allowed manual duplicate review; promoting current originals.")
+    manifest_path = source_manifest.promote_current(
+        label=f"face_{action['key']}_completed",
+        reason=f"successful face.py action: {action['key']}",
+        people_dir=daily_runner.PEOPLE,
+    )
+    print(f"Source manifest promoted: {manifest_path}")
+    return 0
 
 
 def main() -> int:

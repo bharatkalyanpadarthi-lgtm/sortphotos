@@ -20,6 +20,8 @@ import sys
 import time
 from pathlib import Path
 
+import operation_ledger
+
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
               ".tif", ".tiff", ".heic", ".heif", ".gif"}
 DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
@@ -38,7 +40,7 @@ DEFAULT_REPORT_DIR = (
     / "_source_review"
     / "repair_logs"
 )
-SKIP_DIRS = {"all", "_smart_albums"}
+SKIP_DIRS = {"all", "_smart_albums", "_smart_albums_v2", "_duplicates", "_near_visual_review", "review"}
 
 
 @contextlib.contextmanager
@@ -131,8 +133,14 @@ def unique_dest(dest: Path) -> Path:
 def move_bad(src: Path, people_dir: Path, review_dir: Path) -> Path:
     rel = src.relative_to(people_dir)
     dest = unique_dest(review_dir / rel)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(src), str(dest))
+    operation_ledger.move_path(
+        src,
+        dest,
+        sorted_root=people_dir.parent,
+        operation="quarantine_bad_person_images.move_bad",
+        reason="move unreadable person-folder image to ready_to_delete",
+        extra={"relative_path": rel.as_posix()},
+    )
     return dest
 
 

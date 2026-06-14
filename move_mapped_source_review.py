@@ -22,6 +22,8 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 
+import operation_ledger
+
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
               ".tif", ".tiff", ".heic", ".heif"}
 DEFAULT_SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
@@ -163,8 +165,13 @@ def main() -> int:
     for src, dest in mapped:
         if not src.exists():
             continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dest))
+        operation_ledger.move_path(
+            src,
+            dest,
+            sorted_root=sorted_root,
+            operation="move_mapped_source_review.move_mapped",
+            reason="move source-review image already present in photos_by_person to ready_to_delete",
+        )
         moved += 1
 
     print(f"Moved {moved} mapped image(s) to: {ready_dir}")

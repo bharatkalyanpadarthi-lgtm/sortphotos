@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import operation_ledger
+
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
               ".tif", ".tiff", ".heic", ".heif"}
 DEFAULT_INPUT = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
@@ -33,6 +35,9 @@ EXCLUDED_DIRS = {
     "photos_nude",
     "_possible_nudity",
     "_smart_albums",
+    "_smart_albums_v2",
+    "_duplicates",
+    "_near_visual_review",
     "_uncertain_nudity",
     "review",
 }
@@ -239,7 +244,13 @@ def classify_detections(detections: list[dict],
 def copy_or_move(src: Path, dest: Path, move: bool) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if move:
-        shutil.move(str(src), str(dest))
+        operation_ledger.move_path(
+            src,
+            dest,
+            sorted_root=Path.home() / "Pictures" / "sorted_all_pictures",
+            operation="separate_nudity_review.move_to_review",
+            reason="move nudity candidate into review folder",
+        )
     else:
         shutil.copy2(str(src), str(dest))
 

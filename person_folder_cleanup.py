@@ -18,13 +18,15 @@ import shutil
 import time
 from pathlib import Path
 
+import operation_ledger
+
 DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
 DEFAULT_CLEANUP_ROOT = (
     Path.home() / "Pictures" / "sorted_all_pictures" / "_source_review" / "ready_to_delete"
 )
 DEFAULT_RULES = Path(__file__).resolve().with_name("person_folder_rules.json")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
-SKIP_DIRS = {"all", "_smart_albums"}
+SKIP_DIRS = {"all", "_smart_albums", "_smart_albums_v2", "_duplicates", "_near_visual_review", "review"}
 
 
 def load_rules(path: Path) -> dict:
@@ -79,10 +81,15 @@ def unique_dest(dest: Path) -> Path:
         i += 1
 
 
-def move_path(src: Path, dest: Path, apply: bool) -> None:
+def move_path(src: Path, dest: Path, apply: bool, *, sorted_root: Path) -> None:
     if apply:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dest))
+        operation_ledger.move_path(
+            src,
+            dest,
+            sorted_root=sorted_root,
+            operation="person_folder_cleanup.move_path",
+            reason="apply person folder cleanup rule",
+        )
 
 
 def merge_folder(src: Path,
@@ -90,6 +97,7 @@ def merge_folder(src: Path,
                  archive_root: Path,
                  apply: bool,
                  rows: list[dict[str, str]]) -> tuple[int, int]:
+    sorted_root = src.parent.parent
     moved = 0
     dupes = 0
     dest_hashes: dict[str, Path] = {}
@@ -117,7 +125,7 @@ def merge_folder(src: Path,
                 "dest": str(dest_hashes[sha]),
                 "archive": str(archive_dest),
             })
-            move_path(src_file, archive_dest, apply)
+            move_path(src_file, archive_dest, apply, sorted_root=sorted_root)
             dupes += 1
             continue
 
@@ -128,15 +136,21 @@ def merge_folder(src: Path,
             "dest": str(target),
             "archive": "",
         })
-        move_path(src_file, target, apply)
+        move_path(src_file, target, apply, sorted_root=sorted_root)
         moved += 1
 
     archive_dest = unique_dest(archive_root / "merged_source_folders" / src.name)
     rows.append({"action": "source_folder_archived", "source": str(src), "dest": "", "archive": str(archive_dest)})
     if apply:
         if src.exists():
-            archive_dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(archive_dest))
+            operation_ledger.move_path(
+                src,
+                archive_dest,
+                sorted_root=sorted_root,
+                operation="person_folder_cleanup.archive_merged_source_folder",
+                reason="archive source folder after merge cleanup rule",
+                hash_file=False,
+            )
     return moved, dupes
 
 
@@ -151,7 +165,14 @@ def rename_folder(src: Path,
         return merge_folder(src, dest, archive_root, apply, rows)
     rows.append({"action": "renamed_folder", "source": str(src), "dest": str(dest), "archive": ""})
     if apply:
-        src.rename(dest)
+        operation_ledger.move_path(
+            src,
+            dest,
+            sorted_root=src.parent.parent,
+            operation="person_folder_cleanup.rename_folder",
+            reason="rename person folder cleanup rule",
+            hash_file=False,
+        )
     return 0, 0
 
 
@@ -160,8 +181,14 @@ def archive_removed(src: Path, archive_root: Path, apply: bool, rows: list[dict[
     rows.append({"action": "removed_folder_archived", "source": str(src), "dest": "", "archive": str(archive_dest)})
     count = len([p for p in iter_files(src) if p.suffix.lower() in IMAGE_EXTS])
     if apply:
-        archive_dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(archive_dest))
+        operation_ledger.move_path(
+            src,
+            archive_dest,
+            sorted_root=src.parent.parent,
+            operation="person_folder_cleanup.archive_removed_folder",
+            reason="archive removed person folder cleanup rule",
+            hash_file=False,
+        )
     return count
 
 

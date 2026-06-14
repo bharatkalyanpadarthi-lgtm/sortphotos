@@ -7,6 +7,11 @@ Example:
   -> photos_by_person/Sonali Bendre/Sonali_Bendre_0001_photo_portrait_q_high.jpg
 
 Default is dry-run. Use --apply to rename files.
+
+Generated hardlink views and review holding areas are intentionally skipped.
+The renamer should only touch canonical originals under photos/; generated
+albums are rebuilt from those sources and can contain tens of thousands of
+hardlinks.
 """
 
 from __future__ import annotations
@@ -24,7 +29,17 @@ import numpy as np
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
               ".tif", ".tiff", ".heic", ".heif", ".gif"}
 DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
-SKIP_DIRS = {"all", "_smart_albums"}
+SKIP_DIRS = {
+    "all",
+    "_smart_albums",
+    "_smart_albums_v2",
+}
+SOURCE_TOP_DIRS = {
+    "photos",
+    "photos_nude",
+    "_possible_nudity",
+    "_uncertain_nudity",
+}
 CATEGORY_RANK = {
     "photo": 0,
     "nudity_possible": 1,
@@ -68,6 +83,17 @@ def iter_images(person_dir: Path) -> list[Path]:
     for dirpath, dirnames, filenames in os.walk(person_dir):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         base = Path(dirpath)
+        rel = base.relative_to(person_dir)
+        if rel.parts:
+            top = rel.parts[0]
+            if top in SKIP_DIRS or top not in SOURCE_TOP_DIRS:
+                dirnames[:] = []
+                continue
+        else:
+            dirnames[:] = [
+                d for d in dirnames
+                if d in SOURCE_TOP_DIRS and d not in SKIP_DIRS
+            ]
         for filename in filenames:
             p = base / filename
             if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
@@ -177,6 +203,16 @@ def canonical_pattern(prefix: str) -> re.Pattern:
     )
 
 
+def stable_canonical_pattern(prefix: str, category: str) -> re.Pattern:
+    return re.compile(
+        rf"^{re.escape(prefix)}_(\d+)_"
+        rf"{re.escape(category)}_"
+        r"(?:landscape|portrait|square|unknown)_"
+        r"(?:q_high|q_good|q_review|q_unknown)$",
+        re.IGNORECASE,
+    )
+
+
 def parsed_index(path: Path, prefix: str) -> int | None:
     match = canonical_pattern(prefix).fullmatch(path.stem)
     if not match:
@@ -185,6 +221,10 @@ def parsed_index(path: Path, prefix: str) -> int | None:
         return int(match.group(1))
     except ValueError:
         return None
+
+
+def is_stable_canonical(path: Path, prefix: str, category: str) -> bool:
+    return stable_canonical_pattern(prefix, category).fullmatch(path.stem) is not None
 
 
 def sort_key_for_image(path: Path, person_dir: Path, prefix: str) -> tuple:
@@ -229,8 +269,17 @@ def plan_for_person(person_dir: Path, compact: bool = False) -> list[tuple[Path,
     for ordinal, src in enumerate(sorted_images, start=1):
         rel = src.relative_to(person_dir)
         category = category_label(rel)
-        meta = read_image_meta(src)
         index = ordinal if compact else parsed_index(src, prefix)
+        if (
+            not compact
+            and index is not None
+            and index not in used_indices
+            and is_stable_canonical(src, prefix, category)
+        ):
+            used_indices.add(index)
+            used_paths.add(src)
+            continue
+        meta = read_image_meta(src)
         if index is None or index in used_indices:
             while next_index in used_indices:
                 next_index += 1

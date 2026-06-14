@@ -20,11 +20,24 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
 PEOPLE = SORTED / "photos_by_person"
 ADV_REPORT = SORTED / "_source_review" / "duplicate_reports" / "advanced_duplicates.csv"
+REQUIRED_GENERATED_EXCLUSIONS = {
+    "all",
+    "_smart_albums",
+    "_smart_albums_v2",
+    "review",
+    "_duplicates",
+    "_near_visual_review",
+}
 
 sys.path.insert(0, str(SCRIPT_DIR))
+import advanced_duplicate_matching  # noqa: E402
 import cache_tools  # noqa: E402
+import cleanup_empty_person_folders  # noqa: E402
 import daily_runner  # noqa: E402
+import delete_person_folder_duplicates  # noqa: E402
 import face  # noqa: E402
+import operation_ledger  # noqa: E402
+import source_manifest  # noqa: E402
 import sort_photos  # noqa: E402
 
 for _name in ("CacheState", "CachedFace", "FaceRecord", "LabelingState", "IdentityDB"):
@@ -70,7 +83,6 @@ def check_daily_order(findings: list[Finding]) -> None:
         ("exact-dedupe", "cache-rehydrate"),
         ("advanced-dedupe", "cache-rehydrate"),
         ("cleanup-empty", "cache-rehydrate"),
-        ("cache-rehydrate", "all-views"),
         ("cache-rehydrate", "smart-albums"),
         ("smart-albums", "integration-audit"),
         ("integration-audit", "status"),
@@ -84,6 +96,82 @@ def check_daily_order(findings: list[Finding]) -> None:
         add(findings, "FAIL", "daily step order", "; ".join(bad))
     else:
         add(findings, "OK", "daily step order", "file-moving cleanup happens before cache refresh")
+
+
+def check_daily_destructive_commands(findings: list[Finding]) -> None:
+    bad: list[str] = []
+    for step in daily_runner.step_list(50):
+        cmd = [str(part) for part in step.get("cmd", [])]
+        script = Path(cmd[1]).name if len(cmd) > 1 and cmd[1].endswith(".py") else ""
+        if step["name"] == "process" and "--skip-output-cleanup" not in cmd:
+            bad.append("daily process must pass --skip-output-cleanup")
+        if script in {"delete_person_folder_duplicates.py", "advanced_duplicate_matching.py"}:
+            if "--apply" in cmd:
+                bad.append(f"daily:{step['name']} must not pass --apply to {script}")
+            if "--quarantine-bad" in cmd:
+                bad.append(f"daily:{step['name']} must not pass --quarantine-bad to {script}")
+
+    for cmd in sort_photos.post_process_steps(SORTED):
+        cmd = [str(part) for part in cmd]
+        script = Path(cmd[1]).name if len(cmd) > 1 and cmd[1].endswith(".py") else ""
+        if script in {"delete_person_folder_duplicates.py", "advanced_duplicate_matching.py"}:
+            if "--apply" in cmd:
+                bad.append(f"sort_photos.run_post_process must not pass --apply to {script}")
+            if "--quarantine-bad" in cmd:
+                bad.append(f"sort_photos.run_post_process must not pass --quarantine-bad to {script}")
+
+    if bad:
+        add(findings, "FAIL", "destructive daily commands", "; ".join(bad))
+    else:
+        add(findings, "OK", "destructive daily commands", "duplicate cleanup is report-only and process skips auto cleanup")
+
+
+def check_scanner_scope(findings: list[Finding]) -> None:
+    scopes = {
+        "sort_photos.ALWAYS_EXCLUDED_SCAN_DIRS": sort_photos.ALWAYS_EXCLUDED_SCAN_DIRS,
+        "advanced_duplicate_matching.ALWAYS_EXCLUDED_DIRS": advanced_duplicate_matching.ALWAYS_EXCLUDED_DIRS,
+        "delete_person_folder_duplicates.EXCLUDED_DIRS": delete_person_folder_duplicates.EXCLUDED_DIRS,
+        "cleanup_empty_person_folders.SKIP_DIRS": cleanup_empty_person_folders.SKIP_DIRS,
+        "cache_tools.CACHE_SCAN_EXCLUDED_DIRS": cache_tools.CACHE_SCAN_EXCLUDED_DIRS,
+        "daily_runner.SMART_DIRS": daily_runner.SMART_DIRS,
+    }
+    bad: list[str] = []
+    for name, values in scopes.items():
+        missing = sorted(REQUIRED_GENERATED_EXCLUSIONS - set(values))
+        if missing:
+            bad.append(f"{name} missing {', '.join(missing)}")
+    if bad:
+        add(findings, "FAIL", "scanner generated-folder exclusions", "; ".join(bad))
+    else:
+        add(findings, "OK", "scanner generated-folder exclusions", "all scanner exclusion sets include generated view folders")
+
+
+def check_rollback_tools(findings: list[Finding]) -> None:
+    bad: list[str] = []
+    if not hasattr(source_manifest, "restore_from_manifest"):
+        bad.append("source_manifest.restore_from_manifest missing")
+    if not hasattr(operation_ledger, "move_path"):
+        bad.append("operation_ledger.move_path missing")
+    if not hasattr(operation_ledger, "iter_events"):
+        bad.append("operation_ledger.iter_events missing")
+    parser = source_manifest.build_parser()
+    subcommands = [
+        action
+        for action in parser._actions  # noqa: SLF001
+        if getattr(action, "choices", None)
+    ]
+    choices = set(subcommands[0].choices) if subcommands else set()
+    if "restore" not in choices:
+        bad.append("source_manifest.py restore command missing")
+    if bad:
+        add(findings, "FAIL", "rollback tooling", "; ".join(bad))
+    else:
+        add(
+            findings,
+            "OK",
+            "rollback tooling",
+            f"move ledger and source_manifest restore command available under {operation_ledger.LEDGER_DIR_NAME}",
+        )
 
 
 def check_cache(findings: list[Finding]) -> None:
@@ -124,15 +212,15 @@ def check_duplicate_report(findings: list[Finding]) -> None:
     if counts["exact_file"] or counts["same_pixels"]:
         add(
             findings,
-            "FAIL",
-            "safe duplicates pending",
-            f"exact={counts['exact_file']}, same_pixels={counts['same_pixels']}",
+            "WARN",
+            "duplicate candidates",
+            f"exact={counts['exact_file']}, same_pixels={counts['same_pixels']} review-only; daily does not move originals",
         )
     else:
         add(
             findings,
             "OK",
-            "safe duplicates",
+            "duplicate candidates",
             f"none pending; near-visual review-only candidates={counts['visually_similar']}",
         )
 
@@ -157,6 +245,26 @@ def check_to_process_visibility(findings: list[Finding]) -> None:
         add(findings, "OK", "To Process scan visibility", f"{visible} inbox image(s) visible")
 
 
+def check_source_manifest(findings: list[Finding]) -> None:
+    result = source_manifest.validate_current(label="integration_audit_source_manifest", people_dir=PEOPLE)
+    if result.ok:
+        add(
+            findings,
+            "OK",
+            "source manifest",
+            f"{result.expected_total} protected originals, {result.current_total} current, "
+            f"{len(result.extra)} new, {len(result.renamed)} renamed",
+        )
+        return
+    add(
+        findings,
+        "FAIL",
+        "source manifest",
+        f"missing={len(result.missing)}, changed={len(result.size_changed)}; "
+        f"missing report={result.missing_csv}",
+    )
+
+
 def print_findings(findings: list[Finding]) -> None:
     print("Photo Pipeline Integration Audit")
     print("=" * 60)
@@ -173,7 +281,11 @@ def main() -> int:
     findings: list[Finding] = []
     check_scripts_exist(findings)
     check_daily_order(findings)
+    check_daily_destructive_commands(findings)
+    check_scanner_scope(findings)
+    check_rollback_tools(findings)
     check_cache(findings)
+    check_source_manifest(findings)
     check_duplicate_report(findings)
     check_to_process_visibility(findings)
     print_findings(findings)

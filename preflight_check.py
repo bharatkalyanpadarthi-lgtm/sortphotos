@@ -155,7 +155,7 @@ def process_check() -> Check:
             if "preflight_check.py" not in command:
                 matches.append(f"{pid}: {command}")
     if matches:
-        return Check("WARN", "duplicate running process", "; ".join(matches[:3]))
+        return Check("FAIL", "duplicate running process", "; ".join(matches[:3]))
     return Check("OK", "duplicate running process", "no other face pipeline process found")
 
 

@@ -17,6 +17,8 @@ import csv
 import shutil
 from pathlib import Path
 
+import operation_ledger
+
 DEFAULT_SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
 SUPPORTED_POLICY_VERSIONS = {"2", "3", ""}
 
@@ -155,8 +157,14 @@ def main() -> int:
     for src, dest, _category in actions:
         if not src.exists():
             continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dest))
+        operation_ledger.move_path(
+            src,
+            dest,
+            sorted_root=DEFAULT_SORTED,
+            operation="place_nudity_inside_person_folders.move_to_nude",
+            reason="move reviewed nudity candidate into photos/nude",
+            extra={"category": _category},
+        )
         moved += 1
 
     print(f"Moved {moved} file(s) into person-folder nudity subfolders.")

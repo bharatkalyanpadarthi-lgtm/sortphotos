@@ -23,6 +23,8 @@ import sys
 import time
 from pathlib import Path
 
+import source_manifest
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
 PEOPLE = SORTED / "photos_by_person"
@@ -37,7 +39,8 @@ VIDEO_EXTS = {
     ".3g2", ".3gp", ".avi", ".m4v", ".mkv", ".mov", ".mp4",
     ".mpeg", ".mpg", ".mts", ".m2ts", ".webm", ".wmv",
 }
-SMART_DIRS = {"all", "_smart_albums", "_duplicates", "_near_visual_review", "review"}
+SMART_DIRS = {"all", "_smart_albums", "_smart_albums_v2", "_duplicates", "_near_visual_review", "review"}
+SOURCE_GUARD_EXIT = 3
 
 
 def run_id() -> str:
@@ -72,6 +75,140 @@ def count_files(root: Path) -> int:
     if not root.exists():
         return 0
     return sum(1 for p in root.rglob("*") if p.is_file())
+
+
+def original_person_counts() -> dict[str, int]:
+    """Count canonical original images per person under photos/, including photos/nude/."""
+    counts: dict[str, int] = {}
+    if not PEOPLE.exists():
+        return counts
+    for person_dir in sorted(
+        [p for p in PEOPLE.iterdir() if p.is_dir() and not p.name.startswith("_")],
+        key=lambda p: p.name.lower(),
+    ):
+        photos_dir = person_dir / "photos"
+        total = 0
+        if photos_dir.exists():
+            for p in photos_dir.rglob("*"):
+                if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
+                    total += 1
+        counts[person_dir.name] = total
+    return counts
+
+
+def original_person_total(counts: dict[str, int]) -> int:
+    return sum(int(value) for value in counts.values())
+
+
+def source_guard_paths(run_id_value: str) -> dict[str, Path]:
+    prefix = SUMMARY_DIR / f"daily_run_{run_id_value}"
+    return {
+        "before": prefix.with_name(prefix.name + "_source_counts_before.csv"),
+        "after": prefix.with_name(prefix.name + "_source_counts_after.csv"),
+        "violations": prefix.with_name(prefix.name + "_source_count_violations.csv"),
+    }
+
+
+def write_source_counts_csv(path: Path, counts: dict[str, int]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["person", "original_photos_count"])
+        writer.writeheader()
+        for person, count in sorted(counts.items(), key=lambda item: item[0].lower()):
+            writer.writerow({"person": person, "original_photos_count": int(count)})
+
+
+def source_count_violations(before: dict[str, int],
+                            after: dict[str, int]) -> list[dict[str, int | str]]:
+    violations: list[dict[str, int | str]] = []
+    for person, before_count in sorted(before.items(), key=lambda item: item[0].lower()):
+        after_count = int(after.get(person, 0))
+        before_count = int(before_count)
+        if after_count < before_count:
+            violations.append({
+                "person": person,
+                "before": before_count,
+                "after": after_count,
+                "delta": after_count - before_count,
+            })
+    return violations
+
+
+def write_source_violations_csv(path: Path,
+                                violations: list[dict[str, int | str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["person", "before", "after", "delta"])
+        writer.writeheader()
+        writer.writerows(violations)
+
+
+def ensure_source_guard_baseline(state: dict) -> dict[str, int]:
+    guard = state.setdefault("source_guard", {})
+    before = guard.get("before")
+    if not isinstance(before, dict):
+        before = original_person_counts()
+        guard["before"] = before
+        guard["started_at"] = int(time.time())
+    if not isinstance(guard.get("floor"), dict):
+        guard["floor"] = {str(k): int(v) for k, v in before.items()}
+    paths = source_guard_paths(str(state["run_id"]))
+    guard["before_csv"] = str(paths["before"])
+    guard["after_csv"] = str(paths["after"])
+    guard["violations_csv"] = str(paths["violations"])
+    write_source_counts_csv(paths["before"], {str(k): int(v) for k, v in before.items()})
+    return {str(k): int(v) for k, v in before.items()}
+
+
+def check_source_guard(state: dict, stage: str) -> tuple[bool, dict[str, int], list[dict[str, int | str]]]:
+    before = ensure_source_guard_baseline(state)
+    guard = state.setdefault("source_guard", {})
+    floor = {str(k): int(v) for k, v in guard.get("floor", before).items()}
+    after = original_person_counts()
+    paths = source_guard_paths(str(state["run_id"]))
+    violations = source_count_violations(floor, after)
+    write_source_counts_csv(paths["after"], after)
+    if violations:
+        write_source_violations_csv(paths["violations"], violations)
+    else:
+        next_floor = dict(floor)
+        for person, count in after.items():
+            next_floor[person] = max(int(next_floor.get(person, 0)), int(count))
+        guard["floor"] = next_floor
+    state.setdefault("source_guard", {}).update({
+        "last_checked_stage": stage,
+        "last_checked_at": int(time.time()),
+        "before_total": original_person_total(before),
+        "after_total": original_person_total(after),
+        "floor_total": original_person_total(floor),
+        "violation_count": len(violations),
+    })
+    return len(violations) == 0, after, violations
+
+
+def check_source_manifest(state: dict, stage: str) -> source_manifest.ManifestValidation:
+    result = source_manifest.validate_current(
+        label=f"daily_run_{state['run_id']}_{stage}",
+        people_dir=PEOPLE,
+    )
+    source_manifest.print_validation(result)
+    state["source_manifest"] = {
+        "last_checked_stage": stage,
+        "last_checked_at": int(time.time()),
+        "ok": result.ok,
+        "manifest_path": str(result.manifest_path),
+        "expected_total": result.expected_total,
+        "current_total": result.current_total,
+        "missing": len(result.missing),
+        "size_changed": len(result.size_changed),
+        "renamed": len(result.renamed),
+        "extra": len(result.extra),
+        "missing_csv": str(result.missing_csv),
+        "changed_csv": str(result.changed_csv),
+        "renamed_csv": str(result.renamed_csv),
+        "extra_csv": str(result.extra_csv),
+    }
+    return result
 
 
 def size_bytes(root: Path) -> int:
@@ -166,10 +303,13 @@ def labeling_remaining() -> dict[str, int]:
 def snapshot() -> dict:
     dups = duplicate_counts()
     labels = labeling_remaining()
+    original_counts = original_person_counts()
     return {
         "to_process_images": count_images(TO_PROCESS, exclude_generated_dirs=False),
         "to_process_videos": count_videos(TO_PROCESS, exclude_generated_dirs=False),
         "organized_images": count_images(PEOPLE),
+        "person_original_images": original_person_total(original_counts),
+        "person_folders": len(original_counts),
         "nudity_images": nudity_count(),
         "ready_to_delete_files": count_files(READY),
         "ready_to_delete_size": size_bytes(READY),
@@ -278,6 +418,7 @@ def step_list(batch_size: int) -> list[dict]:
                 "--archive-sources-to-ready-delete",
                 "--archive-scanned-sources",
                 "--merge-existing-output",
+                "--skip-output-cleanup",
                 "--batch-size", str(batch_size),
                 "--detect-workers", "1",
             ],
@@ -287,18 +428,28 @@ def step_list(batch_size: int) -> list[dict]:
          "cmd": [py, str(SCRIPT_DIR / "person_structure.py"), "--apply", "--quiet"]},
         {"name": "rename", "desc": "Normalize person filenames",
          "cmd": [py, str(SCRIPT_DIR / "rename_person_folder_files.py"), "--apply", "--quiet"]},
-        {"name": "exact-dedupe", "desc": "Move exact person-folder duplicates",
-         "cmd": [py, str(SCRIPT_DIR / "delete_person_folder_duplicates.py"), "--apply", "--quiet"]},
-        {"name": "advanced-dedupe", "desc": "Refresh advanced duplicate report",
-         "cmd": [py, str(SCRIPT_DIR / "advanced_duplicate_matching.py"), "--apply", "--quiet"], "heavy": True},
+        {"name": "exact-dedupe", "desc": "Report exact person-folder duplicates without moving originals",
+         "cmd": [py, str(SCRIPT_DIR / "delete_person_folder_duplicates.py"), "--quiet"]},
+        {"name": "advanced-dedupe", "desc": "Refresh advanced duplicate report without moving originals",
+         "cmd": [py, str(SCRIPT_DIR / "advanced_duplicate_matching.py"), "--quiet"], "heavy": True},
         {"name": "cleanup-empty", "desc": "Move empty person folders to ready_to_delete",
          "cmd": [py, str(SCRIPT_DIR / "cleanup_empty_person_folders.py"), "--apply", "--quiet"]},
         {"name": "cache-rehydrate", "desc": "Refresh face cache after all file-moving cleanup",
          "cmd": [py, str(SCRIPT_DIR / "cache_tools.py"), "rehydrate", "--apply", "--batch-size", str(batch_size)], "heavy": True},
-        {"name": "all-views", "desc": "Rebuild per-person all/nude hardlink views",
-         "cmd": [py, str(SCRIPT_DIR / "build_all_person_views.py"), "--apply", "--quiet"]},
         {"name": "smart-albums", "desc": "Refresh changed smart albums",
-         "cmd": [py, str(SCRIPT_DIR / "build_smart_albums.py"), "--apply", "--incremental"], "heavy": True},
+         "cmd": [
+             py,
+             str(SCRIPT_DIR / "build_smart_albums.py"),
+             "--apply",
+             "--incremental",
+             "--no-detect-nudity",
+             "--framing-det-size",
+             "640",
+             "--max-framing-checks-per-person",
+             "300",
+             "--max-people-per-run",
+             "25",
+         ], "heavy": True},
         {"name": "unknown-triage", "desc": "Write unknown-cluster triage report",
          "cmd": [py, str(SCRIPT_DIR / "unknown_triage.py"), "--quiet"]},
         {"name": "integration-audit", "desc": "Verify final cross-script invariants",
@@ -310,11 +461,17 @@ def step_list(batch_size: int) -> list[dict]:
 
 def run_command(cmd: list[str], log_path: Path) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    run_id_value = ""
+    if "daily_run_" in log_path.stem:
+        run_id_value = log_path.stem.replace("daily_run_", "", 1)
+    if run_id_value:
+        env["PHOTO_PIPELINE_RUN_ID"] = f"daily_run_{run_id_value}"
     with log_path.open("a", encoding="utf-8") as log:
         log.write(f"\n$ {' '.join(cmd)}\n")
         log.flush()
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, bufsize=1)
+                                text=True, bufsize=1, env=env)
         assert proc.stdout is not None
         for line in proc.stdout:
             print(line, end="")
@@ -333,6 +490,7 @@ def write_summary(path: Path, state: dict, before: dict, after: dict, status: st
         "delta": {key: delta(after, before, key) for key in after},
         "steps": state["steps"],
         "memory": state.get("memory", {}),
+        "source_guard": state.get("source_guard", {}),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
@@ -344,6 +502,7 @@ def print_summary(before: dict, after: dict, summary_path: Path) -> None:
     print("Daily Run Summary")
     print("=" * 60)
     print(f"New organized images:       {delta(after, before, 'organized_images')}")
+    print(f"Original photos before/after:{before.get('person_original_images', 0)} -> {after.get('person_original_images', 0)}")
     print(f"To Process before/after:    {before['to_process_images']} -> {after['to_process_images']}")
     print(f"To Process videos moved:    {before.get('to_process_videos', 0)} -> {after.get('to_process_videos', 0)}")
     print(f"Nudity-folder image change: {delta(after, before, 'nudity_images')}")
@@ -369,6 +528,7 @@ def print_dry_run(steps: list[dict], before: dict, profile: dict,
     print(f"To Process images:          {before['to_process_images']}")
     print(f"To Process videos:          {before.get('to_process_videos', 0)}")
     print(f"Organized images:           {before['organized_images']}")
+    print(f"Original person photos:     {before.get('person_original_images', 0)}")
     print(f"_source_review files:       {cleanup_holding_count():,}")
     if profile.get("available_mb") is not None:
         print(f"Memory mode:                {profile['message']} ({profile['available_mb']} MB), batch {profile['batch_size']}")
@@ -422,16 +582,24 @@ def main() -> int:
             print("Close other apps, then re-run. Override with --ignore-low-memory.")
             return 2
         rid = run_id()
+        before_snapshot = snapshot()
         state = {
             "run_id": rid,
             "started_at": int(time.time()),
-            "before": snapshot(),
+            "before": before_snapshot,
             "steps": {},
             "memory": profile,
+            "source_guard": {
+                "before": original_person_counts(),
+                "started_at": int(time.time()),
+            },
         }
+        ensure_source_guard_baseline(state)
         save_state(state)
     else:
         print(f"Resuming daily run: {state.get('run_id')}")
+        ensure_source_guard_baseline(state)
+        save_state(state)
 
     before = state["before"]
     profile = state.get("memory") or memory_profile()
@@ -440,6 +608,28 @@ def main() -> int:
         print(f"Memory mode: {profile['message']} ({profile['available_mb']} MB available), batch size {batch_size}.")
     else:
         print(f"Memory mode: {profile['message']}, batch size {batch_size}.")
+    guard = state.get("source_guard", {})
+    print(f"Source guard baseline: {guard.get('before_total', original_person_total(guard.get('before', {})))} original photos "
+          f"across {len(guard.get('before', {}))} person folders.")
+    if guard.get("before_csv"):
+        print(f"Source guard before CSV: {guard['before_csv']}")
+
+    ok, _, violations = check_source_guard(state, "start")
+    save_state(state)
+    if not ok:
+        paths = source_guard_paths(str(state["run_id"]))
+        print("ERROR: source guard failed before running steps.")
+        print(f"Violation report: {paths['violations']}")
+        for row in violations[:10]:
+            print(f"  {row['person']}: {row['before']} -> {row['after']} ({row['delta']})")
+        return SOURCE_GUARD_EXIT
+
+    manifest_result = check_source_manifest(state, "start")
+    save_state(state)
+    if not manifest_result.ok:
+        print("ERROR: protected source manifest failed before running steps.")
+        print("Fix or recover the missing originals before cache/smart-album refresh can run.")
+        return SOURCE_GUARD_EXIT
 
     log_path = SUMMARY_DIR / f"daily_run_{state['run_id']}.log"
     summary_path = SUMMARY_DIR / f"daily_run_{state['run_id']}.json"
@@ -490,10 +680,76 @@ def main() -> int:
             print(f"ERROR: step failed: {step['name']} (exit {rc})")
             print(f"Resume with: python face.py daily --resume")
             return rc
+        ok, guarded_after, violations = check_source_guard(state, step["name"])
+        if not ok:
+            state["steps"][step["name"]] = {
+                "status": "failed_source_count_guard",
+                "returncode": SOURCE_GUARD_EXIT,
+                "finished_at": int(time.time()),
+            }
+            save_state(state)
+            after = snapshot()
+            write_summary(summary_path, state, before, after, "failed_source_count_guard")
+            paths = source_guard_paths(str(state["run_id"]))
+            print()
+            print("ERROR: source guard stopped the daily run.")
+            print("One or more person folders now have fewer original images under photos/ than at run start.")
+            print(f"Before count CSV:     {paths['before']}")
+            print(f"After count CSV:      {paths['after']}")
+            print(f"Violation report CSV: {paths['violations']}")
+            for row in violations[:10]:
+                print(f"  {row['person']}: {row['before']} -> {row['after']} ({row['delta']})")
+            if len(violations) > 10:
+                print(f"  ... {len(violations) - 10} more")
+            print(f"Resume after fixing counts with: python face.py daily --resume")
+            return SOURCE_GUARD_EXIT
+        manifest_result = check_source_manifest(state, step["name"])
+        save_state(state)
+        if not manifest_result.ok:
+            state["steps"][step["name"]] = {
+                "status": "failed_source_manifest_guard",
+                "returncode": SOURCE_GUARD_EXIT,
+                "finished_at": int(time.time()),
+            }
+            save_state(state)
+            after = snapshot()
+            write_summary(summary_path, state, before, after, "failed_source_manifest_guard")
+            print()
+            print("ERROR: protected source manifest stopped the daily run.")
+            print("A known original image is missing or changed, so derived cache/index refresh is blocked.")
+            print(f"Missing report CSV: {manifest_result.missing_csv}")
+            print(f"Changed report CSV: {manifest_result.changed_csv}")
+            print(f"Resume after fixing originals with: python face.py daily --resume")
+            return SOURCE_GUARD_EXIT
         state["steps"][step["name"]] = {"status": "completed", "finished_at": int(time.time())}
         save_state(state)
 
     after = snapshot()
+    ok, _, violations = check_source_guard(state, "completed")
+    if not ok:
+        save_state(state)
+        write_summary(summary_path, state, before, after, "failed_source_count_guard")
+        paths = source_guard_paths(str(state["run_id"]))
+        print("ERROR: source guard failed at final validation.")
+        print(f"Violation report CSV: {paths['violations']}")
+        for row in violations[:10]:
+            print(f"  {row['person']}: {row['before']} -> {row['after']} ({row['delta']})")
+        return SOURCE_GUARD_EXIT
+    manifest_result = check_source_manifest(state, "completed_before_promote")
+    save_state(state)
+    if not manifest_result.ok:
+        write_summary(summary_path, state, before, after, "failed_source_manifest_guard")
+        print("ERROR: protected source manifest failed at final validation.")
+        print(f"Missing report CSV: {manifest_result.missing_csv}")
+        print(f"Changed report CSV: {manifest_result.changed_csv}")
+        return SOURCE_GUARD_EXIT
+    manifest_path = source_manifest.promote_current(
+        label=f"daily_run_{state['run_id']}_completed",
+        reason=f"completed daily run {state['run_id']}",
+        people_dir=PEOPLE,
+    )
+    state.setdefault("source_manifest", {})["promoted_manifest_path"] = str(manifest_path)
+    save_state(state)
     write_summary(summary_path, state, before, after, "completed")
     print_summary(before, after, summary_path)
     clear_state()

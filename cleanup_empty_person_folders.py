@@ -15,9 +15,11 @@ import shutil
 import time
 from pathlib import Path
 
+import operation_ledger
+
 DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
 DEFAULT_READY = Path.home() / "Pictures" / "sorted_all_pictures" / "_source_review" / "ready_to_delete"
-SKIP_DIRS = {"all", "_smart_albums"}
+SKIP_DIRS = {"all", "_smart_albums", "_smart_albums_v2", "_duplicates", "_near_visual_review", "review"}
 
 
 def has_real_source_files(person_dir: Path) -> bool:
@@ -73,8 +75,14 @@ def main() -> int:
             print(f"empty: {person_dir}")
             print(f"  ->   {dest}")
         if args.apply:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(person_dir), str(dest))
+            operation_ledger.move_path(
+                person_dir,
+                dest,
+                sorted_root=people_dir.parent,
+                operation="cleanup_empty_person_folders.move_empty_person_folder",
+                reason="move empty person folder to ready_to_delete",
+                hash_file=False,
+            )
             moved += 1
 
     print()

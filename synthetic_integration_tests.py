@@ -28,8 +28,13 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import advanced_duplicate_matching  # noqa: E402
 import build_smart_albums  # noqa: E402
 import cache_tools  # noqa: E402
+import cleanup_empty_person_folders  # noqa: E402
 import daily_runner  # noqa: E402
+import delete_person_folder_duplicates  # noqa: E402
+import operation_ledger  # noqa: E402
 import person_structure  # noqa: E402
+import rename_person_folder_files  # noqa: E402
+import source_manifest  # noqa: E402
 import sort_photos  # noqa: E402
 
 for _name in ("CacheState", "CachedFace", "FaceRecord", "LabelingState", "IdentityDB"):
@@ -123,14 +128,193 @@ def test_daily_order_is_safe(tmp: Path) -> None:
         ("exact-dedupe", "cache-rehydrate"),
         ("advanced-dedupe", "cache-rehydrate"),
         ("cleanup-empty", "cache-rehydrate"),
-        ("cache-rehydrate", "all-views"),
         ("cache-rehydrate", "smart-albums"),
+        ("smart-albums", "integration-audit"),
         ("integration-audit", "status"),
     ]
     for before, after in required:
         assert_true(before in index, f"daily step missing: {before}")
         assert_true(after in index, f"daily step missing: {after}")
         assert_true(index[before] < index[after], f"{before} must run before {after}")
+
+
+def test_daily_commands_are_non_destructive_for_duplicates(tmp: Path) -> None:
+    del tmp
+    for step in daily_runner.step_list(50):
+        cmd = [str(part) for part in step.get("cmd", [])]
+        script = Path(cmd[1]).name if len(cmd) > 1 and cmd[1].endswith(".py") else ""
+        if step["name"] == "process":
+            assert_true("--skip-output-cleanup" in cmd, "daily process must skip sort_photos automatic cleanup")
+        if step["name"] == "smart-albums":
+            assert_true("--max-framing-checks-per-person" in cmd,
+                        "daily smart albums must cap per-person framing checks")
+            assert_true("--max-people-per-run" in cmd,
+                        "daily smart albums must cap changed people per run")
+            assert_true("--no-detect-nudity" in cmd,
+                        "daily smart albums should not run the heavy nudity detector")
+        if script in {"delete_person_folder_duplicates.py", "advanced_duplicate_matching.py"}:
+            assert_true("--apply" not in cmd, f"daily {step['name']} must not apply duplicate moves")
+            assert_true("--quarantine-bad" not in cmd, f"daily {step['name']} must not quarantine in duplicate scan")
+
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT_DIR / "sort_photos.py"), "--help"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    assert_true(proc.returncode == 0, f"sort_photos --help failed: {proc.stdout[-500:]}")
+    assert_true("--skip-output-cleanup" in proc.stdout, "sort_photos does not accept --skip-output-cleanup")
+
+
+def test_sort_post_process_duplicate_steps_are_report_only(tmp: Path) -> None:
+    out = tmp / "sorted"
+    (out / "photos_by_person").mkdir(parents=True)
+    commands: list[list[str]] = []
+    old_run = sort_photos.subprocess.run
+
+    class FakeResult:
+        returncode = 0
+
+    def fake_run(cmd, check=False):  # noqa: ANN001
+        del check
+        commands.append([str(part) for part in cmd])
+        return FakeResult()
+
+    sort_photos.subprocess.run = fake_run
+    try:
+        sort_photos.run_post_process(out)
+    finally:
+        sort_photos.subprocess.run = old_run
+
+    duplicate_commands = [
+        cmd for cmd in commands
+        if len(cmd) > 1 and Path(cmd[1]).name in {
+            "delete_person_folder_duplicates.py",
+            "advanced_duplicate_matching.py",
+        }
+    ]
+    assert_true(len(duplicate_commands) == 2, f"expected 2 duplicate report commands, got {duplicate_commands}")
+    for cmd in duplicate_commands:
+        assert_true("--apply" not in cmd, f"post-process duplicate command must not apply: {cmd}")
+        assert_true("--quarantine-bad" not in cmd, f"post-process duplicate command must not quarantine: {cmd}")
+
+
+def test_generated_person_views_are_excluded_from_scanners(tmp: Path) -> None:
+    people = tmp / "people"
+    person = people / "Person"
+    make_image(person / "photos" / "Person_0001.jpg", (20, 120, 210))
+    for dirname in [
+        "all",
+        "_smart_albums",
+        "_smart_albums_v2",
+        "review",
+        "_duplicates",
+        "_near_visual_review",
+    ]:
+        make_image(person / dirname / "view.jpg", (210, 80, 20))
+
+    sort_seen = list(sort_photos.iter_images(people, excluded_dir_names=set()))
+    dup_seen = delete_person_folder_duplicates.iter_images(person)
+    advanced_seen = advanced_duplicate_matching.iter_images(people)
+    cache_seen = cache_tools.person_folder_images(people)
+    rename_seen = rename_person_folder_files.iter_images(person)
+
+    assert_true(len(sort_seen) == 1, f"sort_photos saw generated views: {sort_seen}")
+    assert_true(len(dup_seen) == 1, f"delete duplicate scan saw generated views: {dup_seen}")
+    assert_true(len(advanced_seen) == 1, f"advanced duplicate scan saw generated views: {advanced_seen}")
+    assert_true(len(cache_seen) == 1, f"cache rehydrate scan saw generated views: {cache_seen}")
+    assert_true(len(rename_seen) == 1, f"rename scanner saw generated views: {rename_seen}")
+    for dirname in ["_smart_albums_v2", "_smart_albums", "all", "_duplicates", "_near_visual_review"]:
+        assert_true(dirname in cleanup_empty_person_folders.SKIP_DIRS,
+                    f"cleanup-empty does not skip generated folder {dirname}")
+
+
+def test_source_manifest_restore_from_ledger(tmp: Path) -> None:
+    sorted_root = tmp / "sorted"
+    people = sorted_root / "photos_by_person"
+    manifest = sorted_root / "_source_review" / "source_manifest" / "last_known_good_originals.json"
+    report_dir = sorted_root / "_source_review" / "source_manifest" / "reports"
+    ready = sorted_root / "_source_review" / "ready_to_delete"
+    original = people / "Person" / "photos" / "Person_0001.jpg"
+    make_image(original, (24, 80, 160))
+
+    source_manifest.promote_current(
+        label="synthetic_restore",
+        reason="synthetic restore baseline",
+        people_dir=people,
+        manifest_path=manifest,
+    )
+    held = ready / "person_folder_duplicates" / "Person" / "photos" / original.name
+    operation_ledger.move_path(
+        original,
+        held,
+        sorted_root=sorted_root,
+        operation="synthetic.move_original",
+        reason="synthetic missing original test",
+        run_id="synthetic_restore",
+    )
+    assert_true(not original.exists(), "synthetic original should be missing before restore")
+
+    ok, report, rows = source_manifest.restore_from_manifest(
+        people_dir=people,
+        manifest_path=manifest,
+        search_roots=[ready],
+        conflict_dir=ready / "source_manifest_recovery_conflicts",
+        report_dir=report_dir,
+        label="synthetic_restore",
+        apply=True,
+        last_failed_run=True,
+    )
+    assert_true(ok, f"restore did not report success: {rows}")
+    assert_true(report.exists(), "restore report was not written")
+    assert_true(original.exists(), "manifest restore did not recreate the protected original")
+    validation = source_manifest.validate_current(
+        label="synthetic_restore_validate",
+        people_dir=people,
+        manifest_path=manifest,
+        report_dir=report_dir,
+    )
+    assert_true(validation.ok, f"manifest is not valid after restore: missing={validation.missing}")
+
+
+def test_source_manifest_restore_dry_run_is_non_destructive(tmp: Path) -> None:
+    sorted_root = tmp / "sorted"
+    people = sorted_root / "photos_by_person"
+    manifest = sorted_root / "_source_review" / "source_manifest" / "last_known_good_originals.json"
+    report_dir = sorted_root / "_source_review" / "source_manifest" / "reports"
+    ready = sorted_root / "_source_review" / "ready_to_delete"
+    original = people / "Person" / "photos" / "Person_0001.jpg"
+    make_image(original, (30, 90, 180))
+    source_manifest.promote_current(
+        label="synthetic_restore_dry_run",
+        reason="synthetic dry-run baseline",
+        people_dir=people,
+        manifest_path=manifest,
+    )
+    held = ready / "person_folder_duplicates" / "Person" / "photos" / original.name
+    operation_ledger.move_path(
+        original,
+        held,
+        sorted_root=sorted_root,
+        operation="synthetic.move_original",
+        reason="synthetic dry-run missing original test",
+        run_id="synthetic_restore_dry_run",
+    )
+
+    ok, _report, rows = source_manifest.restore_from_manifest(
+        people_dir=people,
+        manifest_path=manifest,
+        search_roots=[ready],
+        conflict_dir=ready / "source_manifest_recovery_conflicts",
+        report_dir=report_dir,
+        label="synthetic_restore_dry_run",
+        apply=False,
+    )
+    assert_true(ok, f"dry-run restore should have a valid plan: {rows}")
+    assert_true(not original.exists(), "dry-run restore unexpectedly recreated the original")
+    assert_true(any(row.get("status") == "planned" for row in rows),
+                f"dry-run restore did not produce a planned row: {rows}")
 
 
 def seed_cache(cache_path: Path, people: Path, names: list[str]) -> list[Path]:
@@ -305,6 +489,11 @@ def test_incremental_smart_albums_skip_without_heavy_models(tmp: Path) -> None:
         "album,path\n",
         encoding="utf-8",
     )
+    (person / "_smart_albums_v2" / "_data").mkdir(parents=True, exist_ok=True)
+    (person / "_smart_albums_v2" / "_data" / "image_index.csv").write_text(
+        "path\n",
+        encoding="utf-8",
+    )
     state_path = tmp / "smart_state.json"
     state = {
         "version": 1,
@@ -337,6 +526,11 @@ def test_incremental_smart_albums_skip_without_heavy_models(tmp: Path) -> None:
 TESTS = [
     ("To Process generated-like names are scanned", test_to_process_generated_names_are_visible),
     ("Daily step ordering is safe", test_daily_order_is_safe),
+    ("Daily duplicate commands are report-only", test_daily_commands_are_non_destructive_for_duplicates),
+    ("sort_photos post-process duplicate steps are report-only", test_sort_post_process_duplicate_steps_are_report_only),
+    ("Generated person views are excluded from scanners", test_generated_person_views_are_excluded_from_scanners),
+    ("Source manifest restore uses operation ledger", test_source_manifest_restore_from_ledger),
+    ("Source manifest restore dry-run is non-destructive", test_source_manifest_restore_dry_run_is_non_destructive),
     ("Person rehydrate preserves global cache", test_person_rehydrate_preserves_global_cache),
     ("Cache dry-run is non-destructive", test_full_rehydrate_keeps_cached_candidates),
     ("Changed cache signatures are refreshed", test_cache_signature_mismatch_is_not_preserved),

@@ -34,7 +34,7 @@ VIEW_DIR = "all"
 NUDE_DIR = "nude"
 BEST_DIR = "best"
 QUALITY_DIR = "by_quality"
-SKIP_DIRS = {VIEW_DIR, "_smart_albums", "_duplicates", "_near_visual_review"}
+SKIP_DIRS = {VIEW_DIR, "_smart_albums", "_smart_albums_v2", "_duplicates", "_near_visual_review"}
 NUDE_SOURCE_PARTS: set[tuple[str, ...]] = {
     ("photos", "nude"),
     ("photos_nude",),

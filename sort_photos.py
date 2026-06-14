@@ -57,6 +57,8 @@ from typing import Iterable
 import cv2
 import numpy as np
 
+import operation_ledger
+
 warnings.filterwarnings("ignore", category=FutureWarning, module=r"insightface\..*")
 warnings.filterwarnings("ignore", message=r".*`estimate` is deprecated.*", category=FutureWarning)
 warnings.filterwarnings(
@@ -64,6 +66,16 @@ warnings.filterwarnings(
     message=r"resource_tracker: There appear to be .* leaked semaphore objects.*",
     category=UserWarning,
 )
+
+SUBPROCESS_FORK_RETRIES = 8
+SUBPROCESS_FORK_RETRY_SECONDS = 8
+DETECTION_WORKER_ENV_LIMITS = {
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+}
 
 # ============================================================================
 # CONFIG
@@ -206,6 +218,7 @@ DEFAULT_EXCLUDED_SCAN_DIRS = {
     "Celebrities",
     "_nudity_review",
     "_smart_albums",
+    "_smart_albums_v2",
     "_source_review",
     "duplicate_to_review",
     "Face References",
@@ -221,6 +234,8 @@ ALWAYS_EXCLUDED_SCAN_DIRS = {
     "_duplicates",
     "_near_visual_review",
     "_smart_albums",
+    "_smart_albums_v2",
+    "_blurred",
     "review",
     "videos",
 }
@@ -339,6 +354,16 @@ class IdentityDB:
     source_counts: dict[str, int] = field(default_factory=dict)
 
 
+def install_pickle_class_aliases() -> None:
+    main_mod = sys.modules.get("__main__")
+    if main_mod is None:
+        return
+    for name in ("CachedFace", "CacheState", "LabelingState", "IdentityDB", "FaceRecord"):
+        if hasattr(main_mod, name):
+            continue
+        setattr(main_mod, name, globals()[name])
+
+
 # ============================================================================
 # IO + IMAGE HELPERS
 # ============================================================================
@@ -417,9 +442,15 @@ def move_to_process_videos(input_dir: Path, videos_dir: Path = VIDEOS_DIR) -> in
         except ValueError:
             rel = Path(src.name)
         dest = unique_path(videos_dir / rel)
-        dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.move(str(src), str(dest))
+            operation_ledger.move_path(
+                src,
+                dest,
+                sorted_root=DEFAULT_OUTPUT,
+                operation="sort_photos.move_to_process_videos",
+                reason="move video files out of To Process before image scan",
+                extra={"relative_path": rel.as_posix()},
+            )
             moved += 1
         except Exception as e:  # noqa: BLE001
             log.warning("Could not move video %s to %s: %s", src, dest, e)
@@ -528,6 +559,22 @@ def hamming(a: np.ndarray, b: np.ndarray) -> int:
 
 def hamming_int(a: int, b: int) -> int:
     return int((a ^ b).bit_count())
+
+
+def duplicate_nudity_status_for_path(path: Path) -> str:
+    parts = [p.casefold() for p in path.parts]
+    name = path.name.casefold()
+    for i, part in enumerate(parts):
+        next_part = parts[i + 1] if i + 1 < len(parts) else ""
+        if part in {"photos", "all", "review"} and next_part in {"nude", "nudity_possible"}:
+            return "possible"
+        if part in {"photos_nude", "_possible_nudity", "nudity_possible"}:
+            return "possible"
+        if part in {"_uncertain_nudity", "uncertain_nudity"}:
+            return "uncertain"
+    if "nudity_possible" in name or "_nude" in name or "_nudity_" in name:
+        return "possible"
+    return "safe"
 
 
 def sanitize_name(name: str) -> str:
@@ -702,8 +749,15 @@ def maybe_move_to_nudity_subfolder(path: Path, person_dir: Path) -> tuple[Path, 
     if not subdir:
         return path, None
     dest = unique_dest(person_dir / subdir, path.name)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    path.rename(dest)
+    sorted_root = person_dir.parent.parent if person_dir.parent.name == "photos_by_person" else DEFAULT_OUTPUT
+    operation_ledger.move_path(
+        path,
+        dest,
+        sorted_root=sorted_root,
+        operation="sort_photos.nudity_subfolder",
+        reason="move detected nudity candidate into per-person photos/nude folder",
+        extra={"nudity_subdir": subdir},
+    )
     return dest, subdir
 
 
@@ -727,6 +781,7 @@ def load_cache() -> CacheState:
         return CacheState(config_fingerprint=config_fingerprint())
     try:
         with CACHE_FILE.open("rb") as f:
+            install_pickle_class_aliases()
             data: CacheState = pickle.load(f)
         if data.version != CACHE_VERSION:
             log.warning("Cache version changed. Discarding cache.")
@@ -747,6 +802,7 @@ def load_identity_db() -> IdentityDB | None:
         return None
     try:
         with IDENTITY_DB_FILE.open("rb") as f:
+            install_pickle_class_aliases()
             db: IdentityDB = pickle.load(f)
         if db.version != IDENTITY_DB_VERSION:
             log.warning("Identity DB version changed. Rebuild it.")
@@ -856,7 +912,7 @@ def build_identity_db_from_person_folders(people_dir: Path,
         embs: list[np.ndarray] = []
         images = [
             p for p in iter_images(person_dir, excluded_dir_names=set())
-            if not any(part in {LEGACY_DUPLICATES_DIR, BLURRED_DIR, PERSON_REVIEW_DIR, "all", "_smart_albums"} for part in p.relative_to(person_dir).parts[:-1])
+            if not any(part in {LEGACY_DUPLICATES_DIR, BLURRED_DIR, PERSON_REVIEW_DIR, "all", "_smart_albums", "_smart_albums_v2"} for part in p.relative_to(person_dir).parts[:-1])
         ]
         images = sorted(images, key=lambda p: (len(p.relative_to(person_dir).parts), str(p).lower()))
         if IDENTITY_MAX_IMAGES_PER_PERSON > 0:
@@ -939,6 +995,7 @@ def load_labeling_state() -> LabelingState | None:
         return None
     try:
         with LABEL_STATE_FILE.open("rb") as f:
+            install_pickle_class_aliases()
             state: LabelingState = pickle.load(f)
         if state.version != LABEL_STATE_VERSION:
             return None
@@ -1234,6 +1291,83 @@ def detect_in_batches_subprocess(new_images: list[Path],
 
     try:
         script_path = Path(__file__).resolve()
+        worker_env = os.environ.copy()
+        for key, value in DETECTION_WORKER_ENV_LIMITS.items():
+            worker_env.setdefault(key, value)
+
+        def is_transient_fork_error(exc: OSError) -> bool:
+            return isinstance(exc, BlockingIOError) or getattr(exc, "errno", None) in {11, 35}
+
+        def run_worker_with_retry(cmd: list[str], batch_number: int) -> subprocess.CompletedProcess[str] | None:
+            for attempt in range(1, SUBPROCESS_FORK_RETRIES + 1):
+                try:
+                    return subprocess.run(
+                        cmd,
+                        check=False,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        env=worker_env,
+                    )
+                except KeyboardInterrupt:
+                    raise
+                except OSError as exc:
+                    if not is_transient_fork_error(exc):
+                        raise
+                    if attempt >= SUBPROCESS_FORK_RETRIES:
+                        log.error(
+                            "Could not start worker for batch %d after %d retry attempt(s): %s",
+                            batch_number,
+                            attempt,
+                            exc,
+                        )
+                        return None
+                    wait_seconds = SUBPROCESS_FORK_RETRY_SECONDS * attempt
+                    log.warning(
+                        "macOS temporarily refused to start worker for batch %d (%s). "
+                        "Retrying in %d second(s), attempt %d/%d.",
+                        batch_number,
+                        exc,
+                        wait_seconds,
+                        attempt + 1,
+                        SUBPROCESS_FORK_RETRIES,
+                    )
+                    time.sleep(wait_seconds)
+                    gc.collect()
+
+        def popen_worker_with_retry(cmd: list[str], batch_number: int) -> subprocess.Popen | None:
+            for attempt in range(1, SUBPROCESS_FORK_RETRIES + 1):
+                try:
+                    return subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.STDOUT,
+                        env=worker_env,
+                    )
+                except OSError as exc:
+                    if not is_transient_fork_error(exc):
+                        raise
+                    if attempt >= SUBPROCESS_FORK_RETRIES:
+                        log.error(
+                            "Could not start worker for batch %d after %d retry attempt(s): %s",
+                            batch_number,
+                            attempt,
+                            exc,
+                        )
+                        return None
+                    wait_seconds = SUBPROCESS_FORK_RETRY_SECONDS * attempt
+                    log.warning(
+                        "macOS temporarily refused to start worker for batch %d (%s). "
+                        "Retrying in %d second(s), attempt %d/%d.",
+                        batch_number,
+                        exc,
+                        wait_seconds,
+                        attempt + 1,
+                        SUBPROCESS_FORK_RETRIES,
+                    )
+                    time.sleep(wait_seconds)
+                    gc.collect()
+
         jobs: list[tuple[int, int, int, Path, Path, list[Path]]] = []
         for batch_idx in range(n_batches):
             start = batch_idx * batch_size
@@ -1258,15 +1392,12 @@ def detect_in_batches_subprocess(new_images: list[Path],
                        "--detect-batch", str(job_path)]
 
                 try:
-                    proc = subprocess.run(
-                        cmd,
-                        check=False,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                    )
+                    proc = run_worker_with_retry(cmd, batch_idx + 1)
                 except KeyboardInterrupt:
                     log.warning("Interrupted. Cache up to last completed batch is saved.")
+                    return all_new_records
+
+                if proc is None:
                     return all_new_records
 
                 if proc.returncode != 0:
@@ -1318,11 +1449,12 @@ def detect_in_batches_subprocess(new_images: list[Path],
                                  batch_idx + 1, n_batches, start + 1, end)
                         cmd = [sys.executable, str(script_path),
                                "--detect-batch", str(job_path)]
-                        active[subprocess.Popen(
-                            cmd,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.STDOUT,
-                        )] = job_info
+                        proc = popen_worker_with_retry(cmd, batch_idx + 1)
+                        if proc is None:
+                            for active_proc in active:
+                                active_proc.terminate()
+                            return all_new_records
+                        active[proc] = job_info
 
                     time.sleep(0.5)
                     for proc, job_info in list(active.items()):
@@ -2176,9 +2308,15 @@ def archive_organized_sources(sources: set[Path],
         except ValueError:
             rel = Path(resolved.name)
         dest = unique_path(archive_root / rel)
-        dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.move(str(resolved), str(dest))
+            operation_ledger.move_path(
+                resolved,
+                dest,
+                sorted_root=output_dir,
+                operation="sort_photos.archive_organized_sources",
+                reason="archive organized source image to ready_to_delete",
+                extra={"relative_path": rel.as_posix()},
+            )
             moved += 1
         except Exception as e:  # noqa: BLE001
             log.warning("Could not archive source %s: %s", resolved, e)
@@ -2209,9 +2347,15 @@ def archive_scanned_sources(sources: Iterable[Path],
         except ValueError:
             rel = Path(resolved.name)
         dest = unique_path(archive_root / rel)
-        dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.move(str(resolved), str(dest))
+            operation_ledger.move_path(
+                resolved,
+                dest,
+                sorted_root=output_dir,
+                operation="sort_photos.archive_scanned_sources",
+                reason="archive scanned inbox source image to ready_to_delete",
+                extra={"relative_path": rel.as_posix()},
+            )
             moved += 1
         except Exception as e:  # noqa: BLE001
             log.warning("Could not archive scanned source %s: %s", resolved, e)
@@ -2242,9 +2386,15 @@ def archive_intake_duplicates(sources: Iterable[Path],
         except ValueError:
             rel = Path(resolved.name)
         dest = unique_path(archive_root / rel)
-        dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.move(str(resolved), str(dest))
+            operation_ledger.move_path(
+                resolved,
+                dest,
+                sorted_root=output_dir,
+                operation="sort_photos.archive_intake_duplicates",
+                reason="archive duplicate inbox source image to ready_to_delete",
+                extra={"relative_path": rel.as_posix()},
+            )
             moved += 1
         except Exception as e:  # noqa: BLE001
             log.warning("Could not archive intake duplicate %s: %s", resolved, e)
@@ -2283,9 +2433,18 @@ def archive_intake_near_visual_review(matches: Iterable[tuple[Path, Path]],
             continue
         person_dir = people_dir / matched_rel.parts[0]
         dest = unique_path(person_dir / INTAKE_NEAR_VISUAL_REVIEW_DIR_NAME / resolved.name)
-        dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.move(str(resolved), str(dest))
+            operation_ledger.move_path(
+                resolved,
+                dest,
+                sorted_root=output_dir,
+                operation="sort_photos.archive_intake_near_visual_review",
+                reason="move near-visual intake candidate into matched person review folder",
+                extra={
+                    "matched_existing": str(matched_existing),
+                    "matched_relative_to_people": matched_rel.as_posix(),
+                },
+            )
             moved += 1
         except Exception as e:  # noqa: BLE001
             log.warning("Could not archive near-visual intake candidate %s: %s",
@@ -2392,17 +2551,14 @@ def filter_existing_person_duplicates(images: list[Path],
     fp_cache = load_fingerprint_cache()
     entries = fp_cache.setdefault("entries", {})
     stats: Counter = Counter()
-    exact: dict[str, Path] = {}
-    pixels: dict[str, Path] = {}
-    phashes: list[tuple[int, float, Path]] = []
+    exact: dict[tuple[str, str], Path] = {}
     for i, path in enumerate(person_images, start=1):
         fp = image_duplicate_fingerprint(path, entries, stats)
         if fp is None:
             continue
-        file_hash, pixel_hash, phash, ratio = fp
-        exact.setdefault(file_hash, path)
-        pixels.setdefault(pixel_hash, path)
-        phashes.append((phash, ratio, path))
+        file_hash, _pixel_hash, _phash, _ratio = fp
+        nudity_status = duplicate_nudity_status_for_path(path)
+        exact.setdefault((nudity_status, file_hash), path)
         if i % 1000 == 0:
             log.info("Intake duplicate check: indexed %d/%d existing image(s).",
                      i, len(person_images))
@@ -2419,27 +2575,14 @@ def filter_existing_person_duplicates(images: list[Path],
             counts["errors"] += 1
             kept.append(path)
             continue
-        file_hash, pixel_hash, phash, ratio = fp
+        file_hash, _pixel_hash, _phash, _ratio = fp
+        nudity_status = duplicate_nudity_status_for_path(path)
         duplicate_kind: str | None = None
-        duplicate_match: Path | None = None
-        if file_hash in exact:
+        if (nudity_status, file_hash) in exact:
             duplicate_kind = "exact_file"
-        elif pixel_hash in pixels:
-            duplicate_kind = "same_pixels"
-        else:
-            for existing_phash, existing_ratio, existing_path in phashes:
-                if abs(ratio - existing_ratio) > 0.08:
-                    continue
-                if hamming_int(phash, existing_phash) <= INTAKE_DUP_PHASH_THRESHOLD:
-                    duplicate_kind = "near_visual"
-                    duplicate_match = existing_path
-                    break
 
         if duplicate_kind is None:
             kept.append(path)
-        elif duplicate_kind == "near_visual" and duplicate_match is not None:
-            near_visual_review.append((path, duplicate_match))
-            counts[duplicate_kind] += 1
         else:
             safe_duplicates.append(path)
             counts[duplicate_kind] += 1
@@ -2641,21 +2784,25 @@ def write_manifest(records: list[FaceRecord],
     log.info("Manifest: %s", csv_path)
 
 
-def run_post_process(output_dir: Path) -> None:
-    if not POST_PROCESS_OUTPUT:
-        return
+def post_process_steps(output_dir: Path) -> list[list[str]]:
     script_dir = Path(__file__).resolve().parent
-    steps = [
+    return [
         [sys.executable, str(script_dir / "delete_person_folder_duplicates.py"),
-         "--sorted-root", str(output_dir), "--apply", "--quiet"],
+         "--sorted-root", str(output_dir), "--quiet"],
         [sys.executable, str(script_dir / "optimize_sorted_output.py"),
          str(output_dir / "photos_by_person"), "--apply", "--quiet"],
         [sys.executable, str(script_dir / "rename_person_folder_files.py"),
          str(output_dir / "photos_by_person"), "--apply", "--quiet"],
         [sys.executable, str(script_dir / "advanced_duplicate_matching.py"),
-         str(output_dir / "photos_by_person"), "--apply", "--quarantine-bad", "--quiet"],
+         str(output_dir / "photos_by_person"), "--quiet"],
     ]
-    log.info("Running automatic output cleanup.")
+
+
+def run_post_process(output_dir: Path) -> None:
+    if not POST_PROCESS_OUTPUT:
+        return
+    steps = post_process_steps(output_dir)
+    log.info("Running automatic output cleanup. Duplicate cleanup is report-only; originals are not moved automatically.")
     for cmd in steps:
         script_name = Path(cmd[1]).name
         if not Path(cmd[1]).exists():
@@ -2955,6 +3102,8 @@ def main() -> int:
                         help="Max images per person used when rebuilding the identity DB.")
     parser.add_argument("--no-post-process", action="store_true",
                         help="Skip automatic output cleanup after finishing.")
+    parser.add_argument("--skip-output-cleanup", action="store_true",
+                        help="Alias for --no-post-process; used by the guarded daily pipeline.")
     parser.add_argument("--copy-output", action="store_true",
                         help="Copy sorted images instead of hardlinking when possible.")
     parser.add_argument("--archive-organized-sources", action="store_true",
@@ -3004,7 +3153,7 @@ def main() -> int:
         AUTO_PERSON_MATCH_ENABLED = False
     AUTO_PERSON_MATCH_DIST = float(args.person_match_dist)
     IDENTITY_MAX_IMAGES_PER_PERSON = max(0, int(args.identity_max_images))
-    if args.no_post_process:
+    if args.no_post_process or args.skip_output_cleanup:
         POST_PROCESS_OUTPUT = False
     if args.copy_output:
         USE_HARDLINKS = False

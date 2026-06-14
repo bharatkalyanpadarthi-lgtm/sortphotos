@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sort_photos  # noqa: E402
+import source_manifest  # noqa: E402
 
 for _name in ("CacheState", "CachedFace", "FaceRecord", "LabelingState", "IdentityDB"):
     if hasattr(sort_photos, _name):
@@ -40,6 +41,7 @@ EXCLUDED_DIRS = {
     "_duplicates",
     "_near_visual_review",
     "_smart_albums",
+    "_smart_albums_v2",
     "review",
 }
 
@@ -134,6 +136,18 @@ def face_cache_summary() -> dict[str, int]:
         "files": len(getattr(cache, "file_signatures", {})),
         "faces": len(getattr(cache, "faces", [])),
         "labeled": sum(1 for face in getattr(cache, "faces", []) if getattr(face, "label", None)),
+    }
+
+
+def source_manifest_summary() -> dict[str, int | str]:
+    manifest = source_manifest.load_manifest()
+    if manifest is None:
+        return {"exists": 0, "total": 0, "person_count": 0, "updated_at": ""}
+    return {
+        "exists": 1,
+        "total": int(manifest.get("total", 0) or 0),
+        "person_count": int(manifest.get("person_count", 0) or 0),
+        "updated_at": str(manifest.get("updated_at", "") or ""),
     }
 
 
@@ -237,6 +251,7 @@ def main() -> int:
     adv = advanced_report_summary()
     align = identity_alignment()
     face_cache = face_cache_summary()
+    manifest = source_manifest_summary()
 
     print("Photo Pipeline Status")
     print("=" * 60)
@@ -247,6 +262,14 @@ def main() -> int:
     print(f"Known identities DB:    {identity_count()} people")
     print(f"Identity drift:         {align['stale']} stale / {align['missing']} missing")
     print(f"Reference identities:   {reference_count()} people")
+    if manifest["exists"]:
+        print(
+            "Source manifest:        "
+            f"{manifest['total']} protected / {manifest['person_count']} people "
+            f"(updated {manifest['updated_at']})"
+        )
+    else:
+        print("Source manifest:        missing")
     print(
         "Face cache:             "
         f"{face_cache['files']} files / {face_cache['faces']} faces / "

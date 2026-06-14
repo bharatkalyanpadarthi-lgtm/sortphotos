@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sort_photos  # noqa: E402
+import source_manifest  # noqa: E402
 
 for _name in ("CacheState", "CachedFace", "FaceRecord", "LabelingState", "IdentityDB"):
     if hasattr(sort_photos, _name):
@@ -33,6 +34,18 @@ for _name in ("CacheState", "CachedFace", "FaceRecord", "LabelingState", "Identi
 
 DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
 IMAGE_EXTS = sort_photos.IMAGE_EXTS
+CACHE_SCAN_EXCLUDED_DIRS = {
+    "_smart_albums",
+    "_smart_albums_v2",
+    "_duplicates",
+    "_near_visual_review",
+    "_blurred",
+    "all",
+    "review",
+    "best",
+    "quality",
+    "duplicates",
+}
 
 
 def human_size(n: int) -> str:
@@ -63,9 +76,8 @@ def person_folder_images(people_dir: Path, person: str | None = None) -> list[tu
     for person_dir in person_dirs(people_dir, person):
         photos_dir = person_dir / "photos"
         roots = [photos_dir] if photos_dir.exists() else [person_dir]
-        excluded = {"_smart_albums", "all", "review", "best", "quality", "duplicates"}
         for root in roots:
-            for image in sort_photos.iter_images(root, excluded_dir_names=excluded):
+            for image in sort_photos.iter_images(root, excluded_dir_names=CACHE_SCAN_EXCLUDED_DIRS):
                 out.append((image, person_dir.name))
     return sorted(out, key=lambda item: (item[1].casefold(), str(item[0]).casefold()))
 
@@ -396,6 +408,15 @@ def main() -> int:
     if args.command == "status":
         return print_status(people_dir, args.person)
     if args.command == "rehydrate":
+        if args.apply:
+            manifest_check = source_manifest.validate_current(
+                label="cache_rehydrate_before",
+                people_dir=people_dir,
+            )
+            source_manifest.print_validation(manifest_check)
+            if not manifest_check.ok:
+                print("ERROR: cache rehydrate blocked because protected originals are missing or changed.")
+                return source_manifest.SOURCE_GUARD_EXIT
         return rehydrate(
             people_dir, args.person, args.apply, args.replace,
             args.max_images, args.batch_size,

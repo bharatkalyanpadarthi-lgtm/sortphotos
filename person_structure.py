@@ -29,6 +29,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+import operation_ledger
+
 IMAGE_EXTS = {
     ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif",
 }
@@ -38,7 +40,7 @@ DEFAULT_REVIEW = Path.home() / "Pictures" / "sorted_all_pictures" / "_source_rev
 PHOTOS_DIR = "photos"
 NUDE_DIR = "nude"
 REVIEW_DIR = "review"
-GENERATED_DIRS = {"all", "_smart_albums"}
+GENERATED_DIRS = {"all", "_smart_albums", "_smart_albums_v2"}
 CANONICAL_TOPS = {PHOTOS_DIR, REVIEW_DIR}
 LEGACY_TOPS = {"_possible_nudity", "_uncertain_nudity", "_duplicates", "_near_visual_review"}
 
@@ -133,6 +135,13 @@ def unique_dest(dest: Path) -> Path:
         i += 1
 
 
+def sorted_root_for_path(path: Path) -> Path:
+    for parent in path.parents:
+        if parent.name == "photos_by_person":
+            return parent.parent
+    return DEFAULT_PEOPLE.parent
+
+
 def person_dirs(people_dir: Path) -> list[Path]:
     if not people_dir.exists():
         return []
@@ -197,8 +206,13 @@ def move_file(src: Path, dest: Path, apply: bool) -> bool:
     dest = unique_dest(dest)
     if not apply:
         return True
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(src), str(dest))
+    operation_ledger.move_path(
+        src,
+        dest,
+        sorted_root=sorted_root_for_path(src),
+        operation="person_structure.move_file",
+        reason="normalize person folder structure",
+    )
     return True
 
 
@@ -252,8 +266,14 @@ def move_suspicious_person(person_dir: Path, review_root: Path, apply: bool) -> 
     stamp = time.strftime("%Y%m%d_%H%M%S")
     dest = unique_dest(review_root / "unknown_person" / f"{person_dir.name}_{stamp}")
     if apply:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(person_dir), str(dest))
+        operation_ledger.move_path(
+            person_dir,
+            dest,
+            sorted_root=person_dir.parent.parent,
+            operation="person_structure.move_suspicious_person",
+            reason="move suspicious person folder to structure review",
+            hash_file=False,
+        )
     return True
 
 
