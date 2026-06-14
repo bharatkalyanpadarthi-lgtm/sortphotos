@@ -11,8 +11,8 @@ If a step fails or the run is interrupted, resume with:
 Preview without moving files:
   python face.py daily --dry-run
 
-Smart albums are intentionally not part of the daily ingest. Run
-`python face.py smart-albums` when you want to refresh generated views.
+Smart albums are intentionally not part of the daily ingest and are disabled
+from the launcher for now.
 """
 
 from __future__ import annotations

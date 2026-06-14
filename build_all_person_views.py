@@ -213,7 +213,6 @@ def write_person_dashboard(person_dir: Path, apply: bool) -> None:
       <a href="best/">Best ({len(best_files)})</a>
       <a href="nude/">Nude ({len(nude_files)})</a>
       <a href="by_quality/high/">High quality</a>
-      <a href="../_smart_albums/">Smart albums</a>
     </nav>
   </header>
   <section><h2>Best</h2>{figures(best_files, 50)}</section>

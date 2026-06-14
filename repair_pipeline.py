@@ -3,8 +3,8 @@
 Run a read-only repair/audit pass for the photo sorting pipeline.
 
 Default mode does not move or delete files. With --apply, it performs only
-safe rebuild actions: rebuild identity DB, refresh smart albums, normalize
-names, and refresh review reports. Destructive cleanup still stays in dry-run.
+safe rebuild actions: rebuild identity DB, normalize names, and refresh review
+reports. Destructive cleanup still stays in dry-run.
 """
 
 from __future__ import annotations
@@ -59,7 +59,6 @@ def main() -> int:
             ("Normalize person filenames", [py, str(SCRIPT_DIR / "rename_person_folder_files.py"), "--apply", "--quiet"]),
             ("Exact duplicate dry-run", [py, str(SCRIPT_DIR / "delete_person_folder_duplicates.py"), "--quiet"]),
             ("Advanced duplicate report", [py, str(SCRIPT_DIR / "advanced_duplicate_matching.py"), "--quiet"]),
-            ("Refresh smart albums", [py, str(SCRIPT_DIR / "build_smart_albums.py"), "--apply", "--incremental"]),
             ("Unknown triage", [py, str(SCRIPT_DIR / "unknown_triage.py"), "--quiet"]),
             ("Review dashboard", [py, str(SCRIPT_DIR / "review_dashboard.py"), "--no-refresh"]),
             ("Final status", [py, str(SCRIPT_DIR / "status_report.py")]),
@@ -74,7 +73,6 @@ def main() -> int:
             ("Identity audit", [py, str(SCRIPT_DIR / "identity_audit.py")]),
             ("Exact duplicate dry-run", [py, str(SCRIPT_DIR / "delete_person_folder_duplicates.py"), "--quiet"]),
             ("Advanced duplicate report dry-run", [py, str(SCRIPT_DIR / "advanced_duplicate_matching.py"), "--quiet"]),
-            ("Smart albums dry-run", [py, str(SCRIPT_DIR / "build_smart_albums.py"), "--incremental", "--quiet"]),
             ("Unknown triage", [py, str(SCRIPT_DIR / "unknown_triage.py"), "--quiet"]),
             ("Review dashboard", [py, str(SCRIPT_DIR / "review_dashboard.py"), "--no-refresh"]),
             ("Final status", [py, str(SCRIPT_DIR / "status_report.py")]),

@@ -9,7 +9,7 @@ Daily:
     python face.py dry-run     # preview the daily workflow
     python face.py status      # quick dashboard
     python face.py health      # read-only safety checks
-    python face.py smart       # refresh generated smart album views manually
+    python face.py scrap-smart # remove generated smart album views safely
 
 Useful manual tools:
     python face.py review-dashboard
@@ -60,7 +60,7 @@ MENU_GROUPS = [
         "Maintenance",
         [
             "nudity",
-            "smart-albums",
+            "scrap-smart-albums",
             "repair",
             "integration-audit",
         ],
@@ -179,17 +179,6 @@ ACTIONS = [
                 "script": "rename_person_folder_files.py",
                 "args": ["--apply", "--quiet"],
             },
-            {
-                "script": "build_smart_albums.py",
-                "args": [
-                    "--apply",
-                    "--incremental",
-                    "--no-detect-nudity",
-                    "--framing-det-size", "640",
-                    "--max-framing-checks-per-person", "300",
-                    "--max-people-per-run", "25",
-                ],
-            },
         ],
     },
     {
@@ -250,18 +239,11 @@ ACTIONS = [
         "script": "cleanup_empty_person_folders.py",
     },
     {
-        "key": "smart-albums",
-        "aliases": ["albums", "smart", "organize-smart"],
-        "label": "Build Smart Albums",
-        "desc": "Manual/generated views only: refresh smart folders after daily ingest when you want them",
-        "script": "build_smart_albums.py",
-        "args": [
-            "--apply",
-            "--incremental",
-            "--framing-det-size", "640",
-            "--max-framing-checks-per-person", "300",
-            "--max-people-per-run", "25",
-        ],
+        "key": "scrap-smart-albums",
+        "aliases": ["scrap-smart", "remove-smart", "delete-smart", "smart"],
+        "label": "Remove Smart Albums",
+        "desc": "Verify smart-folder images are in photos/photos/nude, recover unique files, then remove generated smart folders",
+        "script": "scrap_smart_albums.py",
     },
     {
         "key": "people-cleanup",

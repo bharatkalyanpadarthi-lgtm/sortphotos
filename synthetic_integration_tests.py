@@ -145,7 +145,7 @@ def test_daily_commands_are_non_destructive_for_duplicates(tmp: Path) -> None:
         if step["name"] == "process":
             assert_true("--skip-output-cleanup" in cmd, "daily process must skip sort_photos automatic cleanup")
         assert_true(step["name"] != "smart-albums",
-                    "daily must not rebuild smart albums; run face.py smart-albums manually")
+                    "daily must not rebuild smart albums; smart folders are disabled for now")
         if script in {"delete_person_folder_duplicates.py", "advanced_duplicate_matching.py"}:
             assert_true("--apply" not in cmd, f"daily {step['name']} must not apply duplicate moves")
             assert_true("--quarantine-bad" not in cmd, f"daily {step['name']} must not quarantine in duplicate scan")
