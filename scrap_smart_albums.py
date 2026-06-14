@@ -64,7 +64,7 @@ def person_dirs(people_dir: Path) -> list[Path]:
     if not people_dir.exists():
         return []
     return sorted(
-        [p for p in people_dir.iterdir() if p.is_dir() and not p.name.startswith("_")],
+        [p for p in people_dir.iterdir() if p.is_dir() and not p.name.startswith("_") and not p.name.startswith(".")],
         key=lambda p: p.name.lower(),
     )
 

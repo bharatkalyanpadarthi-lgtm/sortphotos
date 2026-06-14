@@ -212,7 +212,7 @@ def current_people(people_root: Path) -> dict[str, str]:
     return {
         p.name.casefold(): p.name
         for p in people_root.iterdir()
-        if p.is_dir() and not p.name.startswith("_")
+        if p.is_dir() and not p.name.startswith("_") and not p.name.startswith(".")
     }
 
 

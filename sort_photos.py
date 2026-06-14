@@ -891,7 +891,7 @@ def build_identity_db_from_person_folders(people_dir: Path,
                          key=lambda p: p.name.lower())
     current_names = {
         p.name for p in person_dirs
-        if not p.name.startswith("_") and is_real_person_label(p.name)
+        if not p.name.startswith("_") and not p.name.startswith(".") and is_real_person_label(p.name)
     }
     existing = None if force_rebuild else load_identity_db()
     db = IdentityDB(config_fingerprint=config_fingerprint())
@@ -907,7 +907,7 @@ def build_identity_db_from_person_folders(people_dir: Path,
 
     app = _build_app()
     for person_dir in tqdm(person_dirs, desc="Building identity DB", unit="person"):
-        if person_dir.name.startswith("_") or not is_real_person_label(person_dir.name):
+        if person_dir.name.startswith("_") or person_dir.name.startswith(".") or not is_real_person_label(person_dir.name):
             continue
         if person_dir.name in db.identities:
             continue
@@ -1024,6 +1024,33 @@ def clear_labeling_state() -> None:
             LABEL_STATE_FILE.unlink()
         except OSError:
             pass
+
+
+def save_remaining_labeling_state(records: list[FaceRecord],
+                                  name_map: dict[int, str],
+                                  output_dir: Path,
+                                  input_dir: Path) -> int:
+    """Preserve only still-unlabeled clusters after a partial finalize.
+
+    Already-entered labels have been written to person folders by this point.
+    Keeping them in the saved session makes repeated Finish/Review actions copy
+    the same sources again.
+    """
+    remaining_cids = {
+        cid for cid, name in name_map.items()
+        if cid != -1 and name.startswith("person_")
+    }
+    if not remaining_cids:
+        clear_labeling_state()
+        return 0
+
+    remaining_records = [r for r in records if r.cluster_id in remaining_cids]
+    remaining_name_map = {
+        cid: name for cid, name in name_map.items()
+        if cid in remaining_cids
+    }
+    save_labeling_state(remaining_records, remaining_name_map, output_dir, input_dir)
+    return len(remaining_name_map)
 
 
 def backup_labeling_state(reason: str) -> Path | None:
@@ -2667,6 +2694,28 @@ def organize_originals(records: list[FaceRecord],
     pending_writes = 0
     next_indexes: dict[Path, int] = {}
     organized_sources: set[Path] = set()
+    existing_hashes_by_person: dict[str, set[str]] = {}
+
+    def existing_original_hashes(person: str, person_dir: Path) -> set[str]:
+        if person in existing_hashes_by_person:
+            return existing_hashes_by_person[person]
+        hashes: set[str] = set()
+        roots = [
+            person_dir / PERSON_PHOTOS_DIR,
+            person_dir / PERSON_PHOTOS_DIR / NUDITY_POSSIBLE_DIR,
+        ]
+        for root in roots:
+            if not root.exists():
+                continue
+            for existing in root.rglob("*"):
+                if not existing.is_file() or existing.suffix.lower() not in IMAGE_EXTS:
+                    continue
+                try:
+                    hashes.add(sha256_file(existing))
+                except OSError:
+                    continue
+        existing_hashes_by_person[person] = hashes
+        return hashes
 
     try:
         for (person, kind), items in tqdm(sorted(buckets.items()),
@@ -2692,6 +2741,14 @@ def organize_originals(records: list[FaceRecord],
                     counts["missing"] += 1
                     completed.add(key)
                     continue
+                try:
+                    src_hash = sha256_file(src)
+                except OSError:
+                    src_hash = ""
+                if src_hash and src_hash in existing_original_hashes(person, person_dir):
+                    completed.add(key)
+                    counts["skipped_existing"] += 1
+                    continue
                 dest = next_numbered_dest(base_dir, person, src, next_indexes)
                 try:
                     _atomic_copy(src, dest)
@@ -2703,6 +2760,8 @@ def organize_originals(records: list[FaceRecord],
                     counts["nudity_possible"] += 1
                 elif nudity_status == "error":
                     counts["nudity_errors"] += 1
+                if src_hash:
+                    existing_original_hashes(person, person_dir).add(src_hash)
                 organized_sources.add(src)
                 completed.add(key)
                 counts[f"{kind}_keep"] += 1
@@ -2724,6 +2783,14 @@ def organize_originals(records: list[FaceRecord],
                         counts["missing"] += 1
                         completed.add(key)
                         continue
+                    try:
+                        src_hash = sha256_file(src)
+                    except OSError:
+                        src_hash = ""
+                    if src_hash and src_hash in existing_original_hashes(person, person_dir):
+                        completed.add(key)
+                        counts["skipped_existing"] += 1
+                        continue
                     dest = next_numbered_dest(dup_dir, person, src, next_indexes)
                     try:
                         _atomic_copy(src, dest)
@@ -2735,6 +2802,8 @@ def organize_originals(records: list[FaceRecord],
                         counts["nudity_possible"] += 1
                     elif nudity_status == "error":
                         counts["nudity_errors"] += 1
+                    if src_hash:
+                        existing_original_hashes(person, person_dir).add(src_hash)
                     organized_sources.add(src)
                     completed.add(key)
                     counts[f"{kind}_dup"] += 1
@@ -2797,6 +2866,21 @@ def write_manifest(records: list[FaceRecord],
     log.info("Manifest: %s", csv_path)
 
 
+def records_are_from_library(records: list[FaceRecord], originals_dir: Path) -> bool:
+    if not records:
+        return False
+    try:
+        root = originals_dir.resolve()
+    except OSError:
+        return False
+    for rec in records:
+        try:
+            rec.src.resolve().relative_to(root)
+        except (OSError, ValueError):
+            return False
+    return True
+
+
 def post_process_steps(output_dir: Path) -> list[list[str]]:
     script_dir = Path(__file__).resolve().parent
     return [
@@ -2805,7 +2889,7 @@ def post_process_steps(output_dir: Path) -> list[list[str]]:
         [sys.executable, str(script_dir / "optimize_sorted_output.py"),
          str(output_dir / "photos_by_person"), "--apply", "--quiet"],
         [sys.executable, str(script_dir / "rename_person_folder_files.py"),
-         str(output_dir / "photos_by_person"), "--apply", "--quiet"],
+         str(output_dir / "photos_by_person"), "--simple", "--apply", "--quiet"],
         [sys.executable, str(script_dir / "advanced_duplicate_matching.py"),
          str(output_dir / "photos_by_person"), "--quiet"],
     ]
@@ -2888,6 +2972,14 @@ def finish_pipeline(all_records: list[FaceRecord],
                  "person-folder originals.",
                  len(live_cache.file_signatures), len(live_cache.faces),
                  sum(1 for c in live_cache.faces if c.label))
+    elif not records_are_from_library(all_records, originals_dir):
+        live_cache = load_cache()
+        log.info("Preserved existing library face cache: %d files, %d faces "
+                 "(%d labeled). Finish/resume records came from temporary "
+                 "source paths; cache_tools rehydrate/relink owns the "
+                 "photos_by_person cache.",
+                 len(live_cache.file_signatures), len(live_cache.faces),
+                 sum(1 for c in live_cache.faces if c.label))
     else:
         new_cache = CacheState(version=CACHE_VERSION,
                                config_fingerprint=config_fingerprint())
@@ -2914,10 +3006,13 @@ def finish_pipeline(all_records: list[FaceRecord],
                  moved, output_dir / "_source_review" / SCANNED_SOURCE_ARCHIVE_DIR_NAME)
 
     if preserve_labeling_state:
-        save_labeling_state(all_records, name_map, output_dir, input_dir)
+        remaining = save_remaining_labeling_state(
+            all_records, name_map, output_dir, input_dir
+        )
         log.info("Partial finalize complete. Labeled folders were written; "
-                 "labeling state preserved for the remaining clusters.")
-        log.info("Resume remaining labels with: python sort_photos.py --resume-label")
+                 "%d remaining unlabeled cluster(s) preserved.", remaining)
+        if remaining:
+            log.info("Resume remaining labels with: python sort_photos.py --resume-label")
     else:
         # Pipeline fully completed — clear the labeling state
         clear_labeling_state()
@@ -3017,6 +3112,31 @@ def do_resume(state: LabelingState, do_review: bool, use_ai: bool,
         rec.cluster_id = cid
         all_records.append(rec)
     name_map = dict(state.name_map)
+
+    if not finish_labeled and min_cluster_size > 1:
+        by_id: dict[int, list[FaceRecord]] = defaultdict(list)
+        for rec in all_records:
+            by_id[rec.cluster_id].append(rec)
+        needs_label_all = [
+            cid for cid, name in name_map.items()
+            if cid != -1 and name.startswith("person_")
+        ]
+        needs_label = [
+            cid for cid in needs_label_all
+            if len(by_id[cid]) >= min_cluster_size
+        ]
+        if needs_label_all and not needs_label:
+            skipped_small = len(needs_label_all)
+            log.info("Skipping %d small unlabeled cluster(s) below "
+                     "--min-label-cluster-size=%d.",
+                     skipped_small, min_cluster_size)
+            log.info("No unlabeled clusters meet the minimum size.")
+            log.info("Nothing to review in this run; not finalizing already-entered "
+                     "labels again.")
+            log.info("To label every remaining small cluster, run: "
+                     "python sort_photos.py --resume-label --min-label-cluster-size 1")
+            log.info("To write already-entered labels once, use Finish Entered Labels.")
+            return 0
 
     if finish_labeled:
         log.info("Finishing already-labeled clusters only; remaining labels preserved.")

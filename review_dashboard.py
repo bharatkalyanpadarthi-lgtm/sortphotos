@@ -113,7 +113,7 @@ def write_dashboard(path: Path) -> None:
                 + count_images(p / "photos_nude")
                 + count_images(p / "_possible_nudity")
                 for p in PEOPLE.iterdir()
-                if p.is_dir() and not p.name.startswith("_")
+                if p.is_dir() and not p.name.startswith("_") and not p.name.startswith(".")
             ) if PEOPLE.exists() else 0,
             "detail": "Images currently inside person photos/nude folders.",
             "link": file_link(PEOPLE, "Open photos_by_person"),

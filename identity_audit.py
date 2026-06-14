@@ -33,7 +33,7 @@ def norm(name: str) -> str:
 def person_dirs(root: Path) -> list[Path]:
     if not root.exists():
         return []
-    return sorted([p for p in root.iterdir() if p.is_dir() and not p.name.startswith("_")],
+    return sorted([p for p in root.iterdir() if p.is_dir() and not p.name.startswith("_") and not p.name.startswith(".")],
                   key=lambda p: p.name.lower())
 
 

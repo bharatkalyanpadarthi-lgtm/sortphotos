@@ -10,6 +10,7 @@ This avoids slow re-detection after a restore/rename. It only uses exact
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import pickle
 import shutil
@@ -21,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
+import operation_ledger
 import sort_photos
 
 for _name in ("CacheState", "CachedFace", "FaceRecord", "LabelingState", "IdentityDB"):
@@ -63,8 +65,16 @@ def canonical_label(label: str | None, aliases: dict[str, str], removed: set[str
 
 
 def person_photo_files(people_root: Path):
-    for person_dir in sorted([p for p in people_root.iterdir() if p.is_dir()], key=lambda p: p.name.casefold()):
-        for subdir_name in ("photos", "photos/nude", "photos_nude"):
+    for person_dir in sorted(
+        [
+            p for p in people_root.iterdir()
+            if p.is_dir() and not p.name.startswith("_") and not p.name.startswith(".")
+        ],
+        key=lambda p: p.name.casefold(),
+    ):
+        # "photos" is scanned recursively and already includes photos/nude.
+        # Listing photos/nude separately double-counts nude originals.
+        for subdir_name in ("photos", "photos_nude"):
             subdir = person_dir / subdir_name
             if not subdir.exists():
                 continue
@@ -75,10 +85,14 @@ def person_photo_files(people_root: Path):
 
 def file_sig(path: Path) -> tuple[int, int] | None:
     try:
-        st = path.stat()
+        return sort_photos.file_signature(path)
     except OSError:
         return None
-    return int(st.st_mtime), int(st.st_size)
+
+
+def signatures_equal(left: tuple[float, int] | tuple[int, int],
+                     right: tuple[float, int] | tuple[int, int]) -> bool:
+    return abs(float(left[0]) - float(right[0])) < 0.000001 and int(left[1]) == int(right[1])
 
 
 def backup(path: Path, suffix: str) -> Path | None:
@@ -104,11 +118,188 @@ def l2norm(v: np.ndarray) -> np.ndarray:
     return v / norm
 
 
+def load_rename_plan(path: Path) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    with path.open("r", newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            source = str(row.get("source") or "").strip()
+            destination = str(row.get("destination") or "").strip()
+            if source and destination:
+                mapping[source] = destination
+    return mapping
+
+
+def relink_from_rename_plan(old_cache: sort_photos.CacheState,
+                            rename_plan: Path,
+                            *,
+                            apply: bool) -> int:
+    mapping = load_rename_plan(rename_plan)
+    new_cache = sort_photos.CacheState(
+        version=sort_photos.CACHE_VERSION,
+        config_fingerprint=sort_photos.config_fingerprint(),
+    )
+    counts = Counter()
+
+    for old_src, old_sig in old_cache.file_signatures.items():
+        new_src = mapping.get(str(old_src))
+        if not new_src:
+            counts["not_in_plan"] += 1
+            continue
+        new_path = Path(new_src)
+        if not new_path.exists():
+            counts["destination_missing"] += 1
+            continue
+        new_sig = sort_photos.file_signature(new_path)
+        if not signatures_equal(old_sig, new_sig):
+            counts["signature_mismatch"] += 1
+            continue
+        new_cache.file_signatures[new_src] = new_sig
+        counts["mapped_files"] += 1
+
+    for face in old_cache.faces:
+        new_src = mapping.get(str(face.src_str))
+        if not new_src or new_src not in new_cache.file_signatures:
+            counts["unmapped_faces"] += 1
+            continue
+        new_cache.faces.append(replace(face, src_str=new_src))
+        counts["mapped_faces"] += 1
+
+    print()
+    print("Cache relink from rename plan")
+    print(f"  Rename plan:          {rename_plan}")
+    print(f"  Plan mappings:        {len(mapping):,}")
+    print(f"  Mapped cache files:   {counts['mapped_files']:,}")
+    print(f"  Mapped faces:         {counts['mapped_faces']:,}")
+    print(f"  Not in plan:          {counts['not_in_plan']:,}")
+    print(f"  Destination missing:  {counts['destination_missing']:,}")
+    print(f"  Signature mismatch:   {counts['signature_mismatch']:,}")
+    print(f"  Unmapped faces:       {counts['unmapped_faces']:,}")
+    print(f"  Mode:                 {'APPLY' if apply else 'DRY-RUN'}")
+
+    if not apply:
+        print()
+        print("DRY-RUN only. Re-run with --apply to write cache.")
+        return 0
+    if counts["destination_missing"] or counts["signature_mismatch"]:
+        print("ERROR: rename-plan relink has missing destinations or signature mismatches.", file=sys.stderr)
+        return 2
+
+    cache_backup = backup(sort_photos.CACHE_FILE, "rename_relink")
+    save_pickle(sort_photos.CACHE_FILE, new_cache)
+    print()
+    if cache_backup:
+        print(f"Backed up old cache: {cache_backup}")
+    print(f"Wrote cache:         {sort_photos.CACHE_FILE}")
+    return 0
+
+
+def load_move_ledger_mapping(sorted_root: Path,
+                             operation: str,
+                             run_id: str | None = None) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for event in operation_ledger.iter_events(sorted_root):
+        if event.get("status") != "moved":
+            continue
+        if operation and event.get("operation") != operation:
+            continue
+        if run_id and event.get("run_id") != run_id:
+            continue
+        source = str(event.get("source_path") or "")
+        dest = str(event.get("dest_path") or "")
+        if source and dest:
+            mapping[source] = dest
+    return mapping
+
+
+def relink_from_move_mapping(old_cache: sort_photos.CacheState,
+                             mapping: dict[str, str],
+                             *,
+                             apply: bool,
+                             label: str) -> int:
+    new_cache = sort_photos.CacheState(
+        version=sort_photos.CACHE_VERSION,
+        config_fingerprint=sort_photos.config_fingerprint(),
+    )
+    counts = Counter()
+
+    for old_src, old_sig in old_cache.file_signatures.items():
+        new_src = mapping.get(str(old_src), str(old_src))
+        new_path = Path(new_src)
+        if not new_path.exists():
+            counts["missing"] += 1
+            continue
+        new_sig = sort_photos.file_signature(new_path)
+        if not signatures_equal(old_sig, new_sig):
+            counts["signature_mismatch"] += 1
+            continue
+        new_cache.file_signatures[new_src] = new_sig
+        if new_src == str(old_src):
+            counts["kept_files"] += 1
+        else:
+            counts["mapped_files"] += 1
+
+    for face in old_cache.faces:
+        new_src = mapping.get(str(face.src_str), str(face.src_str))
+        if new_src not in new_cache.file_signatures:
+            counts["dropped_faces"] += 1
+            continue
+        if new_src == face.src_str:
+            new_cache.faces.append(face)
+            counts["kept_faces"] += 1
+        else:
+            new_cache.faces.append(replace(face, src_str=new_src))
+            counts["mapped_faces"] += 1
+
+    print()
+    print(f"Cache relink from {label}")
+    print(f"  Move mappings:        {len(mapping):,}")
+    print(f"  Kept cache files:     {counts['kept_files']:,}")
+    print(f"  Mapped cache files:   {counts['mapped_files']:,}")
+    print(f"  Kept faces:           {counts['kept_faces']:,}")
+    print(f"  Mapped faces:         {counts['mapped_faces']:,}")
+    print(f"  Missing files:        {counts['missing']:,}")
+    print(f"  Signature mismatch:   {counts['signature_mismatch']:,}")
+    print(f"  Dropped faces:        {counts['dropped_faces']:,}")
+    print(f"  Mode:                 {'APPLY' if apply else 'DRY-RUN'}")
+
+    if not apply:
+        print()
+        print("DRY-RUN only. Re-run with --apply to write cache.")
+        return 0
+    if counts["missing"] or counts["signature_mismatch"]:
+        print("ERROR: ledger relink has missing files or signature mismatches.", file=sys.stderr)
+        return 2
+
+    cache_backup = backup(sort_photos.CACHE_FILE, label)
+    save_pickle(sort_photos.CACHE_FILE, new_cache)
+    print()
+    if cache_backup:
+        print(f"Backed up old cache: {cache_backup}")
+    print(f"Wrote cache:         {sort_photos.CACHE_FILE}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--old-cache", type=Path, default=DEFAULT_OLD_CACHE)
     parser.add_argument("--people-root", type=Path, default=PEOPLE_ROOT)
+    parser.add_argument("--rename-plan-csv", type=Path, default=None,
+                        help="Exact rename plan CSV from rename_person_folder_files.py. "
+                             "When set, relink cache paths directly from source to destination.")
+    parser.add_argument("--ledger-run-id", default=None,
+                        help="Relink cache paths using moved events from one operation ledger run id.")
+    parser.add_argument("--ledger-operation", default="place_nudity_inside_person_folders.move_to_nude",
+                        help="Ledger operation to use with --ledger-run-id. "
+                             "Default: place_nudity_inside_person_folders.move_to_nude.")
+    parser.add_argument("--sorted-root", type=Path, default=Path.home() / "Pictures" / "sorted_all_pictures",
+                        help="Sorted root for operation ledgers.")
     parser.add_argument("--identity-max-faces", type=int, default=80)
+    parser.add_argument("--include-unmatched-signatures", action="store_true",
+                        help="Also cache current files that only match by file "
+                             "signature but have no usable face in the old cache. "
+                             "Default is false so unmatched images remain pending "
+                             "for cache_tools rehydrate instead of being treated "
+                             "as no-face.")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
@@ -126,12 +317,32 @@ def main() -> int:
     with old_cache_path.open("rb") as fh:
         old_cache: sort_photos.CacheState = pickle.load(fh)
 
+    if args.rename_plan_csv is not None:
+        return relink_from_rename_plan(
+            old_cache,
+            args.rename_plan_csv.expanduser(),
+            apply=bool(args.apply),
+        )
+
+    if args.ledger_run_id:
+        mapping = load_move_ledger_mapping(
+            args.sorted_root.expanduser(),
+            args.ledger_operation,
+            args.ledger_run_id,
+        )
+        return relink_from_move_mapping(
+            old_cache,
+            mapping,
+            apply=bool(args.apply),
+            label="ledger_relink",
+        )
+
     faces_by_sig: dict[tuple[int, int], list[sort_photos.CachedFace]] = defaultdict(list)
     for face in old_cache.faces:
         sig_raw = old_cache.file_signatures.get(face.src_str)
         if not sig_raw:
             continue
-        faces_by_sig[(int(sig_raw[0]), int(sig_raw[1]))].append(face)
+        faces_by_sig[(float(sig_raw[0]), int(sig_raw[1]))].append(face)
 
     new_cache = sort_photos.CacheState(
         version=sort_photos.CACHE_VERSION,
@@ -150,6 +361,11 @@ def main() -> int:
         matches = faces_by_sig.get(sig, [])
         if not matches:
             counts["no_old_match"] += 1
+            if args.include_unmatched_signatures:
+                new_cache.file_signatures[str(path)] = sig
+                counts["matched_no_face_files"] += 1
+            else:
+                counts["skipped_unmatched"] += 1
             continue
         added_for_file = 0
         for old_face in matches:
@@ -187,6 +403,8 @@ def main() -> int:
     print(f"  Current matched faces: {counts['matched_faces']:,}")
     print(f"  Identity DB people:    {len(identity_db.identities):,}")
     print(f"  No old-cache match:    {counts['no_old_match']:,}")
+    print(f"  Matched no-face files: {counts['matched_no_face_files']:,}")
+    print(f"  Skipped unmatched:     {counts['skipped_unmatched']:,}")
     print(f"  Sig but no person face:{counts['signature_but_no_person_face']:,}")
     print(f"  Mode:                  {'APPLY' if args.apply else 'DRY-RUN'}")
 

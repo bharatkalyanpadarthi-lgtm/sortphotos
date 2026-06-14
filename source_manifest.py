@@ -55,6 +55,17 @@ class ManifestValidation:
     extra_csv: Path
 
 
+def is_person_dir_name(name: str) -> bool:
+    return bool(name) and not name.startswith("_") and not name.startswith(".")
+
+
+def is_manifest_original_entry(entry: dict[str, Any]) -> bool:
+    person = str(entry.get("person", ""))
+    rel = str(entry.get("relative_path", ""))
+    first = Path(rel).parts[0] if rel else person
+    return is_person_dir_name(person) and is_person_dir_name(first)
+
+
 def run_id() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
@@ -70,7 +81,7 @@ def image_files(people_dir: Path = PEOPLE) -> list[Path]:
         return []
     files: list[Path] = []
     for person_dir in people_dir.iterdir():
-        if not person_dir.is_dir() or person_dir.name.startswith("_"):
+        if not person_dir.is_dir() or not is_person_dir_name(person_dir.name):
             continue
         photos_dir = person_dir / "photos"
         if not photos_dir.exists():
@@ -102,7 +113,7 @@ def person_names(people_dir: Path = PEOPLE) -> list[str]:
     if not people_dir.exists():
         return []
     return sorted(
-        [p.name for p in people_dir.iterdir() if p.is_dir() and not p.name.startswith("_")],
+        [p.name for p in people_dir.iterdir() if p.is_dir() and is_person_dir_name(p.name)],
         key=str.lower,
     )
 
@@ -167,7 +178,10 @@ def signature(entry: dict[str, Any]) -> tuple[str, int, int]:
 
 def compare_manifest(manifest: dict[str, Any],
                      current_entries: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    expected_entries = list(manifest.get("files", []))
+    expected_entries = [
+        entry for entry in list(manifest.get("files", []))
+        if is_manifest_original_entry(entry)
+    ]
     current_by_path = {str(entry["relative_path"]): entry for entry in current_entries}
     matched_current_paths: set[str] = set()
     missing_candidates: list[dict[str, Any]] = []
@@ -292,18 +306,23 @@ def validate_current(*,
         )
 
     comparison = compare_manifest(manifest, current_entries)
+    expected_entries = [
+        entry for entry in list(manifest.get("files", []))
+        if is_manifest_original_entry(entry)
+    ]
     write_csv(missing_csv, comparison["missing"])
     write_csv(changed_csv, comparison["size_changed"])
     write_csv(renamed_csv, comparison["renamed"])
     write_csv(extra_csv, comparison["extra"])
     ok = not comparison["missing"] and not comparison["size_changed"]
+    expected_people = len(person_counts(expected_entries, None))
     return ManifestValidation(
         ok=ok,
         manifest_path=manifest_path,
         report_prefix=report_prefix,
-        expected_total=int(manifest.get("total", len(manifest.get("files", [])))),
+        expected_total=len(expected_entries),
         current_total=len(current_entries),
-        expected_people=int(manifest.get("person_count", len(manifest.get("person_counts", {})))),
+        expected_people=expected_people,
         current_people=len(person_counts(current_entries, people_dir)),
         missing=comparison["missing"],
         size_changed=comparison["size_changed"],

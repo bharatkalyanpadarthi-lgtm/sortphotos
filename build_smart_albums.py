@@ -4115,7 +4115,7 @@ def person_dirs(root: Path, only: str | None) -> list[Path]:
         matches = [p for p in root.iterdir() if p.is_dir() and p.name.lower() == only.lower()]
         return matches[:1]
     return sorted(
-        [p for p in root.iterdir() if p.is_dir() and not p.name.startswith("_")],
+        [p for p in root.iterdir() if p.is_dir() and not p.name.startswith("_") and not p.name.startswith(".")],
         key=lambda p: p.name.lower(),
     )
 

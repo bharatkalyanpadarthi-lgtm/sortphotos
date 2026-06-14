@@ -64,7 +64,7 @@ def person_dirs(people_dir: Path, person: str | None = None) -> list[Path]:
         return []
     dirs = [
         p for p in people_dir.iterdir()
-        if p.is_dir() and not p.name.startswith("_") and p.name != "all"
+        if p.is_dir() and not p.name.startswith("_") and not p.name.startswith(".") and p.name != "all"
     ]
     if person:
         wanted = person.casefold()
@@ -125,6 +125,31 @@ def labeling_state_summary() -> dict[str, int | str]:
     }
 
 
+def coverage_summary(people_dir: Path, person: str | None = None) -> dict[str, int | float]:
+    cache = sort_photos.load_cache()
+    candidates = person_folder_images(people_dir, person)
+    candidate_paths = {str(path) for path, _person in candidates}
+    current_cached = 0
+    cached_with_faces = 0
+    for src, sig in cache.file_signatures.items():
+        if src not in candidate_paths:
+            continue
+        if not signature_matches_current_file(src, sig):
+            continue
+        current_cached += 1
+    face_paths = {face.src_str for face in cache.faces if face.src_str}
+    cached_with_faces = len(face_paths & candidate_paths)
+    total = len(candidate_paths)
+    return {
+        "total": total,
+        "cached": current_cached,
+        "missing": max(0, total - current_cached),
+        "face_cached": cached_with_faces,
+        "coverage": (current_cached / total) if total else 1.0,
+        "face_coverage": (cached_with_faces / total) if total else 1.0,
+    }
+
+
 def print_status(people_dir: Path, person: str | None = None) -> int:
     cache = cache_summary()
     state = labeling_state_summary()
@@ -166,6 +191,28 @@ def print_status(people_dir: Path, person: str | None = None) -> int:
     return 0
 
 
+def print_coverage(people_dir: Path, person: str | None = None,
+                   min_coverage: float = 0.0) -> int:
+    coverage = coverage_summary(people_dir, person)
+    pct = float(coverage["coverage"]) * 100.0
+    face_pct = float(coverage["face_coverage"]) * 100.0
+    print("Face Cache Coverage")
+    print("=" * 60)
+    print(f"People folder:           {people_dir}")
+    print(f"Person filter:           {person or 'all'}")
+    print(f"Current originals:       {coverage['total']}")
+    print(f"Cached current files:    {coverage['cached']}")
+    print(f"Missing cache files:     {coverage['missing']}")
+    print(f"Cached files with faces: {coverage['face_cached']}")
+    print(f"File coverage:           {pct:.1f}%")
+    print(f"Face-entry coverage:     {face_pct:.1f}%")
+    if min_coverage and float(coverage["coverage"]) < min_coverage:
+        print()
+        print(f"ERROR: cache coverage below required {min_coverage * 100:.1f}%.")
+        return 2
+    return 0
+
+
 def backup_cache() -> Path | None:
     if not sort_photos.CACHE_FILE.exists():
         return None
@@ -190,7 +237,8 @@ def signature_matches_current_file(src: str, sig: tuple[float, int]) -> bool:
 
 
 def rehydrate(people_dir: Path, person: str | None, apply: bool,
-              replace: bool, max_images: int | None, batch_size: int) -> int:
+              replace: bool, max_images: int | None, batch_size: int,
+              max_missing: int | None = None) -> int:
     candidates = person_folder_images(people_dir, person)
     all_candidate_paths = {str(path) for path, _person in candidates}
     selected_person_dir: Path | None = None
@@ -274,10 +322,20 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
         (path, label) for path, label in candidates
         if str(path) not in new_cache.file_signatures
     ]
+    total_remaining = len(remaining)
+    if max_missing is not None:
+        remaining = remaining[:max(0, int(max_missing))]
     if len(remaining) != len(candidates):
         print(f"Already cached candidate files: {len(candidates) - len(remaining)}")
-        print(f"Remaining candidate files:      {len(remaining)}")
+        if max_missing is not None and total_remaining != len(remaining):
+            print(f"Total missing candidate files:  {total_remaining}")
+            print(f"Missing selected this run:      {len(remaining)}")
+        else:
+            print(f"Remaining candidate files:      {len(remaining)}")
         print()
+    if max_missing is not None and not remaining:
+        print("No missing candidate images selected for this run.")
+        return 0
 
     detected_images = 0
     no_face_images = 0
@@ -393,6 +451,12 @@ def main() -> int:
     status.add_argument("--people-dir", type=Path, default=DEFAULT_PEOPLE)
     status.add_argument("--person", default=None)
 
+    coverage = sub.add_parser("coverage", help="Check cache coverage against current person folders.")
+    coverage.add_argument("--people-dir", type=Path, default=DEFAULT_PEOPLE)
+    coverage.add_argument("--person", default=None)
+    coverage.add_argument("--min-coverage", type=float, default=0.0,
+                          help="Require this fraction of current originals cached, e.g. 0.80.")
+
     rebuild = sub.add_parser("rehydrate", help="Rebuild cache from current person folders.")
     rebuild.add_argument("--people-dir", type=Path, default=DEFAULT_PEOPLE)
     rebuild.add_argument("--person", default=None)
@@ -401,6 +465,8 @@ def main() -> int:
                          help="Replace existing cache instead of merging existing live entries.")
     rebuild.add_argument("--max-images", type=int, default=None,
                          help="Debug/safety limit for the number of images to inspect.")
+    rebuild.add_argument("--max-missing", type=int, default=None,
+                         help="Only detect this many currently uncached images after merging live cache.")
     rebuild.add_argument("--batch-size", type=int, default=50,
                          help="Images per detection subprocess. Default 50.")
 
@@ -408,6 +474,8 @@ def main() -> int:
     people_dir = args.people_dir.expanduser().resolve()
     if args.command == "status":
         return print_status(people_dir, args.person)
+    if args.command == "coverage":
+        return print_coverage(people_dir, args.person, args.min_coverage)
     if args.command == "rehydrate":
         if args.apply:
             manifest_check = source_manifest.validate_current(
@@ -420,7 +488,7 @@ def main() -> int:
                 return source_manifest.SOURCE_GUARD_EXIT
         return rehydrate(
             people_dir, args.person, args.apply, args.replace,
-            args.max_images, args.batch_size,
+            args.max_images, args.batch_size, args.max_missing,
         )
     return 1
 

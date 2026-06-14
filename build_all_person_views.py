@@ -330,7 +330,10 @@ def write_root_dashboard(people_dir: Path, dirs: list[Path], apply: bool) -> Non
 
 
 def person_dirs(root: Path, person: str | None) -> list[Path]:
-    dirs = [p for p in root.iterdir() if p.is_dir() and not p.name.startswith("_") and p.name != VIEW_DIR]
+    dirs = [
+        p for p in root.iterdir()
+        if p.is_dir() and not p.name.startswith("_") and not p.name.startswith(".") and p.name != VIEW_DIR
+    ]
     if person:
         wanted = person.casefold()
         dirs = [p for p in dirs if p.name.casefold() == wanted]

@@ -52,7 +52,7 @@ def count_images(root: Path, exclude_generated_dirs: bool = True) -> int:
         return 0
     total = 0
     for p in root.rglob("*"):
-        if exclude_generated_dirs and any(part in EXCLUDED_DIRS for part in p.parts):
+        if exclude_generated_dirs and any(part in EXCLUDED_DIRS or part.startswith(".") for part in p.parts):
             continue
         if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
             total += 1
@@ -64,7 +64,7 @@ def count_videos(root: Path, exclude_generated_dirs: bool = True) -> int:
         return 0
     total = 0
     for p in root.rglob("*"):
-        if exclude_generated_dirs and any(part in EXCLUDED_DIRS for part in p.parts):
+        if exclude_generated_dirs and any(part in EXCLUDED_DIRS or part.startswith(".") for part in p.parts):
             continue
         if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
             total += 1
@@ -74,7 +74,10 @@ def count_videos(root: Path, exclude_generated_dirs: bool = True) -> int:
 def count_dirs(root: Path) -> int:
     if not root.exists():
         return 0
-    return sum(1 for p in root.iterdir() if p.is_dir() and not p.name.startswith("_"))
+    return sum(
+        1 for p in root.iterdir()
+        if p.is_dir() and not p.name.startswith("_") and not p.name.startswith(".")
+    )
 
 
 def size_bytes(root: Path, exclude_generated_dirs: bool = True) -> int:
@@ -82,7 +85,7 @@ def size_bytes(root: Path, exclude_generated_dirs: bool = True) -> int:
         return 0
     total = 0
     for p in root.rglob("*"):
-        if exclude_generated_dirs and any(part in EXCLUDED_DIRS for part in p.parts):
+        if exclude_generated_dirs and any(part in EXCLUDED_DIRS or part.startswith(".") for part in p.parts):
             continue
         if p.is_file():
             try:
@@ -239,7 +242,11 @@ def identity_alignment() -> dict[str, int]:
     if not PEOPLE.exists():
         folders = {}
     else:
-        folders = {p.name.lower(): p.name for p in PEOPLE.iterdir() if p.is_dir() and not p.name.startswith("_")}
+        folders = {
+            p.name.lower(): p.name
+            for p in PEOPLE.iterdir()
+            if p.is_dir() and not p.name.startswith("_") and not p.name.startswith(".")
+        }
     identities = {name.lower(): name for name in identity_names()}
     return {
         "stale": len([name for key, name in identities.items() if key not in folders]),

@@ -113,7 +113,7 @@ def unique_dest(dest: Path) -> Path:
 
 def person_dirs(people_root: Path) -> list[Path]:
     return sorted(
-        [p for p in people_root.iterdir() if p.is_dir() and not p.name.startswith("_")],
+        [p for p in people_root.iterdir() if p.is_dir() and not p.name.startswith("_") and not p.name.startswith(".")],
         key=lambda p: p.name.lower(),
     )
 

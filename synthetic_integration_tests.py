@@ -96,6 +96,32 @@ def quiet_output():
         yield out, err
 
 
+@contextlib.contextmanager
+def redirected_label_state(label_state_path: Path):
+    old_label_state = sort_photos.LABEL_STATE_FILE
+    sort_photos.LABEL_STATE_FILE = label_state_path
+    try:
+        yield
+    finally:
+        sort_photos.LABEL_STATE_FILE = old_label_state
+
+
+def dummy_cached_face(src: Path, label: str | None = None) -> sort_photos.CachedFace:
+    return sort_photos.CachedFace(
+        src_str=str(src),
+        face_index=0,
+        det_score=0.99,
+        bbox_size=100.0,
+        sharpness=100.0,
+        yaw_proxy=0.0,
+        quality=1.0,
+        embedding=np.ones(512, dtype=np.float32),
+        image_phash=np.zeros(64, dtype=bool),
+        crop_jpeg=b"\xff\xd8\xff\xd9",
+        label=label,
+    )
+
+
 def test_to_process_generated_names_are_visible(tmp: Path) -> None:
     inbox = tmp / "To Process"
     make_image(inbox / "all" / "a.jpg", (255, 0, 0))
@@ -144,6 +170,8 @@ def test_daily_commands_are_non_destructive_for_duplicates(tmp: Path) -> None:
         script = Path(cmd[1]).name if len(cmd) > 1 and cmd[1].endswith(".py") else ""
         if step["name"] == "process":
             assert_true("--skip-output-cleanup" in cmd, "daily process must skip sort_photos automatic cleanup")
+        if step["name"] == "rename":
+            assert_true("--simple" in cmd, "daily rename must use simple filename mode")
         assert_true(step["name"] != "smart-albums",
                     "daily must not rebuild smart albums; smart folders are disabled for now")
         if script in {"delete_person_folder_duplicates.py", "advanced_duplicate_matching.py"}:
@@ -192,6 +220,35 @@ def test_sort_post_process_duplicate_steps_are_report_only(tmp: Path) -> None:
     for cmd in duplicate_commands:
         assert_true("--apply" not in cmd, f"post-process duplicate command must not apply: {cmd}")
         assert_true("--quarantine-bad" not in cmd, f"post-process duplicate command must not quarantine: {cmd}")
+    rename_commands = [cmd for cmd in commands if len(cmd) > 1 and Path(cmd[1]).name == "rename_person_folder_files.py"]
+    assert_true(len(rename_commands) == 1, f"expected one rename command, got {rename_commands}")
+    assert_true("--simple" in rename_commands[0], f"post-process rename must use simple mode: {rename_commands[0]}")
+
+
+def test_simple_rename_plan_preserves_indices_and_flattens(tmp: Path) -> None:
+    person = tmp / "people" / "Person Name"
+    make_image(person / "photos" / "Person_Name_0001_photo_portrait_q_high.jpg", (20, 120, 210))
+    make_image(person / "photos" / "GIFs" / "Person_Name_0002_photo_square_q_review.gif",
+               (210, 80, 20), fmt="GIF")
+    make_image(person / "photos" / "nude" / "Person_Name_0003_nudity_possible_portrait_q_good.png",
+               (80, 210, 20))
+    make_image(person / "review" / "duplicates" / "Person_Name_0004_photo_portrait_q_good.jpg",
+               (20, 210, 120))
+
+    actions = rename_person_folder_files.plan_for_person_simple(person)
+    destinations = {
+        Path(action["destination"]).relative_to(person).as_posix()
+        for action in actions
+    }
+
+    assert_true("photos/Person_Name_00001.jpg" in destinations,
+                f"simple rename did not remove quality/orientation tokens: {destinations}")
+    assert_true("photos/Person_Name_00002.gif" in destinations,
+                f"nested GIF was not flattened into photos/: {destinations}")
+    assert_true("photos/nude/Person_Name_00003.png" in destinations,
+                f"nude image was not kept under photos/nude: {destinations}")
+    assert_true(all("review/" not in str(action["source"]) for action in actions),
+                f"simple rename should not touch review files: {actions}")
 
 
 def test_generated_person_views_are_excluded_from_scanners(tmp: Path) -> None:
@@ -378,6 +435,96 @@ def test_full_rehydrate_keeps_cached_candidates(tmp: Path) -> None:
                     "full dry-run rehydrate changed cache paths")
 
 
+def test_cache_coverage_reports_missing_files(tmp: Path) -> None:
+    people = tmp / "people"
+    cache_file = tmp / "cache" / "cache.pkl"
+    with redirected_cache(cache_file):
+        seed_cache(cache_file, people, ["Alice"])
+        make_image(people / "Bob" / "photos" / "Bob_0001.jpg", (10, 20, 30))
+        summary = cache_tools.coverage_summary(people)
+        assert_true(summary["total"] == 2, f"expected 2 originals, got {summary}")
+        assert_true(summary["cached"] == 1, f"expected 1 cached file, got {summary}")
+        assert_true(summary["missing"] == 1, f"expected 1 missing cache file, got {summary}")
+        assert_true(cache_tools.print_coverage(people, min_coverage=0.75) == 2,
+                    "coverage guard did not fail below threshold")
+
+
+def test_resume_with_no_eligible_clusters_does_not_finalize(tmp: Path) -> None:
+    output = tmp / "sorted"
+    input_dir = tmp / "To Process"
+    (output / "face_clusters").mkdir(parents=True)
+    src = input_dir / "tiny.jpg"
+    make_image(src, (20, 40, 60))
+    state = sort_photos.LabelingState(
+        version=sort_photos.LABEL_STATE_VERSION,
+        output_dir=str(output),
+        input_dir=str(input_dir),
+        config_fingerprint=sort_photos.config_fingerprint(),
+        faces=[dummy_cached_face(src)],
+        cluster_ids=[1],
+        name_map={1: "person_001"},
+    )
+    old_finish = sort_photos.finish_pipeline
+
+    def fail_finish(*_args, **_kwargs):  # noqa: ANN001
+        raise SyntheticFailure("finish_pipeline was called with no eligible clusters")
+
+    sort_photos.finish_pipeline = fail_finish
+    try:
+        with quiet_output():
+            rc = sort_photos.do_resume(
+                state,
+                do_review=False,
+                use_ai=False,
+                min_cluster_size=20,
+                finish_labeled=False,
+            )
+    finally:
+        sort_photos.finish_pipeline = old_finish
+    assert_true(rc == 0, f"do_resume exited {rc}")
+
+
+def test_partial_finish_preserves_library_cache_for_temp_sources(tmp: Path) -> None:
+    people = tmp / "sorted" / "photos_by_person"
+    cache_file = tmp / "cache" / "cache.pkl"
+    label_state = tmp / "cache" / "labeling_state.pkl"
+    with redirected_cache(cache_file), redirected_label_state(label_state):
+        library_file = seed_cache(cache_file, people, ["Alice"])[0]
+        before = sort_photos.load_cache()
+        temp_src = tmp / "To Process" / "new.jpg"
+        make_image(temp_src, (200, 40, 80))
+        rec = sort_photos.cached_to_record(dummy_cached_face(temp_src))
+        rec.cluster_id = 1
+
+        old_organize = sort_photos.organize_originals
+        old_manifest = sort_photos.write_manifest
+        old_post = sort_photos.run_post_process
+        sort_photos.organize_originals = lambda *_args, **_kwargs: None
+        sort_photos.write_manifest = lambda *_args, **_kwargs: None
+        sort_photos.run_post_process = lambda *_args, **_kwargs: None
+        try:
+            with quiet_output():
+                sort_photos.finish_pipeline(
+                    [rec],
+                    {1: "Alice"},
+                    tmp / "sorted",
+                    input_dir=tmp / "To Process",
+                    do_review=False,
+                    interactive_was_run=False,
+                    preserve_labeling_state=True,
+                )
+        finally:
+            sort_photos.organize_originals = old_organize
+            sort_photos.write_manifest = old_manifest
+            sort_photos.run_post_process = old_post
+
+        after = sort_photos.load_cache()
+        assert_true(str(library_file) in after.file_signatures,
+                    "library cache entry was dropped by partial finish")
+        assert_true(after.file_signatures == before.file_signatures,
+                    "partial finish rewrote the library cache from temp sources")
+
+
 def test_cache_signature_mismatch_is_not_preserved(tmp: Path) -> None:
     image = tmp / "Person" / "photos" / "Person_0001.jpg"
     make_image(image, (20, 30, 40))
@@ -432,6 +579,42 @@ def test_duplicate_matching_accepts_pillow_readable_images(tmp: Path) -> None:
     assert_true(len(errors) == 0, f"readable fallback image was reported as bad: {errors}")
     assert_true(stats["bad_moved"] == 0, "readable fallback image was quarantined")
     assert_true(fallback.exists(), "readable fallback image was moved out of place")
+
+
+def test_near_visual_candidates_are_never_move_actions(tmp: Path) -> None:
+    a = advanced_duplicate_matching.ImageInfo(
+        path=tmp / "a.jpg",
+        scope="Person",
+        nudity_status="safe",
+        size_bytes=1,
+        width=100,
+        height=100,
+        sha256="a",
+        pixel_sha256="pa",
+        phash=0,
+    )
+    b = advanced_duplicate_matching.ImageInfo(
+        path=tmp / "b.jpg",
+        scope="Person",
+        nudity_status="safe",
+        size_bytes=1,
+        width=100,
+        height=100,
+        sha256="b",
+        pixel_sha256="pb",
+        phash=1,
+    )
+    groups = advanced_duplicate_matching.build_duplicates(
+        [a, b],
+        near_threshold=5,
+        move_near=True,
+        include_same_pixels=False,
+        include_near_visual=True,
+    )
+    assert_true(any(g.kind == "visually_similar" for g in groups),
+                f"expected a near-visual group, got {groups}")
+    assert_true(all(g.action != "move" for g in groups if g.kind == "visually_similar"),
+                f"near-visual candidate became a move action: {groups}")
 
 
 def test_intake_fingerprint_accepts_pillow_readable_images(tmp: Path) -> None:
@@ -530,14 +713,19 @@ TESTS = [
     ("Daily step ordering is safe", test_daily_order_is_safe),
     ("Daily duplicate commands are report-only", test_daily_commands_are_non_destructive_for_duplicates),
     ("sort_photos post-process duplicate steps are report-only", test_sort_post_process_duplicate_steps_are_report_only),
+    ("Simple rename preserves indices and flattens photos", test_simple_rename_plan_preserves_indices_and_flattens),
     ("Generated person views are excluded from scanners", test_generated_person_views_are_excluded_from_scanners),
     ("Source manifest restore uses operation ledger", test_source_manifest_restore_from_ledger),
     ("Source manifest restore dry-run is non-destructive", test_source_manifest_restore_dry_run_is_non_destructive),
     ("Person rehydrate preserves global cache", test_person_rehydrate_preserves_global_cache),
     ("Cache dry-run is non-destructive", test_full_rehydrate_keeps_cached_candidates),
+    ("Cache coverage reports missing files", test_cache_coverage_reports_missing_files),
+    ("Resume with no eligible clusters does not finalize", test_resume_with_no_eligible_clusters_does_not_finalize),
+    ("Partial finish preserves library cache", test_partial_finish_preserves_library_cache_for_temp_sources),
     ("Changed cache signatures are refreshed", test_cache_signature_mismatch_is_not_preserved),
     ("Generated bad views are not recovered", test_generated_views_do_not_recover_bad_images),
     ("Duplicate matching accepts Pillow-readable images", test_duplicate_matching_accepts_pillow_readable_images),
+    ("Near-visual candidates are never move actions", test_near_visual_candidates_are_never_move_actions),
     ("Intake fingerprint accepts Pillow-readable images", test_intake_fingerprint_accepts_pillow_readable_images),
     ("Nudity check uses normalized fallback", test_nudity_check_uses_normalized_fallback),
     ("Incremental smart albums skip heavy dry-run work", test_incremental_smart_albums_skip_without_heavy_models),

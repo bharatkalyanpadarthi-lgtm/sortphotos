@@ -145,7 +145,10 @@ def sorted_root_for_path(path: Path) -> Path:
 def person_dirs(people_dir: Path) -> list[Path]:
     if not people_dir.exists():
         return []
-    return sorted([p for p in people_dir.iterdir() if p.is_dir()], key=lambda p: p.name.casefold())
+    return sorted(
+        [p for p in people_dir.iterdir() if p.is_dir() and not p.name.startswith(".")],
+        key=lambda p: p.name.casefold(),
+    )
 
 
 def image_files(person_dir: Path) -> list[Path]:
@@ -280,7 +283,7 @@ def move_suspicious_person(person_dir: Path, review_root: Path, apply: bool) -> 
 def audit_or_repair(people_dir: Path, review_root: Path, apply: bool, quiet: bool) -> Stats:
     stats = Stats()
     for person_dir in person_dirs(people_dir):
-        if person_dir.name.startswith("_"):
+        if person_dir.name.startswith("_") or person_dir.name.startswith("."):
             stats.suspicious_people += 1
             stats.people += 1
             if not quiet:

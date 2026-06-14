@@ -76,7 +76,7 @@ def iter_images(people_dir: Path, include_review: bool = False) -> list[Path]:
     if not people_dir.exists():
         return out
     for person_dir in sorted(
-        [p for p in people_dir.iterdir() if p.is_dir() and not p.name.startswith("_")],
+        [p for p in people_dir.iterdir() if p.is_dir() and not p.name.startswith("_") and not p.name.startswith(".")],
         key=lambda p: p.name.casefold(),
     ):
         for dirpath, dirnames, filenames in os.walk(person_dir):

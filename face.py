@@ -33,9 +33,26 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 import daily_runner  # noqa: E402
+import cache_tools  # noqa: E402
 import source_manifest  # noqa: E402
 
 SOURCE_GUARD_EXIT = 3
+CACHE_GUARD_EXIT = 4
+CACHE_GUARD_MIN_COVERAGE = 0.50
+CACHE_GUARD_MIN_LIBRARY_SIZE = 1000
+CACHE_GUARD_BYPASS_KEYS = {
+    "cache-rehydrate",
+    "cache-relink",
+    "cache-status",
+    "health",
+    "identity-audit",
+    "integration-audit",
+    "rebuild-id",
+    "refs",
+    "repair",
+    "status",
+    "synthetic-tests",
+}
 
 MENU_GROUPS = [
     (
@@ -177,7 +194,7 @@ ACTIONS = [
             },
             {
                 "script": "rename_person_folder_files.py",
-                "args": ["--apply", "--quiet"],
+                "args": ["--simple", "--apply", "--quiet"],
             },
         ],
     },
@@ -212,9 +229,9 @@ ACTIONS = [
         "key": "rename",
         "aliases": ["number", "number-files", "rename-files"],
         "label": "Rename Person Files",
-        "desc": "Smart-name person images as Person_0001_category_orientation_quality.ext",
+        "desc": "Simplify person image names as Person_00001.ext and flatten photos subfolders",
         "script": "rename_person_folder_files.py",
-        "args": ["--apply", "--quiet"],
+        "args": ["--simple", "--apply", "--quiet"],
     },
     {
         "key": "all-views",
@@ -472,6 +489,32 @@ def source_guard_run_id(action: dict) -> str:
     return f"face_{safe_key}_{time.strftime('%Y%m%d_%H%M%S')}"
 
 
+def cache_guard_check(action: dict) -> int:
+    if action["key"] in CACHE_GUARD_BYPASS_KEYS:
+        return 0
+    coverage = cache_tools.coverage_summary(daily_runner.PEOPLE)
+    total = int(coverage["total"])
+    if total < CACHE_GUARD_MIN_LIBRARY_SIZE:
+        return 0
+    cached = int(coverage["cached"])
+    missing = int(coverage["missing"])
+    ratio = float(coverage["coverage"])
+    if ratio >= CACHE_GUARD_MIN_COVERAGE:
+        return 0
+    print()
+    print("ERROR: face cache coverage is too low for this action.")
+    print(f"Current originals:       {total}")
+    print(f"Cached current files:    {cached}")
+    print(f"Missing cache files:     {missing}")
+    print(f"Coverage:                {ratio * 100:.1f}%")
+    print()
+    print("Run one of these repair commands first:")
+    print("  python face.py cache-relink --old-cache /path/to/full/cache.pkl.bak --apply")
+    print("  python face.py cache-rehydrate --apply --max-missing 1000")
+    print("  python face.py cache-status")
+    return CACHE_GUARD_EXIT
+
+
 def write_guard_csv(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames: list[str] = []
@@ -549,6 +592,10 @@ def source_guard_finish(guard: dict, *, allow_decrease: bool = False) -> int:
 
 def run_action(action: dict, extra_args: list[str] | None = None) -> int:
     allow_original_count_decrease = bool(action.get("allow_original_count_decrease"))
+    cache_rc = cache_guard_check(action)
+    if cache_rc != 0:
+        return cache_rc
+
     manifest_check = source_manifest.validate_current(
         label=f"face_{action['key']}_start",
         people_dir=daily_runner.PEOPLE,

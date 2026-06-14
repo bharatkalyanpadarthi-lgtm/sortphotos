@@ -94,7 +94,7 @@ def original_person_counts() -> dict[str, int]:
     if not PEOPLE.exists():
         return counts
     for person_dir in sorted(
-        [p for p in PEOPLE.iterdir() if p.is_dir() and not p.name.startswith("_")],
+        [p for p in PEOPLE.iterdir() if p.is_dir() and not p.name.startswith("_") and not p.name.startswith(".")],
         key=lambda p: p.name.lower(),
     ):
         photos_dir = person_dir / "photos"
@@ -437,8 +437,8 @@ def step_list(batch_size: int) -> list[dict]:
         },
         {"name": "structure", "desc": "Normalize person folder structure",
          "cmd": [py, str(SCRIPT_DIR / "person_structure.py"), "--apply", "--quiet"]},
-        {"name": "rename", "desc": "Normalize person filenames",
-         "cmd": [py, str(SCRIPT_DIR / "rename_person_folder_files.py"), "--apply", "--quiet"]},
+        {"name": "rename", "desc": "Normalize person filenames with simple stable names",
+         "cmd": [py, str(SCRIPT_DIR / "rename_person_folder_files.py"), "--simple", "--apply", "--quiet"]},
         {"name": "exact-dedupe", "desc": "Report exact person-folder duplicates without moving originals",
          "cmd": [py, str(SCRIPT_DIR / "delete_person_folder_duplicates.py"), "--quiet"]},
         {"name": "advanced-dedupe", "desc": "Refresh advanced duplicate report without moving originals",

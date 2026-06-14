@@ -487,7 +487,7 @@ def build_duplicates(items: list[ImageInfo], near_threshold: int,
             keeper = choose_keeper(members).path
             confidence = max(70, int(98 - (dist * 4)))
             for info in sorted(members, key=lambda x: str(x.path).lower()):
-                action = "keep" if info.path == keeper else ("move" if move_near else "review")
+                action = "keep" if info.path == keeper else "review"
                 groups.append(DuplicateMember(group_id, "visually_similar", confidence,
                                               action, keeper, info.path, dist))
             group_id += 1
@@ -543,7 +543,7 @@ def main() -> int:
     parser.add_argument("--include-near-visual", action="store_true",
                         help="Also report pHash near-visual candidates. Not enabled by default.")
     parser.add_argument("--move-near", action="store_true",
-                        help="With --include-near-visual, also move visually_similar candidates. Riskier.")
+                        help="Deprecated/no-op. Near-visual candidates are never moved by this tool.")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -573,7 +573,7 @@ def main() -> int:
     to_move = [
         d for d in duplicates
         if d.action == "move"
-        and (d.kind == "exact_file" or args.move_near)
+        and d.kind == "exact_file"
     ]
     by_kind = defaultdict(int)
     for d in duplicates:

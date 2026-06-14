@@ -50,7 +50,7 @@ def person_original_counts(people_dir: Path = PEOPLE) -> dict[str, int]:
         return counts
     person_dirs = [
         p for p in people_dir.iterdir()
-        if p.is_dir() and not p.name.startswith("_")
+        if p.is_dir() and not p.name.startswith("_") and not p.name.startswith(".")
     ]
     for person_dir in sorted(person_dirs, key=lambda p: p.name.lower()):
         photos_dir = person_dir / "photos"

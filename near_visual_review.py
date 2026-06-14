@@ -193,6 +193,16 @@ def prepare_thumbnails(groups: list[ReviewGroup], thumb_dir: Path, *, quiet: boo
     return thumbnails
 
 
+def candidate_kinds_by_path(groups: list[ReviewGroup]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for group in groups:
+        if group.keeper is not None:
+            out[str(group.keeper.resolve())] = group.kind
+        for candidate in group.candidates:
+            out[str(candidate.path.resolve())] = candidate.kind
+    return out
+
+
 def unique_dest(dest: Path) -> Path:
     if not dest.exists():
         return dest
@@ -951,6 +961,9 @@ def apply_decision(path: Path, action: str, state: dict) -> str:
         raise ValueError("unknown action")
     if not path.exists():
         raise ValueError("file no longer exists")
+    kind = state.get("candidate_kinds", {}).get(str(path))
+    if action == "move" and kind != "exact_file":
+        raise ValueError("only exact-file duplicates can be moved")
 
     decisions = load_decisions(state["decisions"])
     items = decisions.setdefault("items", {})
@@ -1075,6 +1088,7 @@ def main() -> int:
         "review_dir": review_dir,
         "thumb_dir": thumb_dir,
         "thumbnails": thumbnails,
+        "candidate_kinds": candidate_kinds_by_path(groups),
         "decisions": decisions_path,
         "limit": args.limit,
         "quiet": args.quiet,

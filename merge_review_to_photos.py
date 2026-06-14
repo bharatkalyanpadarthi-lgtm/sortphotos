@@ -78,7 +78,7 @@ def iter_review_images(people_dir: Path) -> list[tuple[Path, Path, Path]]:
     if not people_dir.exists():
         return items
     for person_dir in sorted(people_dir.iterdir(), key=lambda p: p.name.casefold()):
-        if not person_dir.is_dir() or person_dir.name.startswith("_"):
+        if not person_dir.is_dir() or person_dir.name.startswith("_") or person_dir.name.startswith("."):
             continue
         review_dir = person_dir / "review"
         if not review_dir.is_dir():
