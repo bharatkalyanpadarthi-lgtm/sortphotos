@@ -5,10 +5,11 @@ Use the first option for normal day-to-day work: dump new images into
 ~/Pictures/To Process, then run `python face.py daily`.
 
 Daily:
-    python face.py daily       # full safe workflow for ~/Pictures/To Process
+    python face.py daily       # safe intake/cache workflow for ~/Pictures/To Process
     python face.py dry-run     # preview the daily workflow
     python face.py status      # quick dashboard
     python face.py health      # read-only safety checks
+    python face.py smart       # refresh generated smart album views manually
 
 Useful manual tools:
     python face.py review-dashboard
@@ -94,8 +95,8 @@ ACTIONS = [
     {
         "key": "daily",
         "aliases": ["run", "go", "end-to-end"],
-        "label": "Daily End-to-End Run",
-        "desc": "Memory-safe resumable daily flow with final per-run summary",
+        "label": "Daily Ingest / Cache Run",
+        "desc": "Memory-safe resumable daily ingest with cleanup, cache refresh, audit, and summary",
         "script": "daily_runner.py",
     },
     {
@@ -110,7 +111,7 @@ ACTIONS = [
         "key": "process",
         "aliases": ["process-new", "process-move", "sort"],
         "label": "Process New Photos",
-        "desc": "Alias for Daily End-to-End Run so new-photo processing always uses the safe full workflow",
+        "desc": "Alias for Daily Ingest / Cache Run so new-photo processing uses the safe workflow",
         "script": "daily_runner.py",
     },
     {
@@ -252,7 +253,7 @@ ACTIONS = [
         "key": "smart-albums",
         "aliases": ["albums", "smart", "organize-smart"],
         "label": "Build Smart Albums",
-        "desc": "Create hardlinked smart views for best, quality, framing, format, same-scene, visual-similar, nudity, and review folders",
+        "desc": "Manual/generated views only: refresh smart folders after daily ingest when you want them",
         "script": "build_smart_albums.py",
         "args": [
             "--apply",

@@ -3,7 +3,7 @@
 Read-only integration audit for the photo sorting pipeline.
 
 This catches cross-script bugs that individual scripts can miss, for example:
-  - daily steps ordered so a cleanup moves files after cache refresh
+  - daily steps ordered so file-moving cleanup happens before cache refresh
   - face.py actions pointing at missing scripts
   - cache entries pointing at moved/deleted files
   - exact/same-pixel duplicate report still asking for moves after cleanup
@@ -83,8 +83,7 @@ def check_daily_order(findings: list[Finding]) -> None:
         ("exact-dedupe", "cache-rehydrate"),
         ("advanced-dedupe", "cache-rehydrate"),
         ("cleanup-empty", "cache-rehydrate"),
-        ("cache-rehydrate", "smart-albums"),
-        ("smart-albums", "integration-audit"),
+        ("cache-rehydrate", "integration-audit"),
         ("integration-audit", "status"),
     ]
     bad = [

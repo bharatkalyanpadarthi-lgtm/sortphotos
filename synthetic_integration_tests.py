@@ -128,8 +128,7 @@ def test_daily_order_is_safe(tmp: Path) -> None:
         ("exact-dedupe", "cache-rehydrate"),
         ("advanced-dedupe", "cache-rehydrate"),
         ("cleanup-empty", "cache-rehydrate"),
-        ("cache-rehydrate", "smart-albums"),
-        ("smart-albums", "integration-audit"),
+        ("cache-rehydrate", "integration-audit"),
         ("integration-audit", "status"),
     ]
     for before, after in required:
@@ -145,13 +144,8 @@ def test_daily_commands_are_non_destructive_for_duplicates(tmp: Path) -> None:
         script = Path(cmd[1]).name if len(cmd) > 1 and cmd[1].endswith(".py") else ""
         if step["name"] == "process":
             assert_true("--skip-output-cleanup" in cmd, "daily process must skip sort_photos automatic cleanup")
-        if step["name"] == "smart-albums":
-            assert_true("--max-framing-checks-per-person" in cmd,
-                        "daily smart albums must cap per-person framing checks")
-            assert_true("--max-people-per-run" in cmd,
-                        "daily smart albums must cap changed people per run")
-            assert_true("--no-detect-nudity" in cmd,
-                        "daily smart albums should not run the heavy nudity detector")
+        assert_true(step["name"] != "smart-albums",
+                    "daily must not rebuild smart albums; run face.py smart-albums manually")
         if script in {"delete_person_folder_duplicates.py", "advanced_duplicate_matching.py"}:
             assert_true("--apply" not in cmd, f"daily {step['name']} must not apply duplicate moves")
             assert_true("--quarantine-bad" not in cmd, f"daily {step['name']} must not quarantine in duplicate scan")

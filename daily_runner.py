@@ -10,6 +10,9 @@ If a step fails or the run is interrupted, resume with:
 
 Preview without moving files:
   python face.py daily --dry-run
+
+Smart albums are intentionally not part of the daily ingest. Run
+`python face.py smart-albums` when you want to refresh generated views.
 """
 
 from __future__ import annotations
@@ -436,20 +439,6 @@ def step_list(batch_size: int) -> list[dict]:
          "cmd": [py, str(SCRIPT_DIR / "cleanup_empty_person_folders.py"), "--apply", "--quiet"]},
         {"name": "cache-rehydrate", "desc": "Refresh face cache after all file-moving cleanup",
          "cmd": [py, str(SCRIPT_DIR / "cache_tools.py"), "rehydrate", "--apply", "--batch-size", str(batch_size)], "heavy": True},
-        {"name": "smart-albums", "desc": "Refresh changed smart albums",
-         "cmd": [
-             py,
-             str(SCRIPT_DIR / "build_smart_albums.py"),
-             "--apply",
-             "--incremental",
-             "--no-detect-nudity",
-             "--framing-det-size",
-             "640",
-             "--max-framing-checks-per-person",
-             "300",
-             "--max-people-per-run",
-             "25",
-         ], "heavy": True},
         {"name": "unknown-triage", "desc": "Write unknown-cluster triage report",
          "cmd": [py, str(SCRIPT_DIR / "unknown_triage.py"), "--quiet"]},
         {"name": "integration-audit", "desc": "Verify final cross-script invariants",
