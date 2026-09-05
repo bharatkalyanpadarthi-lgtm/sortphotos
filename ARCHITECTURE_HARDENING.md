@@ -151,3 +151,12 @@ A concurrent live run exposed another synthetic-test isolation gap: two gate
 tests could open the user's analysis database. They now use temporary analysis
 databases and explicit temporary confirmed/protected datasets. All 140 synthetic
 checks and 73 focused tests pass after these changes.
+
+The real isolated run subsequently completed fresh detection for all 3,094
+images and scored 4,016 usable faces. It refused baseline creation: eight rows
+disagreed with the supplied labels/counts. Strict precision was 98.17% and recall
+13.96%; these are not complete daily-ingest acceptance metrics. Some discrepancies
+are configured aliases or incomplete multi-face annotations, so they must not all
+be described as proven wrong-person assignments. A saved annotation changed after
+this older evaluator loaded its dataset; its report is diagnostic, not a baseline
+for the newer CSV. The new version guard covers future runs. No model was promoted.
