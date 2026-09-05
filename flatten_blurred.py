@@ -28,7 +28,9 @@ import shutil
 import sys
 from pathlib import Path
 
-DEFAULT_DIR    = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
+import pipeline_paths
+
+DEFAULT_DIR    = pipeline_paths.PEOPLE_ROOT
 BLURRED_DIR    = "_blurred"
 DUPLICATES_DIR = "_duplicates"
 

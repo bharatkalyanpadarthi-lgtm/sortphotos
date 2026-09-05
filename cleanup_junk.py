@@ -33,6 +33,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import pipeline_paths
+
 # Re-use the cache schema. Pickle was written with sort_photos as __main__,
 # so we alias the dataclasses into __main__ before any load_*() call.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -50,7 +52,7 @@ for _name in ("CacheState", "CachedFace", "FaceRecord", "LabelingState"):
 
 JUNK_LABEL = "__junk__"
 DEFAULT_INPUT = Path.home() / "Pictures"
-DEFAULT_OUTPUT = Path.home() / "Pictures" / "sorted_all_pictures"
+DEFAULT_OUTPUT = pipeline_paths.SORTED_ROOT
 JUNK_HOLDING_DIR = DEFAULT_OUTPUT / "junk_to_review"
 
 

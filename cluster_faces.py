@@ -19,6 +19,8 @@ import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import pipeline_paths
 from typing import Iterable
 
 import cv2
@@ -30,7 +32,7 @@ from tqdm import tqdm
 # CONFIG
 # =============================================================================
 
-INPUT_DIR  = Path.home() / "Pictures" / "To Process"
+INPUT_DIR  = pipeline_paths.TO_PROCESS
 OUTPUT_DIR = Path.home() / "Pictures" / "face_clusters"
 
 # "Clearly visible" thresholds (same as crop_faces.py)

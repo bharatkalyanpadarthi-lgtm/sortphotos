@@ -17,6 +17,8 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+import pipeline_paths
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sort_photos  # noqa: E402
 
@@ -26,7 +28,7 @@ for _name in ("CacheState", "CachedFace", "FaceRecord", "LabelingState", "Identi
 
 DEFAULT_STATE = Path.home() / ".face_sort_cache" / "labeling_state.pkl"
 DEFAULT_OUTPUT_DIR = (
-    Path.home() / "Pictures" / "sorted_all_pictures" / "_source_review" / "unknown_triage"
+    pipeline_paths.SOURCE_REVIEW / "unknown_triage"
 )
 
 

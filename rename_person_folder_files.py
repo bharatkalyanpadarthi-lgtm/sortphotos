@@ -29,12 +29,14 @@ import sys
 import time
 from pathlib import Path
 
+import pipeline_paths
+
 import source_guard
 import source_manifest
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
               ".tif", ".tiff", ".heic", ".heif", ".gif"}
-DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
+DEFAULT_PEOPLE = pipeline_paths.PEOPLE_ROOT
 SKIP_DIRS = {
     "all",
     "_smart_albums",
@@ -268,6 +270,14 @@ def simple_filename(prefix: str, index: int, suffix: str, copy_number: int | Non
     return f"{prefix}_{index:0{SIMPLE_WIDTH}d}{copy_part}{suffix}"
 
 
+def is_normalized_simple(path: Path, prefix: str) -> bool:
+    return re.fullmatch(
+        rf"{re.escape(prefix)}_\d{{{SIMPLE_WIDTH}}}",
+        path.stem,
+        re.IGNORECASE,
+    ) is not None
+
+
 def iter_simple_images(person_dir: Path) -> list[Path]:
     images: list[Path] = []
     for path in iter_images(person_dir):
@@ -313,7 +323,8 @@ def next_unassigned_index(used_indices: set[int], start: int) -> int:
     return candidate
 
 
-def plan_for_person_simple(person_dir: Path) -> list[dict[str, object]]:
+def plan_for_person_simple(person_dir: Path,
+                           repair_numbering: bool = False) -> list[dict[str, object]]:
     images = iter_simple_images(person_dir)
     if not images:
         return []
@@ -326,12 +337,39 @@ def plan_for_person_simple(person_dir: Path) -> list[dict[str, object]]:
     used_target_keys: set[str] = set()
     actions: list[dict[str, object]] = []
 
+    paths_by_index: dict[int, list[Path]] = {}
+    for src in sorted_images:
+        index = parsed_index(src, prefix)
+        if index is not None:
+            paths_by_index.setdefault(index, []).append(src)
+
+    index_keepers: dict[int, Path] = {}
+    if repair_numbering:
+        for index, paths in paths_by_index.items():
+            index_keepers[index] = min(
+                paths,
+                key=lambda path: (
+                    0 if is_normalized_simple(path, prefix) else 1,
+                    1 if re.search(r"_copy\d+$", path.stem, re.IGNORECASE) else 0,
+                    len(path.relative_to(person_dir).parts),
+                    str(path.relative_to(person_dir)).casefold(),
+                ),
+            )
+
     for src in sorted_images:
         rel = src.relative_to(person_dir)
         existing_index = parsed_index(src, prefix)
         assigned_index = existing_index
         assigned_reason = "preserved"
-        if assigned_index is None:
+        if (
+            repair_numbering
+            and assigned_index is not None
+            and index_keepers.get(assigned_index) != src
+        ):
+            assigned_index = next_unassigned_index(used_indices, next_index)
+            next_index = assigned_index + 1
+            assigned_reason = "reassigned_duplicate_index"
+        elif assigned_index is None:
             assigned_index = next_unassigned_index(used_indices, next_index)
             next_index = assigned_index + 1
             assigned_reason = "assigned"
@@ -340,7 +378,7 @@ def plan_for_person_simple(person_dir: Path) -> list[dict[str, object]]:
         copy_number: int | None = None
         dest = target_dir / simple_filename(prefix, assigned_index, src.suffix)
         dest_key = path_key(dest)
-        if dest_key in used_target_keys and not same_existing_path(src, dest):
+        if not repair_numbering and dest_key in used_target_keys and not same_existing_path(src, dest):
             copy_number = 2
             while True:
                 candidate = target_dir / simple_filename(prefix, assigned_index, src.suffix, copy_number)
@@ -543,6 +581,9 @@ def main() -> int:
                         help="Renumber each person from 0001. Default preserves existing numbers.")
     parser.add_argument("--simple", action="store_true",
                         help="Use simple Person_00001.ext names and flatten nested photos/ originals.")
+    parser.add_argument("--repair-numbering", action="store_true",
+                        help="With --simple, normalize five-digit names and assign a unique person-wide index "
+                             "to reused indices and _copyN entries. Review the dry-run CSV before --apply.")
     parser.add_argument("--apply", action="store_true",
                         help="Rename files. Default is dry-run.")
     parser.add_argument("--report-csv", type=Path, default=None,
@@ -578,7 +619,10 @@ def main() -> int:
         images = iter_simple_images(person_dir) if args.simple else iter_images(person_dir)
         image_count += len(images)
         if args.simple:
-            simple_actions.extend(plan_for_person_simple(person_dir))
+            simple_actions.extend(plan_for_person_simple(
+                person_dir,
+                repair_numbering=args.repair_numbering,
+            ))
         else:
             all_actions.extend(plan_for_person(person_dir, compact=args.compact))
 

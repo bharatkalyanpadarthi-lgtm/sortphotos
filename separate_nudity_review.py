@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""
-Separate possible nudity images into a review folder using NudeNet.
+"""Classify normal person images with the shared high-precision policy.
 
-The script scans person folders and copies flagged images to:
-  ~/Pictures/sorted_all_pictures/_nudity_review/possible_nudity
-
-It leaves photos_by_person untouched unless --move is used. The follow-up
-placer moves flagged originals into per-person photos/nude folders.
-Default is dry-run; use --apply to copy/move files.
+The normal full-library workflow writes a report without duplicating images.
+The follow-up placer moves confirmed images into photos/nude and ambiguous
+explicit detections into each person's review/uncertain_nudity folder.
+Default is dry-run; use --apply to write the report.
 """
 
 from __future__ import annotations
@@ -20,15 +17,18 @@ import shutil
 import sys
 import time
 from pathlib import Path
+
+import pipeline_paths
 from typing import Any
 
-import operation_ledger
+import analysis_index
+import sort_photos
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
               ".tif", ".tiff", ".heic", ".heif"}
-DEFAULT_INPUT = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
-DEFAULT_OUTPUT = Path.home() / "Pictures" / "sorted_all_pictures" / "_nudity_review"
-POLICY_VERSION = "3"
+DEFAULT_INPUT = pipeline_paths.PEOPLE_ROOT
+DEFAULT_OUTPUT = pipeline_paths.SORTED_ROOT / "_nudity_review"
+POLICY_VERSION = "7-spatial-conflicts"
 EXCLUDED_DIRS = {
     "all",
     "photos/nude",
@@ -42,23 +42,8 @@ EXCLUDED_DIRS = {
     "_uncertain_nudity",
     "review",
 }
-NUDITY_THRESHOLD = 0.70
-NUDITY_UNCERTAIN_THRESHOLD = 0.45
-CLASS_THRESHOLDS = {
-    "FEMALE_BREAST_EXPOSED": 0.72,
-    "BUTTOCKS_EXPOSED": 0.72,
-    "FEMALE_GENITALIA_EXPOSED": 0.55,
-    "MALE_GENITALIA_EXPOSED": 0.55,
-    "ANUS_EXPOSED": 0.55,
-}
-
-EXPLICIT_CLASSES = {
-    "FEMALE_BREAST_EXPOSED",
-    "FEMALE_GENITALIA_EXPOSED",
-    "MALE_GENITALIA_EXPOSED",
-    "BUTTOCKS_EXPOSED",
-    "ANUS_EXPOSED",
-}
+NUDITY_THRESHOLD = sort_photos.NUDITY_THRESHOLD
+NUDITY_UNCERTAIN_THRESHOLD = sort_photos.NUDITY_UNCERTAIN_THRESHOLD
 
 
 def iter_images(root: Path) -> list[Path]:
@@ -154,10 +139,14 @@ def decode_for_detector(path: Path, suppress_warnings: bool = True) -> tuple[Any
 
         try:
             import numpy as np
-            from PIL import Image, ImageFile
+            from PIL import Image, ImageFile, ImageOps
+            import pillow_heif
 
             ImageFile.LOAD_TRUNCATED_IMAGES = True
+            if hasattr(pillow_heif, "register_heif_opener"):
+                pillow_heif.register_heif_opener()
             with Image.open(path) as im:
+                im = ImageOps.exif_transpose(im)
                 im.load()
                 return np.array(im.convert("RGBA")), ""
         except Exception as e:  # noqa: BLE001
@@ -223,37 +212,22 @@ def unique_dest(dest: Path) -> Path:
 def classify_detections(detections: list[dict],
                         threshold: float,
                         uncertain_threshold: float) -> tuple[str, str, float]:
-    explicit = [
-        d for d in detections
-        if d.get("class") in EXPLICIT_CLASSES
-    ]
-    if not explicit:
-        return "safe", "", 0.0
-
-    best = max(explicit, key=lambda d: float(d.get("score", 0.0)))
-    best_class = str(best.get("class", ""))
-    best_score = float(best.get("score", 0.0))
-    class_threshold = max(threshold, CLASS_THRESHOLDS.get(best_class, threshold))
-
-    if best_score >= class_threshold:
-        return "possible_nudity", best_class, best_score
-    if best_score >= uncertain_threshold:
-        return "possible_nudity", best_class, best_score
-    return "safe", best_class, best_score
+    # Kept in the signature for CLI compatibility. Classification thresholds
+    # are centralized in sort_photos so manual and daily runs cannot diverge.
+    del threshold, uncertain_threshold
+    decision, best_class, best_score, _reason = sort_photos.nudity_decision(detections)
+    # On a broad scan, no anatomy detection is ordinary safe content. The
+    # stricter audit behavior is reserved for files already inside nude.
+    if decision == "needs_review" and not best_class:
+        decision = "likely_safe"
+    return decision, best_class, best_score
 
 
 def copy_or_move(src: Path, dest: Path, move: bool) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
     if move:
-        operation_ledger.move_path(
-            src,
-            dest,
-            sorted_root=Path.home() / "Pictures" / "sorted_all_pictures",
-            operation="separate_nudity_review.move_to_review",
-            reason="move nudity candidate into review folder",
-        )
-    else:
-        shutil.copy2(str(src), str(dest))
+        raise ValueError("moving protected originals out of photos_by_person is disabled")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(src), str(dest))
 
 
 def main() -> int:
@@ -264,23 +238,28 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true",
                         help="Copy flagged images to review folders. Default is dry-run.")
     parser.add_argument("--move", action="store_true",
-                        help="Move flagged images instead of copying them. Use carefully.")
+                        help="Deprecated and disabled: protected originals are never moved to review output.")
     parser.add_argument("--threshold", type=float, default=NUDITY_THRESHOLD,
-                        help=f"Score needed for possible_nudity. Default: {NUDITY_THRESHOLD:.2f}")
+                        help="Deprecated compatibility option; the shared policy is always used.")
     parser.add_argument("--uncertain-threshold", type=float, default=NUDITY_UNCERTAIN_THRESHOLD,
-                        help=f"Lower score still sent to possible_nudity. Default: {NUDITY_UNCERTAIN_THRESHOLD:.2f}")
+                        help="Deprecated compatibility option; the shared policy is always used.")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--limit", type=int, default=0,
                         help="Only scan first N images, useful for testing.")
     parser.add_argument("--copy-safe", action="store_true",
                         help="Also copy safe images to _nudity_review/safe.")
+    parser.add_argument(
+        "--no-export-copies",
+        action="store_true",
+        help="Write the complete report without duplicating images into _nudity_review.",
+    )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--show-codec-warnings", action="store_true",
                         help="Show low-level JPEG/PNG decoder warnings.")
     args = parser.parse_args()
 
-    if args.move and not args.apply:
-        print("ERROR: --move requires --apply.")
+    if args.move:
+        print("ERROR: --move is disabled. Review export may only copy protected originals.")
         return 1
     if args.uncertain_threshold > args.threshold:
         print("ERROR: --uncertain-threshold cannot be above --threshold.")
@@ -309,62 +288,125 @@ def main() -> int:
     print(f"Input:              {input_dir}")
     print(f"Output:             {output_dir}")
     print(f"Images to scan:     {len(images)}")
-    print(f"Mode:               {'MOVE' if args.move else 'COPY'} {'APPLY' if args.apply else 'DRY-RUN'}")
-    print(f"Thresholds:         possible={args.threshold:.2f}, lower_possible={args.uncertain_threshold:.2f}")
+    print(f"Mode:               COPY {'APPLY' if args.apply else 'DRY-RUN'}")
+    print(f"Policy:             {POLICY_VERSION} (shared with daily ingest)")
     print()
 
-    detector = NudeDetector()
-    counts = {"possible_nudity": 0, "uncertain": 0, "safe": 0, "error": 0}
+    detector = None
+    counts = {
+        "confirmed_nude": 0,
+        "needs_review": 0,
+        "likely_safe": 0,
+        "error": 0,
+        "cache_hits": 0,
+        "model_scans": 0,
+    }
     rows: list[dict[str, str]] = []
     actions: list[tuple[str, Path, Path]] = []
+    asset_index = analysis_index.AnalysisIndex(sort_photos.analysis_index_file())
 
     scanned = 0
-    for batch in chunks(images, max(1, args.batch_size)):
-        results = detect_batch_safely(
-            detector,
-            batch,
-            batch_size=len(batch),
-            suppress_warnings=not args.show_codec_warnings,
-        )
-
-        for src, detections in zip(batch, results):
-            scanned += 1
-            if isinstance(detections, dict) and "__error__" in detections:
-                category, best_class, best_score = "error", "ERROR", 0.0
-                detail = detections["__error__"]
-            else:
-                category, best_class, best_score = classify_detections(
-                    detections, args.threshold, args.uncertain_threshold)
-                detail = ";".join(
-                    f"{d.get('class')}:{float(d.get('score', 0.0)):.3f}"
-                    for d in detections
+    try:
+        for batch in chunks(images, max(1, args.batch_size)):
+            results: list[list[dict] | dict | None] = [None] * len(batch)
+            uncached_paths: list[Path] = []
+            uncached_indexes: list[int] = []
+            for index, src in enumerate(batch):
+                cached = asset_index.cached_nudity(
+                    src,
+                    sort_photos.NUDITY_ANALYSIS_VERSION,
                 )
+                detections = cached[1] if cached is not None else None
+                if detections is None:
+                    fingerprint = asset_index.fingerprint(src)
+                    sha256 = (
+                        fingerprint.sha256
+                        if fingerprint is not None
+                        else asset_index.file_sha256(src)
+                    )
+                    if sha256:
+                        detections = asset_index.cached_nudity_detections_by_sha256(sha256)
+                if detections is None:
+                    uncached_paths.append(src)
+                    uncached_indexes.append(index)
+                else:
+                    results[index] = detections
+                    counts["cache_hits"] += 1
 
-            counts[category] += 1
-            rel = src.relative_to(input_dir)
-            rows.append({
-                "policy_version": POLICY_VERSION,
-                "category": category,
-                "best_class": best_class,
-                "best_score": f"{best_score:.3f}",
-                "threshold": f"{args.threshold:.3f}",
-                "uncertain_threshold": f"{args.uncertain_threshold:.3f}",
-                "source": str(src),
-                "relative_path": str(rel),
-                "detections": detail,
-            })
+            if uncached_paths:
+                if detector is None:
+                    detector = NudeDetector()
+                fresh = detect_batch_safely(
+                    detector,
+                    uncached_paths,
+                    batch_size=len(uncached_paths),
+                    suppress_warnings=not args.show_codec_warnings,
+                )
+                for index, detections in zip(uncached_indexes, fresh):
+                    results[index] = detections
+                    counts["model_scans"] += 1
 
-            should_export = category == "possible_nudity" or (
-                category == "safe" and args.copy_safe)
-            if should_export:
-                dest = unique_dest(output_dir / category / rel)
-                actions.append((category, src, dest))
+            for src, detections in zip(batch, results):
+                scanned += 1
+                if detections is None:
+                    detections = {"__error__": "missing_detector_result"}
+                if isinstance(detections, dict) and "__error__" in detections:
+                    category, best_class, best_score = "error", "ERROR", 0.0
+                    detail = detections["__error__"]
+                else:
+                    category, best_class, best_score = classify_detections(
+                        detections, args.threshold, args.uncertain_threshold)
+                    detail_parts: list[str] = []
+                    for detection in detections:
+                        try:
+                            score = float(detection.get("score", 0.0))
+                        except (TypeError, ValueError):
+                            score = 0.0
+                        detail_parts.append(f"{detection.get('class')}:{score:.3f}")
+                    detail = ";".join(detail_parts)
+                    status = {
+                        "confirmed_nude": "possible",
+                        "needs_review": "uncertain",
+                        "likely_safe": "safe",
+                    }[category]
+                    asset_index.record_nudity(
+                        src,
+                        model=sort_photos.NUDITY_ANALYSIS_VERSION,
+                        status=status,
+                        detections=detections,
+                    )
 
-        if not args.quiet and (scanned == len(images) or scanned % 250 == 0):
-            print(f"Scanned {scanned}/{len(images)} "
-                  f"(possible={counts['possible_nudity']}, "
-                  f"safe={counts['safe']}, "
-                  f"errors={counts['error']})")
+                counts[category] += 1
+                rel = src.relative_to(input_dir)
+                rows.append({
+                    "policy_version": POLICY_VERSION,
+                    "category": category,
+                    "best_class": best_class,
+                    "best_score": f"{best_score:.3f}",
+                    "threshold": f"{args.threshold:.3f}",
+                    "uncertain_threshold": f"{args.uncertain_threshold:.3f}",
+                    "source": str(src),
+                    "relative_path": str(rel),
+                    "detections": detail,
+                })
+
+                should_export = category in {"confirmed_nude", "needs_review"} or (
+                    category == "likely_safe" and args.copy_safe)
+                if should_export and not args.no_export_copies:
+                    dest = unique_dest(output_dir / category / rel)
+                    actions.append((category, src, dest))
+
+            asset_index.commit()
+            if not args.quiet and (scanned == len(images) or scanned % 250 == 0):
+                print(f"Scanned {scanned}/{len(images)} "
+                      f"(confirmed={counts['confirmed_nude']}, "
+                      f"review={counts['needs_review']}, "
+                      f"safe={counts['likely_safe']}, "
+                      f"errors={counts['error']}, "
+                      f"cache={counts['cache_hits']}, "
+                      f"model={counts['model_scans']})", flush=True)
+    finally:
+        asset_index.close()
 
     if args.apply:
         with report_path.open("w", newline="", encoding="utf-8") as f:
@@ -379,9 +421,12 @@ def main() -> int:
 
     print()
     print("---- Results ----")
-    print(f"Possible nudity: {counts['possible_nudity']}")
-    print(f"Safe:            {counts['safe']}")
+    print(f"Confirmed nude:  {counts['confirmed_nude']}")
+    print(f"Needs review:    {counts['needs_review']}")
+    print(f"Likely safe:     {counts['likely_safe']}")
     print(f"Errors:          {counts['error']}")
+    print(f"Cache reused:    {counts['cache_hits']}")
+    print(f"Model scans:     {counts['model_scans']}")
     print(f"Files to export: {len(actions)}")
     print()
 

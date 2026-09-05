@@ -23,6 +23,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+import pipeline_paths
+
 import cv2
 import numpy as np
 
@@ -30,7 +32,7 @@ import operation_ledger
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
               ".tif", ".tiff", ".heic", ".heif"}
-DEFAULT_SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
+DEFAULT_SORTED = pipeline_paths.SORTED_ROOT
 DEFAULT_PHOTOS = DEFAULT_SORTED / "photos_by_person"
 DEFAULT_REVIEW = DEFAULT_SORTED / "_source_review" / "ready_to_delete" / "advanced_duplicates"
 DEFAULT_REPORT = DEFAULT_SORTED / "_source_review" / "duplicate_reports" / "advanced_duplicates.csv"
@@ -95,20 +97,35 @@ class DuplicateMember:
     distance: int | None = None
 
 
+def scan_roots(root: Path) -> list[Path]:
+    direct_photos = root / "photos"
+    if direct_photos.is_dir():
+        return [direct_photos]
+    person_photos = [
+        child / "photos"
+        for child in root.iterdir()
+        if child.is_dir()
+        and not child.name.startswith((".", "_"))
+        and (child / "photos").is_dir()
+    ]
+    return sorted(person_photos, key=lambda p: str(p).casefold()) or [root]
+
+
 def iter_images(root: Path) -> list[Path]:
     out: list[Path] = []
     if not root.exists():
         return out
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [
-            d for d in dirnames
-            if not d.startswith(".") and d.casefold() not in ALWAYS_EXCLUDED_DIRS
-        ]
-        base = Path(dirpath)
-        for filename in filenames:
-            p = base / filename
-            if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
-                out.append(p)
+    for scan_root in scan_roots(root):
+        for dirpath, dirnames, filenames in os.walk(scan_root):
+            dirnames[:] = [
+                d for d in dirnames
+                if not d.startswith(".") and d.casefold() not in ALWAYS_EXCLUDED_DIRS
+            ]
+            base = Path(dirpath)
+            for filename in filenames:
+                p = base / filename
+                if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
+                    out.append(p)
     return out
 
 

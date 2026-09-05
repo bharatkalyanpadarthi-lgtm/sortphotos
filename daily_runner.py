@@ -21,19 +21,22 @@ import argparse
 import csv
 import json
 import os
+import selectors
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import source_manifest
+import pipeline_paths
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
+SORTED = pipeline_paths.SORTED_ROOT
 PEOPLE = SORTED / "photos_by_person"
 SOURCE_REVIEW = SORTED / "_source_review"
 READY = SOURCE_REVIEW / "ready_to_delete"
-TO_PROCESS = Path.home() / "Pictures" / "To Process"
+TO_PROCESS = pipeline_paths.TO_PROCESS
+LEGACY_VIDEO_INBOX = Path.home() / "Pictures" / "videos"
 STATE_FILE = Path.home() / ".face_sort_cache" / "daily_run_state.json"
 SUMMARY_DIR = SOURCE_REVIEW / "daily_run_summaries"
 ADV_REPORT = SOURCE_REVIEW / "duplicate_reports" / "advanced_duplicates.csv"
@@ -86,6 +89,30 @@ def count_files(root: Path) -> int:
     if not root.exists():
         return 0
     return sum(1 for p in root.rglob("*") if p.is_file())
+
+
+def tree_contains_media(root: Path, extensions: set[str]) -> bool:
+    """Return after finding the first supported file instead of counting a tree."""
+    if not root.exists():
+        return False
+    try:
+        for current_root, _dirs, files in os.walk(root):
+            if any(Path(name).suffix.lower() in extensions for name in files):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def intake_has_media(
+    to_process: Path = TO_PROCESS,
+    legacy_video_inbox: Path = LEGACY_VIDEO_INBOX,
+) -> bool:
+    """Cheap gate used before the expensive full-library daily snapshot."""
+    return (
+        tree_contains_media(to_process, IMAGE_EXTS | VIDEO_EXTS)
+        or tree_contains_media(legacy_video_inbox, VIDEO_EXTS)
+    )
 
 
 def original_person_counts() -> dict[str, int]:
@@ -214,10 +241,12 @@ def check_source_manifest(state: dict, stage: str) -> source_manifest.ManifestVa
         "size_changed": len(result.size_changed),
         "renamed": len(result.renamed),
         "extra": len(result.extra),
+        "app_trashed": len(result.app_trashed),
         "missing_csv": str(result.missing_csv),
         "changed_csv": str(result.changed_csv),
         "renamed_csv": str(result.renamed_csv),
         "extra_csv": str(result.extra_csv),
+        "app_trashed_csv": str(result.app_trashed_csv),
     }
     return result
 
@@ -318,15 +347,56 @@ def snapshot() -> dict:
     return {
         "to_process_images": count_images(TO_PROCESS, exclude_generated_dirs=False),
         "to_process_videos": count_videos(TO_PROCESS, exclude_generated_dirs=False),
-        "organized_images": count_images(PEOPLE),
+        "legacy_videos": count_videos(LEGACY_VIDEO_INBOX, exclude_generated_dirs=False),
+        "organized_images": original_person_total(original_counts),
         "person_original_images": original_person_total(original_counts),
         "person_folders": len(original_counts),
+        "person_videos": count_videos(PEOPLE),
         "nudity_images": nudity_count(),
         "ready_to_delete_files": count_files(READY),
         "ready_to_delete_size": size_bytes(READY),
         "organized_sources_files": count_files(READY / "organized_sources"),
         "scanned_sources_files": count_files(READY / "scanned_sources"),
         "intake_duplicates_files": count_files(READY / "intake_duplicates"),
+        "unassigned_no_face": count_images(
+            SOURCE_REVIEW / "unassigned_intake" / "no_usable_face",
+            exclude_generated_dirs=False,
+        ),
+        "unassigned_face_quality": count_images(
+            SOURCE_REVIEW / "unassigned_intake" / "face_quality_review",
+            exclude_generated_dirs=False,
+        ),
+        "unassigned_unknown_identity": count_images(
+            SOURCE_REVIEW / "unassigned_intake" / "unknown_identity",
+            exclude_generated_dirs=False,
+        ),
+        "unassigned_multi_face_review": count_images(
+            SOURCE_REVIEW / "unassigned_intake" / "multi_face_review",
+            exclude_generated_dirs=False,
+        ),
+        "unassigned_copy_failed": count_images(
+            SOURCE_REVIEW / "unassigned_intake" / "copy_failed",
+            exclude_generated_dirs=False,
+        ),
+        "unassigned_processing_failed": count_images(
+            SOURCE_REVIEW / "unassigned_intake" / "processing_failed",
+            exclude_generated_dirs=False,
+        ),
+        "unassigned_unreadable": count_files(
+            SOURCE_REVIEW / "unassigned_intake" / "unreadable_image"
+        ),
+        "video_review_multiple_people": count_videos(
+            SOURCE_REVIEW / "unassigned_intake" / "videos" / "multiple_people",
+            exclude_generated_dirs=False,
+        ),
+        "video_review_unknown_identity": count_videos(
+            SOURCE_REVIEW / "unassigned_intake" / "videos" / "unknown_identity",
+            exclude_generated_dirs=False,
+        ),
+        "video_review_no_usable_face": count_videos(
+            SOURCE_REVIEW / "unassigned_intake" / "videos" / "no_usable_face",
+            exclude_generated_dirs=False,
+        ),
         "unknown_clusters": labels["clusters"],
         "unknown_faces": labels["faces"],
         "near_visual_review": dups["visually_similar"],
@@ -403,7 +473,7 @@ def memory_profile() -> dict:
 
 def empty_inbox_skippable_step_names() -> set[str]:
     """Steps that have nothing useful to do when the intake folder is empty."""
-    return {"process"}
+    return {"video-process", "process"}
 
 
 def cleanup_holding_count() -> int:
@@ -419,17 +489,22 @@ def step_list(batch_size: int) -> list[dict]:
             "cmd": [py, str(SCRIPT_DIR / "preflight_check.py")],
         },
         {
-            "name": "process",
-            "desc": "Process new inbox images",
+            "name": "video-process",
+            "desc": "Identify people in videos and file after one recognized identity frame",
             "cmd": [
-                py, str(SCRIPT_DIR / "sort_photos.py"),
+                py, str(SCRIPT_DIR / "video_batch_runner.py"),
                 str(TO_PROCESS), str(SORTED),
-                "--unattended",
-                "--archive-organized-sources",
-                "--archive-sources-to-ready-delete",
-                "--archive-scanned-sources",
-                "--merge-existing-output",
+            ],
+            "heavy": True,
+        },
+        {
+            "name": "process",
+            "desc": "Process new inbox images in memory-bounded slices",
+            "cmd": [
+                py, str(SCRIPT_DIR / "image_batch_runner.py"),
+                str(TO_PROCESS), str(SORTED),
                 "--skip-output-cleanup",
+                "--max-images-per-process", "5000",
                 "--batch-size", str(batch_size),
                 "--detect-workers", "1",
             ],
@@ -470,10 +545,46 @@ def run_command(cmd: list[str], log_path: Path) -> int:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, bufsize=1, env=env)
         assert proc.stdout is not None
-        for line in proc.stdout:
-            print(line, end="")
-            log.write(line)
-        return proc.wait()
+        selector = selectors.DefaultSelector()
+        selector.register(proc.stdout, selectors.EVENT_READ)
+        started_at = time.monotonic()
+        last_visible_output = started_at
+        command_name = Path(cmd[1] if len(cmd) > 1 else cmd[0]).name
+        try:
+            while True:
+                events = selector.select(timeout=1.0)
+                if events:
+                    line = proc.stdout.readline()
+                    if line:
+                        print(line, end="", flush=True)
+                        log.write(line)
+                        log.flush()
+                        last_visible_output = time.monotonic()
+                        continue
+                    if proc.poll() is not None:
+                        break
+                elif proc.poll() is not None:
+                    break
+
+                now = time.monotonic()
+                if now - last_visible_output >= 30.0:
+                    elapsed_seconds = max(0, int(now - started_at))
+                    heartbeat = (
+                        f"[progress] {command_name} is still working "
+                        f"({elapsed_seconds // 60}m {elapsed_seconds % 60:02d}s elapsed).\n"
+                    )
+                    print(heartbeat, end="", flush=True)
+                    log.write(heartbeat)
+                    log.flush()
+                    last_visible_output = now
+
+            for line in proc.stdout:
+                print(line, end="", flush=True)
+                log.write(line)
+            log.flush()
+            return proc.wait()
+        finally:
+            selector.close()
 
 
 def write_summary(path: Path, state: dict, before: dict, after: dict, status: str) -> None:
@@ -502,10 +613,38 @@ def print_summary(before: dict, after: dict, summary_path: Path) -> None:
     print(f"Original photos before/after:{before.get('person_original_images', 0)} -> {after.get('person_original_images', 0)}")
     print(f"To Process before/after:    {before['to_process_images']} -> {after['to_process_images']}")
     print(f"To Process videos moved:    {before.get('to_process_videos', 0)} -> {after.get('to_process_videos', 0)}")
+    print(f"Legacy videos before/after: {before.get('legacy_videos', 0)} -> {after.get('legacy_videos', 0)}")
+    print(f"New person videos:          {delta(after, before, 'person_videos')}")
+    review_before = sum(
+        int(before.get(key, 0)) for key in (
+            "video_review_multiple_people",
+            "video_review_unknown_identity",
+            "video_review_no_usable_face",
+        )
+    )
+    review_after = sum(
+        int(after.get(key, 0)) for key in (
+            "video_review_multiple_people",
+            "video_review_unknown_identity",
+            "video_review_no_usable_face",
+        )
+    )
+    print(f"New videos needing review:  {review_after - review_before}")
     print(f"Nudity-folder image change: {delta(after, before, 'nudity_images')}")
     print(f"Archived organized sources: +{delta(after, before, 'organized_sources_files')}")
     print(f"Archived scanned sources:   +{delta(after, before, 'scanned_sources_files')}")
     print(f"Archived intake duplicates: +{delta(after, before, 'intake_duplicates_files')}")
+    print(
+        "Needs intake review:       "
+        f"+{delta(after, before, 'unassigned_no_face') + delta(after, before, 'unassigned_face_quality') + delta(after, before, 'unassigned_unknown_identity') + delta(after, before, 'unassigned_multi_face_review') + delta(after, before, 'unassigned_copy_failed') + delta(after, before, 'unassigned_processing_failed') + delta(after, before, 'unassigned_unreadable')} "
+        f"(no face +{delta(after, before, 'unassigned_no_face')}, "
+        f"quality review +{delta(after, before, 'unassigned_face_quality')}, "
+        f"unknown +{delta(after, before, 'unassigned_unknown_identity')}, "
+        f"multi-face +{delta(after, before, 'unassigned_multi_face_review')}, "
+        f"copy failed +{delta(after, before, 'unassigned_copy_failed')}, "
+        f"processing failed +{delta(after, before, 'unassigned_processing_failed')}, "
+        f"unreadable +{delta(after, before, 'unassigned_unreadable')})"
+    )
     print(f"Unknown clusters/faces:     {after['unknown_clusters']} / {after['unknown_faces']}")
     print(f"Near-visual review items:   {after['near_visual_review']}")
     print(f"ready_to_delete size:       {human_size(after['ready_to_delete_size'])}")
@@ -517,6 +656,7 @@ def print_dry_run(steps: list[dict], before: dict, profile: dict,
     empty_inbox = (
         int(before.get("to_process_images", 0)) == 0
         and int(before.get("to_process_videos", 0)) == 0
+        and int(before.get("legacy_videos", 0)) == 0
     )
     print("Daily Dry Run")
     print("=" * 60)
@@ -524,6 +664,7 @@ def print_dry_run(steps: list[dict], before: dict, profile: dict,
     print(f"Input folder:               {TO_PROCESS}")
     print(f"To Process images:          {before['to_process_images']}")
     print(f"To Process videos:          {before.get('to_process_videos', 0)}")
+    print(f"Legacy videos pending:      {before.get('legacy_videos', 0)}")
     print(f"Organized images:           {before['organized_images']}")
     print(f"Original person photos:     {before.get('person_original_images', 0)}")
     print(f"_source_review files:       {cleanup_holding_count():,}")
@@ -535,11 +676,17 @@ def print_dry_run(steps: list[dict], before: dict, profile: dict,
     print("Steps that would run")
     skip_when_empty = empty_inbox_skippable_step_names()
     for index, step in enumerate(steps, start=1):
-        would_skip = empty_inbox and not full_maintenance and step["name"] in skip_when_empty
+        would_skip = empty_inbox and (
+            not full_maintenance or step["name"] in skip_when_empty
+        )
         status = "skip: empty inbox" if would_skip else "run"
         print(f"[{index}/{len(steps)}] {status:18} {step['desc']}")
         print(f"    {' '.join(step['cmd'])}")
     print()
+    if empty_inbox and not full_maintenance:
+        print("Daily would finish immediately because no new images or videos are waiting.")
+        print("Use --full-maintenance to run library maintenance explicitly.")
+        print()
     print("DRY-RUN only. No files were moved, renamed, or deleted.")
 
 
@@ -572,6 +719,14 @@ def main() -> int:
         clear_state()
 
     state = load_state() if args.resume else None
+    if state is None and not args.full_maintenance and not intake_has_media():
+        print("Daily Ingest")
+        print("=" * 60)
+        print("Already current: no new images or videos are waiting in To Process.")
+        print("No library scan or maintenance was run.")
+        print("Use --full-maintenance when you intentionally want a full maintenance pass.")
+        return 0
+
     if state is None:
         profile = memory_profile()
         if not profile["ok"] and not args.ignore_low_memory:
@@ -634,13 +789,14 @@ def main() -> int:
     empty_inbox = (
         int(before.get("to_process_images", 0)) == 0
         and int(before.get("to_process_videos", 0)) == 0
+        and int(before.get("legacy_videos", 0)) == 0
     )
     skip_when_empty = empty_inbox_skippable_step_names()
     for index, step in enumerate(steps, start=1):
         if state["steps"].get(step["name"], {}).get("status") == "completed":
             print(f"[{index}/{len(steps)}] Skipping completed step: {step['desc']}")
             continue
-        if empty_inbox and not args.full_maintenance and step["name"] in skip_when_empty:
+        if empty_inbox and step["name"] in skip_when_empty:
             print(f"[{index}/{len(steps)}] Skipping empty-inbox step: {step['desc']}")
             state["steps"][step["name"]] = {
                 "status": "skipped_empty_inbox",
@@ -664,7 +820,11 @@ def main() -> int:
         print(f"[{index}/{len(steps)}] {step['desc']}")
         state["steps"][step["name"]] = {"status": "running", "started_at": int(time.time())}
         save_state(state)
+        step_started = time.perf_counter()
         rc = run_command(step["cmd"], log_path)
+        elapsed = time.perf_counter() - step_started
+        state.setdefault("timings_seconds", {})[step["name"]] = round(elapsed, 3)
+        print(f"Step timing: {step['name']} {elapsed:.1f}s (exit {rc})", flush=True)
         if rc != 0:
             state["steps"][step["name"]] = {
                 "status": "failed",

@@ -18,10 +18,12 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+import pipeline_paths
+
 import operation_ledger
 import source_manifest
 
-SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
+SORTED = pipeline_paths.SORTED_ROOT
 PEOPLE = SORTED / "photos_by_person"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
 

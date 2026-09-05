@@ -22,11 +22,13 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 
+import pipeline_paths
+
 import operation_ledger
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
               ".tif", ".tiff", ".heic", ".heif"}
-DEFAULT_SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
+DEFAULT_SORTED = pipeline_paths.SORTED_ROOT
 
 
 def iter_images(root: Path, skip_dir_names: set[str] | None = None) -> list[Path]:

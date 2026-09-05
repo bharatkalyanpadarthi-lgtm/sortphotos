@@ -15,10 +15,12 @@ import shutil
 import time
 from pathlib import Path
 
+import pipeline_paths
+
 import operation_ledger
 
-DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
-DEFAULT_READY = Path.home() / "Pictures" / "sorted_all_pictures" / "_source_review" / "ready_to_delete"
+DEFAULT_PEOPLE = pipeline_paths.PEOPLE_ROOT
+DEFAULT_READY = pipeline_paths.SOURCE_REVIEW / "ready_to_delete"
 SKIP_DIRS = {
     "all",
     "_smart_albums",

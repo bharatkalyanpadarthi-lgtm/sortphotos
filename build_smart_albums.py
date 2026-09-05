@@ -38,6 +38,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+import pipeline_paths
+
 import cv2
 import numpy as np
 from sklearn.cluster import DBSCAN
@@ -47,7 +49,7 @@ import source_manifest
 warnings.filterwarnings("ignore", category=FutureWarning, module=r"insightface\..*")
 warnings.filterwarnings("ignore", message=r".*`estimate` is deprecated.*", category=FutureWarning)
 
-DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
+DEFAULT_PEOPLE = pipeline_paths.PEOPLE_ROOT
 DEFAULT_NUDITY_CACHE = Path.home() / ".face_sort_cache" / "smart_album_nudity_cache.json"
 DEFAULT_NUDITY_OVERRIDES = Path.home() / ".face_sort_cache" / "smart_album_nudity_overrides.json"
 DEFAULT_FRAMING_CACHE = Path.home() / ".face_sort_cache" / "smart_album_framing_cache.json"

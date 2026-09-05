@@ -17,14 +17,16 @@ import sys
 import webbrowser
 from pathlib import Path
 
-SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
+import pipeline_paths
+
+SORTED = pipeline_paths.SORTED_ROOT
 SOURCE_REVIEW = SORTED / "_source_review"
 PEOPLE = SORTED / "photos_by_person"
 UNKNOWN_HTML = SOURCE_REVIEW / "unknown_triage" / "unknown_triage.html"
 UNKNOWN_CSV = SOURCE_REVIEW / "unknown_triage" / "unknown_triage.csv"
 DUPLICATE_REVIEW_HTML = SOURCE_REVIEW / "duplicate_reports" / "near_visual_review.html"
 ADV_REPORT = SOURCE_REVIEW / "duplicate_reports" / "advanced_duplicates.csv"
-REF_REPORT = Path.home() / "Pictures" / "Face References" / "_reference_review" / "face_reference_quality_report.csv"
+REF_REPORT = pipeline_paths.FACE_REFERENCES / "_reference_review" / "face_reference_quality_report.csv"
 DASHBOARD = SOURCE_REVIEW / "review_dashboard.html"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
 
@@ -82,6 +84,12 @@ def ensure_reports() -> None:
 def write_dashboard(path: Path) -> None:
     dups = duplicate_summary()
     review_rows = [
+        {
+            "title": "Unassigned intake",
+            "count": count_images(SOURCE_REVIEW / "unassigned_intake"),
+            "detail": "Scanned images that need review because no usable face or confident identity was available.",
+            "link": file_link(SOURCE_REVIEW / "unassigned_intake", "Open unassigned intake"),
+        },
         {
             "title": "Unknown faces",
             "count": csv_count(UNKNOWN_CSV),

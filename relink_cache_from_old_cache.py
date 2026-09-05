@@ -20,6 +20,8 @@ from collections import Counter, defaultdict
 from dataclasses import replace
 from pathlib import Path
 
+import pipeline_paths
+
 import numpy as np
 
 import operation_ledger
@@ -32,7 +34,7 @@ for _name in ("CacheState", "CachedFace", "FaceRecord", "LabelingState", "Identi
 
 CACHE_DIR = Path.home() / ".face_sort_cache"
 DEFAULT_OLD_CACHE = CACHE_DIR / "cache.pkl.bak.mark_small_junk"
-PEOPLE_ROOT = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
+PEOPLE_ROOT = pipeline_paths.PEOPLE_ROOT
 RULES_FILE = Path(__file__).with_name("person_folder_rules.json")
 IMAGE_EXTS = sort_photos.IMAGE_EXTS
 
@@ -143,7 +145,16 @@ def relink_from_rename_plan(old_cache: sort_photos.CacheState,
     for old_src, old_sig in old_cache.file_signatures.items():
         new_src = mapping.get(str(old_src))
         if not new_src:
-            counts["not_in_plan"] += 1
+            old_path = Path(old_src)
+            if not old_path.exists():
+                counts["unchanged_missing"] += 1
+                continue
+            current_sig = sort_photos.file_signature(old_path)
+            if not signatures_equal(old_sig, current_sig):
+                counts["unchanged_signature_mismatch"] += 1
+                continue
+            new_cache.file_signatures[old_src] = current_sig
+            counts["preserved_files"] += 1
             continue
         new_path = Path(new_src)
         if not new_path.exists():
@@ -158,11 +169,16 @@ def relink_from_rename_plan(old_cache: sort_photos.CacheState,
 
     for face in old_cache.faces:
         new_src = mapping.get(str(face.src_str))
-        if not new_src or new_src not in new_cache.file_signatures:
-            counts["unmapped_faces"] += 1
+        if new_src and new_src in new_cache.file_signatures:
+            new_cache.faces.append(replace(face, src_str=new_src))
+            counts["mapped_faces"] += 1
             continue
-        new_cache.faces.append(replace(face, src_str=new_src))
-        counts["mapped_faces"] += 1
+        if not new_src and face.src_str in new_cache.file_signatures:
+            new_cache.faces.append(face)
+            counts["preserved_faces"] += 1
+            continue
+        if new_src or face.src_str not in new_cache.file_signatures:
+            counts["unmapped_faces"] += 1
 
     print()
     print("Cache relink from rename plan")
@@ -170,9 +186,12 @@ def relink_from_rename_plan(old_cache: sort_photos.CacheState,
     print(f"  Plan mappings:        {len(mapping):,}")
     print(f"  Mapped cache files:   {counts['mapped_files']:,}")
     print(f"  Mapped faces:         {counts['mapped_faces']:,}")
-    print(f"  Not in plan:          {counts['not_in_plan']:,}")
+    print(f"  Preserved files:      {counts['preserved_files']:,}")
+    print(f"  Preserved faces:      {counts['preserved_faces']:,}")
     print(f"  Destination missing:  {counts['destination_missing']:,}")
     print(f"  Signature mismatch:   {counts['signature_mismatch']:,}")
+    print(f"  Unchanged missing:    {counts['unchanged_missing']:,}")
+    print(f"  Unchanged mismatch:   {counts['unchanged_signature_mismatch']:,}")
     print(f"  Unmapped faces:       {counts['unmapped_faces']:,}")
     print(f"  Mode:                 {'APPLY' if apply else 'DRY-RUN'}")
 
@@ -180,7 +199,13 @@ def relink_from_rename_plan(old_cache: sort_photos.CacheState,
         print()
         print("DRY-RUN only. Re-run with --apply to write cache.")
         return 0
-    if counts["destination_missing"] or counts["signature_mismatch"]:
+    if (
+        counts["destination_missing"]
+        or counts["signature_mismatch"]
+        or counts["unchanged_missing"]
+        or counts["unchanged_signature_mismatch"]
+        or counts["unmapped_faces"]
+    ):
         print("ERROR: rename-plan relink has missing destinations or signature mismatches.", file=sys.stderr)
         return 2
 
@@ -281,7 +306,9 @@ def relink_from_move_mapping(old_cache: sort_photos.CacheState,
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--old-cache", type=Path, default=DEFAULT_OLD_CACHE)
+    parser.add_argument("--old-cache", type=Path, default=None,
+                        help="Cache used as the relink source. Rename-plan and ledger modes default to "
+                             "the live cache; full recovery defaults to the historical recovery cache.")
     parser.add_argument("--people-root", type=Path, default=PEOPLE_ROOT)
     parser.add_argument("--rename-plan-csv", type=Path, default=None,
                         help="Exact rename plan CSV from rename_person_folder_files.py. "
@@ -291,7 +318,7 @@ def main() -> int:
     parser.add_argument("--ledger-operation", default="place_nudity_inside_person_folders.move_to_nude",
                         help="Ledger operation to use with --ledger-run-id. "
                              "Default: place_nudity_inside_person_folders.move_to_nude.")
-    parser.add_argument("--sorted-root", type=Path, default=Path.home() / "Pictures" / "sorted_all_pictures",
+    parser.add_argument("--sorted-root", type=Path, default=pipeline_paths.SORTED_ROOT,
                         help="Sorted root for operation ledgers.")
     parser.add_argument("--identity-max-faces", type=int, default=80)
     parser.add_argument("--include-unmatched-signatures", action="store_true",
@@ -303,7 +330,12 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
-    old_cache_path = args.old_cache.expanduser()
+    if args.old_cache is not None:
+        old_cache_path = args.old_cache.expanduser()
+    elif args.rename_plan_csv is not None or args.ledger_run_id:
+        old_cache_path = sort_photos.CACHE_FILE
+    else:
+        old_cache_path = DEFAULT_OLD_CACHE
     people_root = args.people_root.expanduser()
     if not old_cache_path.exists():
         print(f"ERROR: old cache not found: {old_cache_path}")
@@ -392,10 +424,31 @@ def main() -> int:
     for person, vectors in sorted(identity_vectors.items(), key=lambda x: x[0].casefold()):
         if not vectors:
             continue
-        selected = vectors[:max_faces] if max_faces else vectors
-        centroid = np.mean(np.stack(selected), axis=0)
-        identity_db.identities[person] = l2norm(centroid[None, :])[0]
-        identity_db.source_counts[person] = len(selected)
+        candidates = vectors[:max_faces] if max_faces else vectors
+        samples = [
+            sort_photos.identity_profiles.ReferenceSample(
+                source=f"cache:{person}:{index}", embedding=vector, quality=1.0)
+            for index, vector in enumerate(candidates)
+        ]
+        selected = sort_photos.identity_profiles.select_diverse_samples(
+            samples, limit=sort_photos.IDENTITY_MAX_PROTOTYPES_PER_PERSON)
+        centroid = sort_photos.identity_profiles.weighted_centroid(selected)
+        prototypes = [
+            sort_photos.identity_profiles.normalize_vector(sample.embedding)
+            for sample in selected
+        ]
+        consensus, strict = sort_photos.identity_profiles.calibrated_thresholds(
+            samples,
+            centroid,
+            prototypes,
+            maximum_consensus_distance=sort_photos.AUTO_PERSON_MATCH_DIST,
+        )
+        identity_db.identities[person] = centroid
+        identity_db.prototypes[person] = prototypes
+        identity_db.prototype_sources[person] = [sample.source for sample in selected]
+        identity_db.match_thresholds[person] = consensus
+        identity_db.strict_thresholds[person] = strict
+        identity_db.source_counts[person] = len(candidates)
 
     print()
     print("Fast cache relink")

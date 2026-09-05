@@ -21,6 +21,8 @@ import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+import pipeline_paths
 from typing import Iterable
 
 import cv2
@@ -33,7 +35,7 @@ from tqdm import tqdm
 
 #  Resolves to /Users/<your-mac-username>/Pictures/...
 #  Edit the folder names below if yours differ.
-INPUT_DIR  = Path.home() / "Pictures" / "To Process"     # 500+ source images
+INPUT_DIR  = pipeline_paths.TO_PROCESS     # 500+ source images
 OUTPUT_DIR = Path.home() / "Pictures" / "face_crops"     # crops will be written here
 
 # "Clearly visible" thresholds

@@ -2,8 +2,9 @@
 """Maintain and validate the protected manifest of original person photos.
 
 This is stronger than a per-run count guard. It records every canonical original
-inside photos_by_person/<person>/photos/ and blocks later operations if a known
-original disappears before cache or smart-album indexes are refreshed.
+inside photos_by_person/<person>/photos/ plus recoverable uncertain-nudity
+originals, and blocks later operations if a known original disappears before
+cache or smart-album indexes are refreshed.
 """
 
 from __future__ import annotations
@@ -22,8 +23,9 @@ from pathlib import Path
 from typing import Any
 
 import operation_ledger
+import pipeline_paths
 
-SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
+SORTED = pipeline_paths.SORTED_ROOT
 PEOPLE = SORTED / "photos_by_person"
 SOURCE_REVIEW = SORTED / "_source_review"
 MANIFEST_DIR = SOURCE_REVIEW / "source_manifest"
@@ -32,6 +34,8 @@ REPORT_DIR = MANIFEST_DIR / "reports"
 RECOVERY_REPORT_DIR = MANIFEST_DIR / "recovery_reports"
 READY_TO_DELETE = SOURCE_REVIEW / "ready_to_delete"
 RECOVERY_CONFLICT_DIR = READY_TO_DELETE / "source_manifest_recovery_conflicts"
+APP_TRASH_DIR_NAME = ".photo_app_trash"
+APP_TRASH_RECEIPT_NAME = "app_trash_operations.jsonl"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
 SOURCE_GUARD_EXIT = 3
 
@@ -49,10 +53,12 @@ class ManifestValidation:
     size_changed: list[dict[str, Any]]
     renamed: list[dict[str, Any]]
     extra: list[dict[str, Any]]
+    app_trashed: list[dict[str, Any]]
     missing_csv: Path
     changed_csv: Path
     renamed_csv: Path
     extra_csv: Path
+    app_trashed_csv: Path
 
 
 def is_person_dir_name(name: str) -> bool:
@@ -83,12 +89,16 @@ def image_files(people_dir: Path = PEOPLE) -> list[Path]:
     for person_dir in people_dir.iterdir():
         if not person_dir.is_dir() or not is_person_dir_name(person_dir.name):
             continue
-        photos_dir = person_dir / "photos"
-        if not photos_dir.exists():
-            continue
-        for path in photos_dir.rglob("*"):
-            if path.is_file() and path.suffix.lower() in IMAGE_EXTS:
-                files.append(path)
+        protected_roots = (
+            person_dir / "photos",
+            person_dir / "review" / "uncertain_nudity",
+        )
+        for protected_root in protected_roots:
+            if not protected_root.exists():
+                continue
+            for path in protected_root.rglob("*"):
+                if path.is_file() and path.suffix.lower() in IMAGE_EXTS:
+                    files.append(path)
     return sorted(files, key=lambda p: str(p).lower())
 
 
@@ -176,8 +186,70 @@ def signature(entry: dict[str, Any]) -> tuple[str, int, int]:
     return (str(entry.get("person", "")), int(entry.get("size", 0)), int(entry.get("mtime_ns", 0)))
 
 
+def app_trash_candidates(people_dir: Path) -> dict[str, list[tuple[Path, str]]]:
+    """Map original relative paths to recoverable FaceFolders app-trash files."""
+    trash_root = people_dir / APP_TRASH_DIR_NAME
+    candidates: dict[str, list[tuple[Path, str]]] = {}
+    if not trash_root.exists():
+        return candidates
+
+    receipt_path = trash_root / APP_TRASH_RECEIPT_NAME
+    if receipt_path.exists():
+        with receipt_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    receipt = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                source_rel = str(receipt.get("sourceRelativePath") or "").strip("/")
+                destination_rel = str(receipt.get("destinationRelativePath") or "").strip("/")
+                if not source_rel or not destination_rel:
+                    continue
+                destination = people_dir / destination_rel
+                if destination.is_file():
+                    candidates.setdefault(source_rel, []).append((destination, "facefolders_receipt"))
+                elif destination.is_dir():
+                    for nested in destination.rglob("*"):
+                        if not nested.is_file() or nested.suffix.lower() not in IMAGE_EXTS:
+                            continue
+                        nested_source = (Path(source_rel) / nested.relative_to(destination)).as_posix()
+                        candidates.setdefault(nested_source, []).append((nested, "facefolders_folder_receipt"))
+
+    for day_dir in trash_root.iterdir():
+        if not day_dir.is_dir():
+            continue
+        for path in day_dir.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in IMAGE_EXTS:
+                continue
+            original_rel = path.relative_to(day_dir).as_posix()
+            row = (path, "dated_app_trash_path")
+            if row not in candidates.setdefault(original_rel, []):
+                candidates[original_rel].append(row)
+    return candidates
+
+
+def matching_app_trash_candidate(expected: dict[str, Any],
+                                  candidates: dict[str, list[tuple[Path, str]]]) -> tuple[Path | None, str]:
+    expected_rel = str(expected.get("relative_path") or "")
+    expected_size = int(expected.get("size", -1))
+    expected_mtime_ns = int(expected.get("mtime_ns", -1))
+    for path, source in candidates.get(expected_rel, []):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if int(stat.st_size) != expected_size:
+            continue
+        if expected_mtime_ns >= 0 and int(stat.st_mtime_ns) != expected_mtime_ns:
+            continue
+        return path, source
+    return None, ""
+
+
 def compare_manifest(manifest: dict[str, Any],
-                     current_entries: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+                     current_entries: list[dict[str, Any]],
+                     app_trash_by_source: dict[str, list[tuple[Path, str]]] | None = None,
+                     people_dir: Path = PEOPLE) -> dict[str, list[dict[str, Any]]]:
     expected_entries = [
         entry for entry in list(manifest.get("files", []))
         if is_manifest_original_entry(entry)
@@ -214,6 +286,7 @@ def compare_manifest(manifest: dict[str, Any],
 
     missing: list[dict[str, Any]] = []
     renamed: list[dict[str, Any]] = []
+    app_trashed: list[dict[str, Any]] = []
     for expected in missing_candidates:
         candidates = current_by_signature.get(signature(expected), [])
         if candidates:
@@ -226,13 +299,33 @@ def compare_manifest(manifest: dict[str, Any],
                 "size": int(expected.get("size", 0)),
                 "mtime_ns": int(expected.get("mtime_ns", 0)),
             })
-        else:
-            missing.append({
+            continue
+        trash_path, trash_match_source = matching_app_trash_candidate(
+            expected,
+            app_trash_by_source or {},
+        )
+        if trash_path is not None:
+            try:
+                trash_relative_path = trash_path.relative_to(people_dir).as_posix()
+            except ValueError:
+                trash_relative_path = str(trash_path)
+            app_trashed.append({
                 "person": expected.get("person", ""),
                 "relative_path": expected.get("relative_path", ""),
                 "size": int(expected.get("size", 0)),
                 "mtime_ns": int(expected.get("mtime_ns", 0)),
+                "trash_relative_path": trash_relative_path,
+                "trash_path": str(trash_path),
+                "match_source": trash_match_source,
+                "status": "recoverable_app_trash",
             })
+            continue
+        missing.append({
+            "person": expected.get("person", ""),
+            "relative_path": expected.get("relative_path", ""),
+            "size": int(expected.get("size", 0)),
+            "mtime_ns": int(expected.get("mtime_ns", 0)),
+        })
 
     extra = [
         {
@@ -250,6 +343,7 @@ def compare_manifest(manifest: dict[str, Any],
         "size_changed": size_changed,
         "renamed": renamed,
         "extra": extra,
+        "app_trashed": app_trashed,
     }
 
 
@@ -278,6 +372,7 @@ def validate_current(*,
     changed_csv = report_prefix.with_name(report_prefix.name + "_changed_originals.csv")
     renamed_csv = report_prefix.with_name(report_prefix.name + "_renamed_originals.csv")
     extra_csv = report_prefix.with_name(report_prefix.name + "_extra_originals.csv")
+    app_trashed_csv = report_prefix.with_name(report_prefix.name + "_app_trashed_originals.csv")
 
     current_entries = collect_entries(people_dir)
     if manifest is None:
@@ -299,13 +394,20 @@ def validate_current(*,
             size_changed=[],
             renamed=[],
             extra=[],
+            app_trashed=[],
             missing_csv=missing_csv,
             changed_csv=changed_csv,
             renamed_csv=renamed_csv,
             extra_csv=extra_csv,
+            app_trashed_csv=app_trashed_csv,
         )
 
-    comparison = compare_manifest(manifest, current_entries)
+    comparison = compare_manifest(
+        manifest,
+        current_entries,
+        app_trash_by_source=app_trash_candidates(people_dir),
+        people_dir=people_dir,
+    )
     expected_entries = [
         entry for entry in list(manifest.get("files", []))
         if is_manifest_original_entry(entry)
@@ -314,6 +416,7 @@ def validate_current(*,
     write_csv(changed_csv, comparison["size_changed"])
     write_csv(renamed_csv, comparison["renamed"])
     write_csv(extra_csv, comparison["extra"])
+    write_csv(app_trashed_csv, comparison["app_trashed"])
     ok = not comparison["missing"] and not comparison["size_changed"]
     expected_people = len(person_counts(expected_entries, None))
     return ManifestValidation(
@@ -328,10 +431,12 @@ def validate_current(*,
         size_changed=comparison["size_changed"],
         renamed=comparison["renamed"],
         extra=comparison["extra"],
+        app_trashed=comparison["app_trashed"],
         missing_csv=missing_csv,
         changed_csv=changed_csv,
         renamed_csv=renamed_csv,
         extra_csv=extra_csv,
+        app_trashed_csv=app_trashed_csv,
     )
 
 
@@ -340,8 +445,11 @@ def print_validation(result: ManifestValidation) -> None:
         print(
             "Source manifest OK: "
             f"{result.expected_total} protected originals, {result.current_total} current originals, "
-            f"{len(result.extra)} new, {len(result.renamed)} renamed."
+            f"{len(result.extra)} new, {len(result.renamed)} renamed, "
+            f"{len(result.app_trashed)} recoverable app-trashed."
         )
+        if result.app_trashed:
+            print(f"App-trash report: {result.app_trashed_csv}")
         return
     print("ERROR: protected source manifest check failed.", file=sys.stderr)
     print(f"Manifest: {result.manifest_path}", file=sys.stderr)

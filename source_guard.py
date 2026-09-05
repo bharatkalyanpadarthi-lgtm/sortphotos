@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Guard canonical per-person original photo counts before and after operations.
 
-The guard counts only original images inside:
+The guard counts protected original images inside:
 
   ~/Pictures/sorted_all_pictures/photos_by_person/<person>/photos/
+  ~/Pictures/sorted_all_pictures/photos_by_person/<person>/review/uncertain_nudity/
 
-That recursive count includes photos/nude/ and ignores generated smart albums,
-review folders, and old all/ views by construction.
+The photos count includes photos/nude/. Other generated review folders and old
+all/ views remain excluded.
 """
 
 from __future__ import annotations
@@ -23,9 +24,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import pipeline_paths
 import source_manifest
 
-SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
+SORTED = pipeline_paths.SORTED_ROOT
 PEOPLE = SORTED / "photos_by_person"
 SOURCE_REVIEW = SORTED / "_source_review"
 GUARD_DIR = SOURCE_REVIEW / "source_count_guards"
@@ -44,7 +46,7 @@ def slugify(value: str) -> str:
 
 
 def person_original_counts(people_dir: Path = PEOPLE) -> dict[str, int]:
-    """Count canonical original images per person under photos/, including photos/nude/."""
+    """Count canonical and uncertain-review originals for every person."""
     counts: dict[str, int] = {}
     if not people_dir.exists():
         return counts
@@ -53,11 +55,15 @@ def person_original_counts(people_dir: Path = PEOPLE) -> dict[str, int]:
         if p.is_dir() and not p.name.startswith("_") and not p.name.startswith(".")
     ]
     for person_dir in sorted(person_dirs, key=lambda p: p.name.lower()):
-        photos_dir = person_dir / "photos"
         total = 0
-        if photos_dir.exists():
-            total = sum(
-                1 for p in photos_dir.rglob("*")
+        for protected_root in (
+            person_dir / "photos",
+            person_dir / "review" / "uncertain_nudity",
+        ):
+            if not protected_root.exists():
+                continue
+            total += sum(
+                1 for p in protected_root.rglob("*")
                 if p.is_file() and p.suffix.lower() in IMAGE_EXTS
             )
         counts[person_dir.name] = total

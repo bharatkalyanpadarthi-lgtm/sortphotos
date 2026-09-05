@@ -16,7 +16,9 @@ import subprocess
 import time
 from pathlib import Path
 
-DEFAULT_SOURCE = Path.home() / "Pictures" / "sorted_all_pictures" / "_source_review"
+import pipeline_paths
+
+DEFAULT_SOURCE = pipeline_paths.SOURCE_REVIEW
 DEFAULT_DEST_ROOT = Path("/Volumes/Photos & Videos  Backup/photo_source_review_backup")
 
 
@@ -145,7 +147,8 @@ def main() -> int:
                         help="With --delete-local, skip the interactive yes prompt.")
     args = parser.parse_args()
 
-    source = args.source.expanduser().resolve()
+    configured_source = args.source.expanduser()
+    source = configured_source.resolve()
     dest_root = args.dest_root.expanduser().resolve()
     if args.snapshot:
         dest = dest_root / f"{source.name}_{time.strftime('%Y%m%d_%H%M%S')}"
@@ -154,6 +157,10 @@ def main() -> int:
 
     if not source.exists():
         print(f"ERROR: source folder not found: {source}")
+        return 1
+    if configured_source.is_symlink() and (args.ask_delete_local or args.delete_local):
+        print("ERROR: refusing to delete _source_review because its configured path is a symlink.")
+        print("The external storage target must be managed explicitly.")
         return 1
     if not dest_root.parent.exists():
         print(f"ERROR: external drive path not found: {dest_root.parent}")

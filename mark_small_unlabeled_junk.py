@@ -35,6 +35,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+import pipeline_paths
+
 # Re-use the cache schema from sort_photos.py so unpickling works.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sort_photos  # noqa: F401
@@ -46,7 +48,7 @@ for _name in ("CacheState", "CachedFace", "FaceRecord", "LabelingState"):
         setattr(_main, _name, getattr(sort_photos, _name))
 
 JUNK_LABEL = "__junk__"
-DEFAULT_CLUSTERS_DIR = Path.home() / "Pictures" / "sorted_all_pictures" / "face_clusters"
+DEFAULT_CLUSTERS_DIR = pipeline_paths.SORTED_ROOT / "face_clusters"
 PERSON_FOLDER_RE = re.compile(r"^person_\d+$")
 # Crop filename pattern used by sort_photos.py:
 #     "{src_stem}__face{face_index}_{tag}.jpg"

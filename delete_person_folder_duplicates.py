@@ -18,11 +18,13 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 
+import pipeline_paths
+
 import operation_ledger
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
               ".tif", ".tiff", ".heic", ".heif"}
-DEFAULT_SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
+DEFAULT_SORTED = pipeline_paths.SORTED_ROOT
 EXCLUDED_DIRS = {
     "all",
     "_duplicates",
@@ -39,7 +41,9 @@ def iter_images(root: Path) -> list[Path]:
     out: list[Path] = []
     if not root.exists():
         return out
-    for dirpath, dirnames, filenames in os.walk(root):
+    photos_dir = root / "photos"
+    scan_root = photos_dir if photos_dir.is_dir() else root
+    for dirpath, dirnames, filenames in os.walk(scan_root):
         dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
         base = Path(dirpath)
         for filename in filenames:
@@ -142,6 +146,7 @@ def main() -> int:
     person_count = 0
     already_same_inode = 0
     bytes_to_move = 0
+    reclaimable_bytes = 0
 
     for person_dir in person_dirs(people_root):
         person_count += 1
@@ -175,6 +180,11 @@ def main() -> int:
                     continue
                 if same_inode(p, keeper):
                     already_same_inode += 1
+                else:
+                    try:
+                        reclaimable_bytes += p.stat().st_size
+                    except OSError:
+                        pass
                 try:
                     bytes_to_move += p.stat().st_size
                 except OSError:
@@ -187,7 +197,8 @@ def main() -> int:
     print(f"Exact duplicate groups:       {duplicate_groups}")
     print(f"Duplicate entries to remove:  {len(actions)}")
     print(f"Already hardlinked entries:   {already_same_inode}")
-    print(f"Bytes leaving person folders: {bytes_to_move / (1024**3):.2f} GB")
+    print(f"Logical bytes represented:    {bytes_to_move / (1024**3):.2f} GB")
+    print(f"Extra disk bytes reclaimable: {reclaimable_bytes / (1024**3):.2f} GB")
     print(f"Destination:                  {delete_root}")
     print()
 

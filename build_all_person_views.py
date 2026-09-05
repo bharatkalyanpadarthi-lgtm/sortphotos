@@ -28,8 +28,10 @@ import os
 import shutil
 from pathlib import Path
 
+import pipeline_paths
+
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif", ".gif"}
-DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
+DEFAULT_PEOPLE = pipeline_paths.PEOPLE_ROOT
 VIEW_DIR = "all"
 NUDE_DIR = "nude"
 BEST_DIR = "best"

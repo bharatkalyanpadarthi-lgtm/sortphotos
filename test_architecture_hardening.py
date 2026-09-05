@@ -1,0 +1,372 @@
+"""Isolated regressions for the September architecture audit."""
+
+import hashlib
+import os
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import numpy as np
+
+import analysis_index
+import content_identity
+import copy_journal
+import daily_identity_recovery
+import evaluation_dataset
+import face_detection
+import identity_confirmations
+import identity_evaluation
+import identity_profiles
+import review_unknown_identities as review
+import secondary_identity_matcher
+import source_batch_consensus
+import shadow_evaluation
+import sort_photos as sorter
+
+
+class ArchitectureTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="face_architecture_test_")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.alice = np.eye(512, dtype=np.float32)[0]
+        self.bob = np.zeros(512, dtype=np.float32)
+        self.bob[:2] = [0.72, np.sqrt(1 - 0.72**2)]
+
+    def face(self, name, embedding):
+        path = self.root / name
+        path.write_bytes(name.encode())
+        return sorter.FaceRecord(
+            path, 0, 0.99, 120, 120, 0, embedding, quality=1, cluster_id=1
+        )
+
+    def test_classification_write_cannot_validate_stale_detection(self):
+        path = self.root / "image.jpg"
+        path.write_bytes(b"old image")
+        with analysis_index.AnalysisIndex(self.root / "index.sqlite") as index:
+            index.replace_detections(path, "detector", "no_face_detected", [])
+            path.write_bytes(b"new image containing a face")
+            index.record_nudity(path, model="classifier", status="safe", detections=[])
+            self.assertIsNone(index.cached_detections(path, "detector"))
+
+    def test_detection_write_cannot_validate_stale_classification(self):
+        path = self.root / "image.jpg"
+        path.write_bytes(b"old image")
+        with analysis_index.AnalysisIndex(self.root / "index.sqlite") as index:
+            index.record_nudity(path, model="classifier", status="safe", detections=[])
+            path.write_bytes(b"new image with different contents")
+            index.replace_detections(path, "detector", "no_face_detected", [])
+            self.assertIsNone(index.cached_nudity(path, "classifier"))
+
+    def test_confirmed_reference_requires_original_content(self):
+        people = self.root / "people"
+        path = people / "Alice" / "photos" / "00001.jpg"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"confirmed original")
+        confirmed = self.root / "confirmed.json"
+        identity_confirmations.record(
+            confirmed,
+            person="Alice",
+            organized_path=path,
+            content_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            original_name=path.name,
+        )
+        self.assertIn(
+            path, identity_confirmations.paths_for_person(confirmed, "Alice", people)
+        )
+        path.write_bytes(b"unconfirmed replacement")
+        self.assertNotIn(
+            path, identity_confirmations.paths_for_person(confirmed, "Alice", people)
+        )
+
+    def test_cluster_consensus_never_files_dissenting_member(self):
+        records = [
+            self.face(f"image-{i}.jpg", vector)
+            for i, vector in enumerate([self.alice] * 4 + [self.bob])
+        ]
+        names = {1: "person_001"}
+        db = sorter.IdentityDB(
+            identities={"Alice": self.alice, "Bob": self.bob},
+            source_counts={"Alice": 10, "Bob": 10},
+        )
+        with (
+            patch.object(
+                sorter.identity_hard_negatives, "vectors_by_person", return_value={}
+            ),
+            patch.object(
+                sorter.appearance_profiles,
+                "query_attributes",
+                return_value=("unknown", 0.0),
+            ),
+        ):
+            sorter.apply_identity_db_labels(
+                records, names, db, use_secondary_verifier=False
+            )
+        self.assertNotEqual(names.get(records[-1].cluster_id), "Alice")
+        self.assertIn(
+            str(records[-1].src), daily_identity_recovery._unresolved(records, names)
+        )
+
+    def test_legacy_checkpoint_does_not_claim_missing_copy(self):
+        record = self.face("image.jpg", self.alice)
+        destination = self.root / "output"
+        destination.mkdir()
+        sorter._save_checkpoint(destination, {f"Alice||{record.src}||sharp||main"})
+        with (
+            patch.object(sorter, "DEDUP_DUPLICATES", False),
+            patch.object(
+                sorter, "analysis_index_file", return_value=self.root / "index.sqlite"
+            ),
+            patch.object(sorter, "classified_nudity_status", return_value="safe"),
+            patch.object(
+                sorter,
+                "maybe_move_to_nudity_subfolder",
+                side_effect=lambda p, *_a, **_kw: (p, None),
+            ),
+            patch.object(
+                sorter, "_atomic_copy", side_effect=OSError("simulated failed copy")
+            ),
+        ):
+            organized = sorter.organize_originals([record], {1: "Alice"}, destination)
+        self.assertNotIn(record.src, organized)
+        self.assertTrue(record.src.is_file())
+
+    def test_large_recovery_contains_rotations(self):
+        image = np.zeros((800, 800, 3), dtype=np.uint8)
+        with patch.object(
+            face_detection.cv2, "rotate", wraps=face_detection.cv2.rotate
+        ) as rotate:
+            list(face_detection.fallback_detection_views(image, max_dimension=1600))
+        self.assertGreaterEqual(rotate.call_count, 3)
+
+    def test_recovery_settings_invalidate_detection_signature(self):
+        original = sorter.config_fingerprint()
+        with patch.object(sorter, "RECOVERY_MIN_FACE_PX", 999):
+            self.assertNotEqual(original, sorter.config_fingerprint())
+
+    def test_missing_protected_dataset_blocks_existing_baseline(self):
+        baseline = self.root / "baseline.json"
+        baseline.write_text("{}")
+        db = sorter.IdentityDB()
+        with patch.object(
+            identity_evaluation,
+            "cache_metrics",
+            return_value={"incorrect": 0, "precision": 1.0, "recall": 0.5},
+        ):
+            allowed, _ = identity_evaluation.activation_gate(
+                db,
+                db,
+                sorter.CacheState(),
+                protected_set=self.root / "missing.csv",
+                protected_baseline=baseline,
+            )
+        self.assertFalse(allowed)
+
+    def test_replaced_bytes_with_same_mtime_and_size_invalidate_all_hashes(self):
+        path = self.root / "replace.jpg"
+        path.write_bytes(b"old")
+        stamp = path.stat().st_mtime_ns
+        digest = review.item_content_sha256(path)
+        with analysis_index.AnalysisIndex(self.root / "index.sqlite") as index:
+            index.replace_detections(path, "v1", "no_face", [])
+        path.write_bytes(b"new")
+        os.utime(path, ns=(stamp, stamp))
+        self.assertNotEqual(digest, review.item_content_sha256(path))
+        with analysis_index.AnalysisIndex(self.root / "index.sqlite") as index:
+            self.assertIsNone(index.cached_detections(path, "v1"))
+
+    def test_wrong_analysis_content_cannot_commit(self):
+        path = self.root / "image.jpg"
+        path.write_bytes(b"new")
+        with analysis_index.AnalysisIndex(self.root / "index.sqlite") as index:
+            with self.assertRaises(ValueError):
+                index.replace_detections(path, "detector", "no_face", [], expected_sha256="wrong")
+            with self.assertRaises(ValueError):
+                index.record_nudity(path, model="classifier", status="safe", detections=[], expected_sha256="wrong")
+            self.assertIsNone(index.cached_detections(path, "detector"))
+            self.assertIsNone(index.cached_nudity(path, "classifier"))
+
+    def test_future_database_is_not_downgraded(self):
+        path = self.root / "future.sqlite"
+        with sqlite3.connect(path) as db:
+            db.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT)")
+            db.execute("INSERT INTO metadata VALUES('schema_version', '999')")
+        with self.assertRaises(ValueError):
+            analysis_index.AnalysisIndex(path)
+        with sqlite3.connect(path) as db:
+            self.assertEqual(db.execute("SELECT value FROM metadata").fetchone()[0], "999")
+
+    def test_reference_face_provenance_and_renamed_file(self):
+        people = self.root / "people"
+        path = people / "Alice" / "photos" / "old.jpg"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"confirmed")
+        registry = self.root / "confirmed.json"
+        first, second = SimpleNamespace(crop_jpeg=b"face-one", face_index=0), SimpleNamespace(crop_jpeg=b"face-two", face_index=1)
+        identity_confirmations.record(registry, person="Alice", organized_path=path,
+            content_sha256=content_identity.content_sha256(path), original_name=path.name, face=second)
+        moved = path.with_name("new.jpg")
+        path.rename(moved)
+        examples = identity_confirmations.examples_for_person(registry, "Alice", people)
+        self.assertEqual(set(examples), {moved})
+        self.assertEqual(identity_confirmations.selected_faces(examples[moved], [first, second]), [second])
+        self.assertEqual(identity_confirmations.selected_faces({}, [first, second]), [])
+
+    def test_copy_journal_reopens_and_revalidates_destination(self):
+        path = self.root / "original.jpg"
+        path.write_bytes(b"original")
+        digest = content_identity.content_sha256(path)
+        op = copy_journal.CopyJournal.operation_id("Alice", digest, "safe")
+        journal = copy_journal.CopyJournal(self.root)
+        journal.planned(op, digest)
+        self.assertIsNone(journal.verified_destination(op, digest))
+        journal.completed(op, digest, path)
+        journal.close()
+        journal = copy_journal.CopyJournal(self.root)
+        self.addCleanup(journal.close)
+        self.assertEqual(journal.verified_destination(op, digest), path)
+        path.write_bytes(b"corrupt!")
+        self.assertIsNone(journal.verified_destination(op, digest))
+        with self.assertRaises(ValueError):
+            journal.completed(op, digest, path)
+        path.unlink()
+        self.assertIsNone(journal.verified_destination(op, digest))
+
+    def test_duplicate_bytes_are_not_independent_batch_votes(self):
+        files = [self.root / "a.jpg", self.root / "copy.jpg"]
+        for path in files:
+            path.write_bytes(b"identical")
+        evidence = [source_batch_consensus.BatchEvidence(str(path), 0, "batch", self.alice,
+                    "Alice", .28, .1, .9, .3) for path in files]
+        self.assertEqual(source_batch_consensus.consensus_decisions(evidence), {})
+
+    def test_conflicting_prior_labels_cannot_merge(self):
+        first, second = self.face("a.jpg", self.alice), self.face("b.jpg", self.alice)
+        first.prior_label, second.prior_label = "Alice", "Bob"
+        first.cluster_id, second.cluster_id = 1, 2
+        self.assertEqual(sorter.merge_close_clusters([first, second]), 0)
+
+    def test_unlabelled_member_does_not_inherit_prior_label(self):
+        first, second = self.face("a.jpg", self.alice), self.face("b.jpg", self.alice)
+        first.prior_label = "Alice"
+        self.assertNotEqual(sorter.make_initial_name_map([first, second])[1], "Alice")
+
+    def test_transformed_boxes_and_geometric_dedup(self):
+        matrix = np.array([[1, 0, 150], [0, 1, 200], [0, 0, 1]], dtype=float)
+        box, points = face_detection.original_geometry([10, 20, 50, 60], [[20, 30]], matrix)
+        np.testing.assert_allclose(box, [160, 220, 200, 260])
+        np.testing.assert_allclose(points, [[170, 230]])
+        self.assertTrue(face_detection.same_detection(box, [161, 221, 201, 261]))
+        self.assertFalse(face_detection.same_detection(box, [300, 220, 340, 260]))
+
+    def test_holdout_removes_identical_reference_and_no_centroid_fallback(self):
+        query, copy = self.root / "query.jpg", self.root / "copy.jpg"
+        query.write_bytes(b"same")
+        copy.write_bytes(b"same")
+        db = sorter.normalize_identity_db(sorter.IdentityDB(
+            identities={"Alice": self.alice}, prototypes={"Alice": [self.alice]},
+            prototype_sources={"Alice": [str(copy)]}, source_counts={"Alice": 5}))
+        center, prototypes = identity_evaluation.profile_without_source(db, "Alice", str(query))
+        self.assertIsNone(center)
+        self.assertEqual(prototypes, [])
+
+    def test_secondary_holdout_cannot_reuse_excluded_centroid(self):
+        source = self.root / "query.jpg"
+        source.write_bytes(b"query")
+        db = secondary_identity_matcher.SecondaryIdentityDB(
+            identities={"Alice": self.alice}, prototypes={"Alice": [self.alice]},
+            prototype_sources={"Alice": [str(source)]})
+        matcher = secondary_identity_matcher.SecondaryMatcher(db, cache_path=self.root / "secondary.pkl")
+        with patch.object(matcher, "embedding", return_value=self.alice):
+            self.assertFalse(matcher.verify(b"crop", "Alice", excluded_source=source).accepted)
+
+    def test_group_extra_accepted_person_is_a_false_accept(self):
+        source = self.root / "group.jpg"
+        source.write_bytes(b"group")
+        face = SimpleNamespace(src_str=str(source))
+        case = evaluation_dataset.EvaluationCase(source, "Alice", frozenset({"group"}), True,
+            "unknown", True, expected_people=("Alice",), expected_face_count=2)
+        predictions = [identity_evaluation.FacePrediction("Alice", 0, 1, True),
+                       identity_evaluation.FacePrediction("Bob", 0, 1, True)]
+        with patch.object(identity_evaluation, "predict_face", side_effect=predictions), \
+             patch.object(sorter, "analysis_index_file", return_value=self.root / "index.sqlite"):
+            metrics, rows = identity_evaluation.evaluate_golden_set((case,),
+                sorter.CacheState(faces=[face, face]), sorter.IdentityDB(), lane="strict")
+        self.assertEqual(rows[0]["identity_outcome"], "incorrect")
+        self.assertEqual(metrics.identity_precision, .5)
+
+    def test_compiled_profiles_match_scalar_scoring(self):
+        rng = np.random.default_rng(42)
+        identities = {f"Person {i}": rng.normal(size=32) for i in range(8)}
+        prototypes = {name: [rng.normal(size=32) for _ in range(4)] for name in identities}
+        pose = {name: {"left_profile": [rng.normal(size=32)]} for name in identities}
+        appearance = {name: {label: [rng.normal(size=32)] for label in
+                      ("low_light", "normal_light", "era_newer", "era_older")} for name in identities}
+        negatives = {name: [vector] for name, vector in identities.items()}
+        settings = dict(pose_prototypes=pose, appearance_prototypes=appearance,
+                        appearance_era_cutoffs={name: 100 for name in identities}, hard_negatives=negatives)
+        compiled = identity_profiles.CompiledProfiles(identities, prototypes, **settings)
+        for timestamp in (0, 20, 150):
+            for lighting in ("unknown", "low_light", "normal_light"):
+                for query in [rng.normal(size=32), identities["Person 0"]]:
+                    options = dict(settings, pose_label="left_profile", lighting_label=lighting,
+                                   capture_timestamp=timestamp)
+                    expected = identity_profiles.rank_candidates(query, identities, prototypes, **options)
+                    actual = identity_profiles.rank_candidates(query, identities, prototypes, compiled=compiled, **options)
+                    self.assertEqual([item.name for item in actual], [item.name for item in expected])
+                    np.testing.assert_allclose([item.distance for item in actual],
+                                               [item.distance for item in expected], atol=1e-6)
+
+    def test_worker_results_from_replaced_source_are_not_cached(self):
+        record = self.face("source.jpg", self.alice)
+        digest = content_identity.content_sha256(record.src)
+        cached = sorter.record_to_cached(record, None)
+        record.src.write_bytes(b"replacement")
+        diagnostics = {}
+        paths, faces = sorter.validate_detection_batch([record.src], [cached],
+            {str(record.src): {"sha256": digest}}, diagnostics)
+        self.assertEqual(paths, [])
+        self.assertEqual(faces, [])
+        self.assertIn("source_changed", diagnostics[str(record.src)])
+
+    def test_shadow_uses_daily_consensus_without_copy_or_label_leakage(self):
+        records = [self.face(f"shadow-{i}.jpg", vector) for i, vector in
+                   enumerate([self.alice] * 4 + [self.bob])]
+        faces = [sorter.record_to_cached(record, "IncorrectPriorLabel") for record in records]
+        db = sorter.normalize_identity_db(sorter.IdentityDB(
+            identities={"Alice": self.alice, "Bob": self.bob},
+            source_counts={"Alice": 5, "Bob": 5}))
+        with patch.object(sorter, "organize_originals", side_effect=AssertionError("shadow cannot copy")), \
+             patch.object(sorter, "save_cache", side_effect=AssertionError("shadow cannot write cache")):
+            plan = shadow_evaluation.daily_plan(faces, db, hard_negatives={})
+        self.assertNotIn("Alice", [item["person"] for item in plan[str(records[-1].src)]])
+        self.assertTrue(all(face.label == "IncorrectPriorLabel" for face in faces))
+        self.assertTrue(all(record.src.is_file() for record in records))
+
+    def test_changed_source_is_not_filed_from_old_recognition(self):
+        record = self.face("source.jpg", self.alice)
+        record.content_sha256 = content_identity.content_sha256(record.src)
+        record.src.write_bytes(b"replacement")
+        with patch.object(sorter, "analysis_index_file", return_value=self.root / "index.sqlite"):
+            organized = sorter.organize_originals([record], {1: "Alice"}, self.root / "output")
+        self.assertEqual(organized, set())
+        self.assertTrue(record.src.exists())
+
+    def test_verified_manual_name_survives_pending_profile_promotion(self):
+        record = self.face("manual.jpg", self.alice)
+        people = self.root / "people"
+        destination = people / "New Person" / "photos" / "confirmed.jpg"
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(record.src.read_bytes())
+        digest = content_identity.content_sha256(record.src)
+        decision = dict(action="confirmed", person="New Person", content_sha256=digest)
+        with patch.object(review, "_verified_organized_destination", return_value=destination):
+            self.assertEqual(daily_identity_recovery._confirmation_person(
+                decision, digest, people, sorter.IdentityDB()), "New Person")
+
+
+if __name__ == "__main__":
+    unittest.main()

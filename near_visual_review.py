@@ -18,17 +18,20 @@ import json
 import mimetypes
 import os
 import shutil
+import threading
 import time
 import webbrowser
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+import pipeline_paths
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import operation_ledger
 
-DEFAULT_SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
+DEFAULT_SORTED = pipeline_paths.SORTED_ROOT
 DEFAULT_PEOPLE = DEFAULT_SORTED / "photos_by_person"
 DEFAULT_REPORT = DEFAULT_SORTED / "_source_review" / "duplicate_reports" / "advanced_duplicates.csv"
 DEFAULT_REVIEW_DIR = DEFAULT_SORTED / "_source_review" / "ready_to_delete" / "manual_duplicate_review"
@@ -56,6 +59,7 @@ class Candidate:
     width: int
     height: int
     size_bytes: int
+    sha256: str = ""
 
 
 @dataclass
@@ -203,6 +207,27 @@ def candidate_kinds_by_path(groups: list[ReviewGroup]) -> dict[str, str]:
     return out
 
 
+def candidate_keepers_by_path(groups: list[ReviewGroup]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for group in groups:
+        if group.keeper is None:
+            continue
+        keeper = str(group.keeper.resolve())
+        for candidate in group.candidates:
+            if candidate.action in PENDING_ACTIONS:
+                out[str(candidate.path.resolve())] = keeper
+    return out
+
+
+def candidate_hashes_by_path(groups: list[ReviewGroup]) -> dict[str, str]:
+    return {
+        str(candidate.path.resolve()): candidate.sha256
+        for group in groups
+        for candidate in group.candidates
+        if candidate.sha256
+    }
+
+
 def unique_dest(dest: Path) -> Path:
     if not dest.exists():
         return dest
@@ -331,6 +356,7 @@ def load_groups(report: Path, decisions: dict, root: Path, limit: int | None = N
                 width=int_or_zero(row.get("width")),
                 height=int_or_zero(row.get("height")),
                 size_bytes=int_or_zero(row.get("size_bytes")),
+                sha256=(row.get("sha256") or "").strip().lower(),
             )
             group.candidates.append(candidate)
 
@@ -393,17 +419,27 @@ def thumbnail_url(path: Path, thumbnails: dict[str, Path], *, static_images: boo
 def render_card(candidate: Candidate, root: Path, is_keeper: bool, thumbnails: dict[str, Path],
                 *, static_images: bool = False) -> str:
     path = candidate.path
-    label = "KEEPER" if is_keeper else ("DUPLICATE" if candidate.action == "move" else "NEAR VISUAL")
-    badge = "keeper" if is_keeper else ("duplicate" if candidate.action == "move" else "review")
+    labels = {
+        "exact_file": "EXACT DUPLICATE",
+        "same_pixels": "SAME PIXELS",
+        "visually_similar": "NEAR VISUAL",
+    }
+    label = "KEEPER" if is_keeper else labels.get(candidate.kind, "REVIEW")
+    badge = "keeper" if is_keeper else ("duplicate" if candidate.kind == "exact_file" else "review")
     buttons = ""
     escaped_path = html.escape(str(path), quote=True)
     original_url = image_url(path, static_images=static_images)
     preview_url = thumbnail_url(path, thumbnails, static_images=static_images)
     if not is_keeper:
+        move_button = (
+            f'<button class="move" data-path="{escaped_path}">Move to Ready To Delete</button>'
+            if candidate.kind == "exact_file"
+            else ""
+        )
         buttons = f"""
           <div class="actions">
             <label class="select-row"><input type="checkbox" class="candidate-check" data-path="{escaped_path}"> Select</label>
-            <button class="move" data-path="{escaped_path}">Move to Ready To Delete</button>
+            {move_button}
             <button class="keep" data-path="{escaped_path}">Keep</button>
           </div>
         """
@@ -502,7 +538,7 @@ def render_html(groups: list[ReviewGroup], root: Path, report: Path, review_dir:
 
     decided_count = len(decisions.get("items", {}))
     mode_note = (
-        "Static preview: filters and image links work here; open via face option 8 for keep/move actions."
+        "Static preview: filters and image links work here; run face duplicate-review for keep/move actions."
         if static_images
         else "Live review mode: keep/move actions are enabled."
     )
@@ -604,7 +640,7 @@ def render_html(groups: list[ReviewGroup], root: Path, report: Path, review_dir:
         <button id="selectVisible">Select all filtered</button>
         <button id="clearSelected">Clear</button>
         <button class="keep" id="keepSelected">Keep selected</button>
-        <button class="move primary" id="moveSelected">Move selected</button>
+        <button class="move primary" id="moveSelected">Move selected exact</button>
       </div>
     </div>
     <div class="quick-actions">
@@ -720,7 +756,7 @@ def render_html(groups: list[ReviewGroup], root: Path, report: Path, review_dir:
 
     async function decidePaths(paths, action, confirmText) {{
       if (!canDecide) {{
-        showToast('Open with face option 8 to keep or move files');
+        showToast('Run face duplicate-review to keep or move files');
         return;
       }}
       if (!paths.length) {{
@@ -755,7 +791,11 @@ def render_html(groups: list[ReviewGroup], root: Path, report: Path, review_dir:
     }}
 
     async function decideMany(action) {{
-      const paths = pathsFromChecks(checkedVisibleCandidateChecks());
+      const selected = checkedVisibleCandidateChecks();
+      const checks = action === 'move'
+        ? selected.filter(cb => cb.closest('.group').dataset.kind === 'exact_file')
+        : selected;
+      const paths = pathsFromChecks(checks);
       const verb = action === 'move' ? 'move to ready_to_delete' : 'keep';
       await decidePaths(paths, action, `${{verb}} ${{paths.length}} selected candidate(s)?`);
     }}
@@ -882,14 +922,15 @@ def make_handler(server_state: dict):
             params = parse_qs(body)
             action = params.get("action", [""])[0]
             try:
-                if parsed.path == "/decide_many":
-                    raw_paths = params.get("paths", ["[]"])[0]
-                    paths = [Path(p) for p in json.loads(raw_paths)]
-                    result = apply_decisions(paths, action, server_state)
-                    self.send_text(json.dumps(result), "application/json")
-                    return
-                path = Path(params.get("path", [""])[0])
-                message = apply_decision(path, action, server_state)
+                with server_state["lock"]:
+                    if parsed.path == "/decide_many":
+                        raw_paths = params.get("paths", ["[]"])[0]
+                        paths = [Path(p) for p in json.loads(raw_paths)]
+                        result = apply_decisions(paths, action, server_state)
+                        self.send_text(json.dumps(result), "application/json")
+                        return
+                    path = Path(params.get("path", [""])[0])
+                    message = apply_decision(path, action, server_state)
             except Exception as exc:
                 self.send_text(json.dumps({"error": str(exc)}), "application/json", 400)
                 return
@@ -973,16 +1014,35 @@ def apply_decision(path: Path, action: str, state: dict) -> str:
         "decided_at": int(time.time()),
     }
     if action == "move":
+        expected_hash = state.get("candidate_hashes", {}).get(str(path), "")
+        actual_hash = operation_ledger.sha256_file(path)
+        if expected_hash and actual_hash != expected_hash:
+            raise ValueError("candidate changed since the duplicate report; regenerate the report")
+        keeper_text = state.get("candidate_keepers", {}).get(str(path), "")
+        if not keeper_text:
+            raise ValueError("duplicate keeper is unavailable; regenerate the report")
+        keeper = Path(keeper_text).resolve()
+        if keeper == path or not keeper.is_file() or not is_inside_root(keeper, root):
+            raise ValueError("duplicate keeper is unavailable; regenerate the report")
+        if operation_ledger.sha256_file(keeper) != actual_hash:
+            raise ValueError("candidate is no longer identical to its keeper; regenerate the report")
         dest = unique_dest(state["review_dir"] / rel)
         operation_ledger.move_path(
             path,
             dest,
-            sorted_root=DEFAULT_SORTED,
+            sorted_root=state.get("sorted_root", root.parent),
             operation="duplicate_review.move_candidate",
             reason="manual duplicate/near-visual review move",
-            extra={"relative_path": rel.as_posix()},
+            extra={
+                "relative_path": rel.as_posix(),
+                "keeper_path": str(keeper),
+                "verified_sha256": actual_hash,
+            },
         )
+        state.setdefault("moved_sources", set()).add(str(path))
         record["moved_to"] = str(dest)
+        record["keeper_path"] = str(keeper)
+        record["verified_sha256"] = actual_hash
         message = f"Moved {path.name}"
     else:
         message = f"Kept {path.name}"
@@ -1018,6 +1078,35 @@ def apply_decisions(paths: list[Path], action: str, state: dict) -> dict:
         "paths": moved_or_kept,
         "errors": errors,
     }
+
+
+def prune_cache_sources(cache, moved_sources: set[str]) -> bool:
+    canonical = {os.path.realpath(path) for path in moved_sources}
+    stale_keys = [
+        key for key in cache.file_signatures
+        if os.path.realpath(str(key)) in canonical
+    ]
+    for key in stale_keys:
+        cache.file_signatures.pop(key, None)
+    before = len(cache.faces)
+    cache.faces = [
+        face for face in cache.faces
+        if os.path.realpath(face.src_str) not in canonical
+    ]
+    return bool(stale_keys or len(cache.faces) != before)
+
+
+def refresh_face_cache_after_moves(moved_sources: set[str], root: Path) -> bool:
+    if not moved_sources:
+        return False
+    import sort_photos
+
+    cache = sort_photos.load_cache()
+    if not prune_cache_sources(cache, moved_sources):
+        return False
+    sort_photos.save_cache(cache)
+    sort_photos.build_identity_db_from_person_folders(root)
+    return True
 
 
 def write_static_html(output: Path, groups: list[ReviewGroup], root: Path,
@@ -1084,14 +1173,19 @@ def main() -> int:
 
     state = {
         "root": root,
+        "sorted_root": root.parent,
         "report": report,
         "review_dir": review_dir,
         "thumb_dir": thumb_dir,
         "thumbnails": thumbnails,
         "candidate_kinds": candidate_kinds_by_path(groups),
+        "candidate_keepers": candidate_keepers_by_path(groups),
+        "candidate_hashes": candidate_hashes_by_path(groups),
         "decisions": decisions_path,
         "limit": args.limit,
         "quiet": args.quiet,
+        "lock": threading.Lock(),
+        "moved_sources": set(),
     }
     server = ThreadingHTTPServer((args.host, int(args.port)), make_handler(state))
     url = f"http://{args.host}:{args.port}/"
@@ -1105,6 +1199,10 @@ def main() -> int:
         print("\nStopped near-visual review server.")
     finally:
         server.server_close()
+        if state["moved_sources"]:
+            print("Removing moved duplicate paths from the face cache...")
+            if refresh_face_cache_after_moves(state["moved_sources"], root):
+                print("Face cache and affected identity profiles refreshed.")
     return 0
 
 

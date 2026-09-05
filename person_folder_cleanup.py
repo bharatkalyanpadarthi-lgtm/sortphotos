@@ -18,11 +18,13 @@ import shutil
 import time
 from pathlib import Path
 
+import pipeline_paths
+
 import operation_ledger
 
-DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
+DEFAULT_PEOPLE = pipeline_paths.PEOPLE_ROOT
 DEFAULT_CLEANUP_ROOT = (
-    Path.home() / "Pictures" / "sorted_all_pictures" / "_source_review" / "ready_to_delete"
+    pipeline_paths.SOURCE_REVIEW / "ready_to_delete"
 )
 DEFAULT_RULES = Path(__file__).resolve().with_name("person_folder_rules.json")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}

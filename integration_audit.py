@@ -16,8 +16,10 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import pipeline_paths
+
 SCRIPT_DIR = Path(__file__).resolve().parent
-SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
+SORTED = pipeline_paths.SORTED_ROOT
 PEOPLE = SORTED / "photos_by_person"
 ADV_REPORT = SORTED / "_source_review" / "duplicate_reports" / "advanced_duplicates.csv"
 REQUIRED_GENERATED_EXCLUSIONS = {

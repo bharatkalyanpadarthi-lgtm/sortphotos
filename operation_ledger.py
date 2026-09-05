@@ -15,10 +15,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-DEFAULT_SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
+import pipeline_paths
+import analysis_index
+
+DEFAULT_SORTED = pipeline_paths.SORTED_ROOT
 DEFAULT_PEOPLE = DEFAULT_SORTED / "photos_by_person"
 LEDGER_DIR_NAME = "operation_ledgers"
 RUN_ID_ENV = "PHOTO_PIPELINE_RUN_ID"
+ANALYSIS_INDEX_PATH = pipeline_paths.ANALYSIS_INDEX
 
 _SESSION_RUN_ID = f"manual_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
 
@@ -125,7 +129,8 @@ def build_event(*,
 
 def append_event(event: dict[str, Any], *,
                  sorted_root: Path = DEFAULT_SORTED,
-                 run_id: str | None = None) -> Path:
+                 run_id: str | None = None,
+                 mirror_sqlite: bool = True) -> Path:
     rid = current_run_id(run_id or str(event.get("run_id") or ""))
     path = ledger_path(sorted_root, rid)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -133,7 +138,49 @@ def append_event(event: dict[str, Any], *,
         json.dump(event, f, sort_keys=True)
         f.write("\n")
     latest_run_path(sorted_root).write_text(rid + "\n", encoding="utf-8")
+    try:
+        if (
+            mirror_sqlite
+            and sorted_root.expanduser().resolve() == DEFAULT_SORTED.expanduser().resolve()
+        ):
+            # JSONL above is authoritative. The SQLite mirror must never hold
+            # up a file move behind another analysis transaction.
+            with analysis_index.AnalysisIndex(
+                ANALYSIS_INDEX_PATH, timeout=0.25
+            ) as index:
+                index.record_operation(event)
+    except Exception:
+        # JSONL remains the authoritative safety ledger. SQLite is a queryable
+        # mirror and must never make a file operation fail.
+        pass
     return path
+
+
+def mirror_run_to_sqlite(
+    *,
+    sorted_root: Path = DEFAULT_SORTED,
+    run_id: str | None = None,
+) -> tuple[int, int]:
+    """Mirror one authoritative JSONL run in a single SQLite transaction."""
+    path = ledger_path(sorted_root, run_id)
+    if not path.exists():
+        return 0, 0
+    mirrored = 0
+    malformed = 0
+    with analysis_index.AnalysisIndex(ANALYSIS_INDEX_PATH) as index:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    event = json.loads(line)
+                except (TypeError, ValueError):
+                    malformed += 1
+                    continue
+                if not isinstance(event, dict):
+                    malformed += 1
+                    continue
+                index.record_operation(event)
+                mirrored += 1
+    return mirrored, malformed
 
 
 def record_event(*,
@@ -147,7 +194,8 @@ def record_event(*,
                  source_meta: dict[str, Any] | None = None,
                  dest_meta: dict[str, Any] | None = None,
                  error: str = "",
-                 extra: dict[str, Any] | None = None) -> Path:
+                 extra: dict[str, Any] | None = None,
+                 mirror_sqlite: bool = True) -> Path:
     event = build_event(
         operation=operation,
         reason=reason,
@@ -161,7 +209,12 @@ def record_event(*,
         error=error,
         extra=extra,
     )
-    return append_event(event, sorted_root=sorted_root, run_id=event["run_id"])
+    return append_event(
+        event,
+        sorted_root=sorted_root,
+        run_id=event["run_id"],
+        mirror_sqlite=mirror_sqlite,
+    )
 
 
 def move_path(src: Path,
@@ -172,14 +225,16 @@ def move_path(src: Path,
               reason: str,
               run_id: str | None = None,
               extra: dict[str, Any] | None = None,
-              hash_file: bool = True) -> Path:
+              hash_file: bool = True,
+              source_sha256: str | None = None,
+              mirror_sqlite: bool = True) -> Path:
     """Move a path and record planned/completed/failed events.
 
     The source hash is captured before the move when the source is a file.
     """
     src = Path(src)
     dest = Path(dest)
-    source_meta = metadata(src, hash_file=hash_file)
+    source_meta = metadata(src, hash_file=hash_file, sha256=source_sha256)
     record_event(
         operation=operation,
         reason=reason,
@@ -190,6 +245,7 @@ def move_path(src: Path,
         run_id=run_id,
         source_meta=source_meta,
         extra=extra,
+        mirror_sqlite=mirror_sqlite,
     )
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -210,6 +266,7 @@ def move_path(src: Path,
             source_meta=source_meta,
             dest_meta=dest_meta,
             extra=extra,
+            mirror_sqlite=mirror_sqlite,
         )
         return dest
     except Exception as exc:
@@ -224,6 +281,7 @@ def move_path(src: Path,
             source_meta=source_meta,
             error=str(exc),
             extra=extra,
+            mirror_sqlite=mirror_sqlite,
         )
         raise
 

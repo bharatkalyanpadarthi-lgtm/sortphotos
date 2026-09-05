@@ -23,6 +23,8 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+import pipeline_paths
+
 import sort_photos
 
 for _name in ("CacheState", "CachedFace", "FaceRecord", "LabelingState"):
@@ -33,7 +35,7 @@ for _name in ("CacheState", "CachedFace", "FaceRecord", "LabelingState"):
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic"}
 CACHE_DIR = Path.home() / ".face_sort_cache"
 DEFAULT_CACHE = CACHE_DIR / "cache.pkl.bak.mark_small_junk"
-SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
+SORTED = pipeline_paths.SORTED_ROOT
 PEOPLE_ROOT = SORTED / "photos_by_person"
 RULES_FILE = Path(__file__).with_name("person_folder_rules.json")
 REPORT_DIR = SORTED / "_source_review" / "recovery_reports"
@@ -270,7 +272,7 @@ def main() -> int:
     }
 
     roots = [
-        ("to_process", Path.home() / "Pictures" / "To Process"),
+        ("to_process", pipeline_paths.TO_PROCESS),
         ("people", PEOPLE_ROOT),
         ("source_review", SORTED / "_source_review"),
         ("junk_to_review", SORTED / "junk_to_review"),

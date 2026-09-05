@@ -14,17 +14,20 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+import io
 import os
 import shutil
 import sys
 import time
 from pathlib import Path
 
+import pipeline_paths
+
 import operation_ledger
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
               ".tif", ".tiff", ".heic", ".heif", ".gif"}
-DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
+DEFAULT_PEOPLE = pipeline_paths.PEOPLE_ROOT
 DEFAULT_REVIEW = (
     Path.home()
     / "Pictures"
@@ -111,15 +114,43 @@ def can_decode_image(path: Path, show_codec_warnings: bool = False) -> tuple[boo
 
         try:
             from PIL import Image, ImageFile
+            import pillow_heif
 
             ImageFile.LOAD_TRUNCATED_IMAGES = True
-            with Image.open(path) as im:
+            if hasattr(pillow_heif, "register_heif_opener"):
+                pillow_heif.register_heif_opener()
+            # Inspect the encoded bytes so HEIF content is recognized even
+            # when a legacy filename uses .jpg or .png.
+            with Image.open(io.BytesIO(path.read_bytes())) as im:
                 im.load()
                 if im.size[0] > 0 and im.size[1] > 0:
                     return True, "pillow"
                 errors.append("pillow_decoder_returned_no_pixels")
         except Exception as e:  # noqa: BLE001
             errors.append(f"pillow:{e}")
+
+    # A recognized image container with an unavailable codec is not evidence
+    # of corruption. Keep the protected original and report the limitation.
+    try:
+        header = path.read_bytes()[:32]
+    except OSError:
+        header = b""
+    known_container = (
+        header.startswith(b"\xff\xd8\xff")
+        or header.startswith(b"\x89PNG\r\n\x1a\n")
+        or header.startswith((b"GIF87a", b"GIF89a", b"BM"))
+        or header[:4] in {b"II*\x00", b"MM\x00*"}
+        or (header.startswith(b"RIFF") and header[8:12] == b"WEBP")
+        or (
+            b"ftyp" in header
+            and any(
+                brand in header
+                for brand in (b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1", b"avif")
+            )
+        )
+    )
+    if known_container:
+        return True, "recognized_image_container_codec_unavailable"
 
     return False, "; ".join(errors) if errors else "unreadable_image"
 

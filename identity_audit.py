@@ -11,6 +11,8 @@ import pickle
 import sys
 from pathlib import Path
 
+import pipeline_paths
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sort_photos  # noqa: E402
 
@@ -18,10 +20,10 @@ for _name in ("IdentityDB",):
     if hasattr(sort_photos, _name):
         setattr(sys.modules["__main__"], _name, getattr(sort_photos, _name))
 
-DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
+DEFAULT_PEOPLE = pipeline_paths.PEOPLE_ROOT
 DEFAULT_DB = Path.home() / ".face_sort_cache" / "person_identity_db.pkl"
 DEFAULT_REPORT = (
-    Path.home() / "Pictures" / "sorted_all_pictures" / "_source_review" / "identity_audit.csv"
+    pipeline_paths.SOURCE_REVIEW / "identity_audit.csv"
 )
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
 

@@ -29,13 +29,15 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+import pipeline_paths
+
 import operation_ledger
 
 IMAGE_EXTS = {
     ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif",
 }
-DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
-DEFAULT_REVIEW = Path.home() / "Pictures" / "sorted_all_pictures" / "_source_review" / "structure_review"
+DEFAULT_PEOPLE = pipeline_paths.PEOPLE_ROOT
+DEFAULT_REVIEW = pipeline_paths.SOURCE_REVIEW / "structure_review"
 
 PHOTOS_DIR = "photos"
 NUDE_DIR = "nude"

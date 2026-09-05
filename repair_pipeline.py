@@ -15,8 +15,10 @@ import sys
 import time
 from pathlib import Path
 
+import pipeline_paths
+
 SCRIPT_DIR = Path(__file__).resolve().parent
-LOG_DIR = Path.home() / "Pictures" / "sorted_all_pictures" / "_source_review" / "repair_logs"
+LOG_DIR = pipeline_paths.SOURCE_REVIEW / "repair_logs"
 
 
 def run_step(name: str, cmd: list[str], log) -> int:

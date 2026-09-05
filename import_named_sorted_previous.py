@@ -23,6 +23,8 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 
+import pipeline_paths
+
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
               ".tif", ".tiff", ".heic", ".heif"}
 DEFAULT_SOURCE = (
@@ -33,7 +35,7 @@ DEFAULT_SOURCE = (
     / "sorted_previous"
     / "photos_by_person"
 )
-DEFAULT_DEST = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
+DEFAULT_DEST = pipeline_paths.PEOPLE_ROOT
 SKIP_NAMES = {"__junk__", "junk", "unknown", "_unknown", "_duplicates", "_blurred"}
 
 

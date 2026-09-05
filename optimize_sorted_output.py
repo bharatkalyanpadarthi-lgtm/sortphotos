@@ -22,9 +22,11 @@ import tempfile
 from collections import defaultdict
 from pathlib import Path
 
+import pipeline_paths
+
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
               ".tif", ".tiff", ".heic", ".heif"}
-DEFAULT_PHOTOS = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
+DEFAULT_PHOTOS = pipeline_paths.PEOPLE_ROOT
 
 
 def iter_images(root: Path) -> list[Path]:

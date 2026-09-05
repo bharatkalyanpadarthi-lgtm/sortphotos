@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import pickle
+import re
 import shutil
 import subprocess
 import sys
@@ -52,12 +53,28 @@ import webbrowser
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import cv2
 import numpy as np
 
 import operation_ledger
+import generated_artifacts
+import pipeline_paths
+import nudity_confirmations
+import identity_profiles
+import identity_confirmations
+import identity_hard_negatives
+import analysis_index
+import copy_journal
+import content_identity
+import asset_processing
+import appearance_profiles
+import face_detection
+import file_operations
+import routing_policy
+import secondary_identity_matcher
+import source_batch_consensus
 
 warnings.filterwarnings("ignore", category=FutureWarning, module=r"insightface\..*")
 warnings.filterwarnings("ignore", message=r".*`estimate` is deprecated.*", category=FutureWarning)
@@ -82,17 +99,22 @@ DETECTION_WORKER_ENV_LIMITS = {
 # ============================================================================
 
 DEFAULT_INPUT  = Path.home() / "Pictures"
-DEFAULT_OUTPUT = Path.home() / "Pictures" / "sorted_all_pictures"
+DEFAULT_OUTPUT = pipeline_paths.SORTED_ROOT
 CACHE_DIR      = Path.home() / ".face_sort_cache"
 CACHE_FILE     = CACHE_DIR / "cache.pkl"
 AI_CACHE_FILE  = CACHE_DIR / "ai_suggestions.json"
 LABEL_STATE_FILE = CACHE_DIR / "labeling_state.pkl"
 IDENTITY_DB_FILE = CACHE_DIR / "person_identity_db.pkl"
+IDENTITY_DB_BUILD_FILE = CACHE_DIR / "person_identity_db.building.pkl"
+IDENTITY_CONFIRMATIONS_FILE = identity_confirmations.default_path(CACHE_DIR)
+IDENTITY_HARD_NEGATIVES_FILE = identity_hard_negatives.default_path(CACHE_DIR)
 REFERENCE_CENTROIDS_FILE = CACHE_DIR / "reference_centroids.pkl"
-FINGERPRINT_CACHE_FILE = CACHE_DIR / "advanced_duplicate_fingerprints.json"
+DEFAULT_FINGERPRINT_CACHE_FILE = CACHE_DIR / "advanced_duplicate_fingerprints.json"
+FINGERPRINT_CACHE_FILE = DEFAULT_FINGERPRINT_CACHE_FILE
 CACHE_VERSION  = 2
 LABEL_STATE_VERSION = 1
-IDENTITY_DB_VERSION = 1
+IDENTITY_DB_VERSION = 2
+IDENTITY_CALIBRATION_VERSION = 7
 FINGERPRINT_CACHE_VERSION = 1
 
 BATCH_SIZE = 50
@@ -107,6 +129,18 @@ MIN_DET_SCORE = 0.55
 MIN_FACE_PX   = 70
 MIN_SHARPNESS = 40.0
 
+# The strict thresholds above select good reference/training faces. They must
+# not be used to decide whether an image contains a face at all. A second,
+# conservative recovery tier keeps soft, small, or compressed faces available
+# for clustering and identity review instead of incorrectly filing them as
+# "no usable face".
+RECOVERY_MIN_DET_SCORE = 0.45
+RECOVERY_MIN_FACE_PX = 24
+RECOVERY_MIN_SHARPNESS = 1.0
+RECOVERY_EMBEDDING_DEDUP_SIMILARITY = 0.94
+FACE_PRESENCE_MIN_DET_SCORE = 0.20
+FALLBACK_MAX_IMAGE_DIMENSION = 1600
+
 CROP_SIZE     = 256
 JPEG_QUALITY  = 92
 PADDING_RATIO = 0.30
@@ -114,12 +148,15 @@ PADDING_RATIO = 0.30
 STAGE_A_EPS               = 0.32
 STAGE_A_MIN_SAMPLES       = 2
 STAGE_B_MAX_DIST          = 0.50
+STAGE_B_MIN_MARGIN        = 0.04
 MERGE_CENTROID_DIST       = 0.42   # raised from 0.38 — auto-merges more pairs
                                     # without asking. Tuned for celebrity
                                     # collections where false merges are rare.
                                     # For family photos, lower back to 0.38.
 ANCHOR_MAX_DIST           = 0.55
+ANCHOR_MIN_MARGIN         = 0.05
 ANCHOR_CLUSTER_MERGE_DIST = 0.42
+ANCHOR_CLUSTER_MERGE_MIN_MARGIN = 0.08
 REVIEW_CLOSE_PAIRS_DIST   = 0.46   # lowered from 0.50 — fewer review prompts.
 
 SHARPNESS_BLUR_THRESHOLD = 0.0
@@ -137,8 +174,9 @@ INTERACTIVE_LABELING = True
 DEDUP_DUPLICATES     = True
 REVIEW_CLOSE_PAIRS   = True
 USE_AI_SUGGESTIONS   = True
-# New scans automatically place detector hits in each person's photos/nude
-# folder. The normal all/nude hardlink view is rebuilt after daily runs.
+# New scans place only high-confidence, non-conflicting explicit detections in
+# each person's photos/nude folder. Borderline model output remains reviewable
+# instead of being mislabeled as confirmed nudity.
 NUDITY_SORT_ENABLED  = True
 
 MAKE_MONTAGES   = True
@@ -146,31 +184,45 @@ MONTAGE_COLS    = 6
 MONTAGE_TILE_PX = 160
 INCLUDE_UNKNOWN = True
 
-NUDITY_THRESHOLD = 0.70
+NUDITY_THRESHOLD = 0.80
 NUDITY_UNCERTAIN_THRESHOLD = 0.45
 NUDITY_POSSIBLE_DIR = f"{PERSON_PHOTOS_DIR}/{PERSON_NUDE_DIR}"
-NUDITY_UNCERTAIN_DIR = NUDITY_POSSIBLE_DIR
-NUDITY_CLASS_THRESHOLDS = {
-    "FEMALE_BREAST_EXPOSED": 0.72,
-    "BUTTOCKS_EXPOSED": 0.72,
-    "FEMALE_GENITALIA_EXPOSED": 0.55,
-    "MALE_GENITALIA_EXPOSED": 0.55,
-    "ANUS_EXPOSED": 0.55,
-}
-NUDITY_EXPLICIT_CLASSES = {
-    "FEMALE_BREAST_EXPOSED",
-    "FEMALE_GENITALIA_EXPOSED",
-    "MALE_GENITALIA_EXPOSED",
-    "BUTTOCKS_EXPOSED",
-    "ANUS_EXPOSED",
-}
+NUDITY_UNCERTAIN_DIR = f"{PERSON_REVIEW_DIR}/uncertain_nudity"
+# This remains conservative by default. A user who has explicitly chosen to
+# treat every uncertain result as nude can persist that routing preference in
+# the per-Mac face pipeline config without changing global detector thresholds.
+ROUTE_UNCERTAIN_NUDITY_TO_NUDE = pipeline_paths.configured_bool(
+    "route_uncertain_nudity_to_nude",
+    False,
+    "FACE_ROUTE_UNCERTAIN_NUDITY_TO_NUDE",
+)
+NUDITY_CLASS_THRESHOLDS = dict(routing_policy.DEFAULT_CLASS_THRESHOLDS)
+NUDITY_EXPLICIT_CLASSES = set(routing_policy.EXPLICIT_CLASSES)
+NUDITY_COVERED_EQUIVALENTS = dict(routing_policy.COVERED_EQUIVALENTS)
+NUDITY_COVERED_CLASSES = set(routing_policy.COVERED_CLASSES)
+NUDITY_EXPOSED_OVER_COVERED_MARGIN = 0.15
 _NUDITY_DETECTOR = None
 _NUDITY_IMPORT_WARNED = False
+_NUDITY_STATUS_CACHE: dict[str, str] = {}
+NUDITY_ANALYSIS_VERSION = "nudenet-policy-v3-spatial-conflicts"
 
 AUTO_PERSON_MATCH_ENABLED = True
 AUTO_PERSON_MATCH_DIST = 0.40
 AUTO_PERSON_MATCH_MARGIN = 0.04
-IDENTITY_MAX_IMAGES_PER_PERSON = 10
+AUTO_PERSON_MATCH_MIN_CLUSTER_FACES = 2
+AUTO_PERSON_MATCH_MIN_CLUSTER_SOURCES = 2
+AUTO_PERSON_MATCH_MIN_AGREEMENT = 0.80
+AUTO_PERSON_MATCH_MIN_REFERENCE_FACES = 3
+IDENTITY_MAX_IMAGES_PER_PERSON = 80
+IDENTITY_MAX_PROTOTYPES_PER_PERSON = 12
+IDENTITY_MAX_TRUSTED_PROTOTYPES_PER_PERSON = 4
+IDENTITY_CANDIDATE_POOL_MIN = 40
+AUTO_PERSON_SINGLE_MATCH_DIST = 0.27
+# Calibrated against the labeled local cache. A single image has no independent
+# corroborating source, so require a clearly separated best identity. Multi-
+# image clusters continue to use the consensus lane below.
+AUTO_PERSON_SINGLE_MATCH_MARGIN = 0.42
+AUTO_PERSON_SINGLE_MIN_QUALITY = 0.58
 POST_PROCESS_OUTPUT = True
 USE_HARDLINKS = True
 ARCHIVE_ORGANIZED_SOURCES = False
@@ -181,6 +233,8 @@ SOURCE_ARCHIVE_DIR_NAME = "organized_sources"
 SCANNED_SOURCE_ARCHIVE_DIR_NAME = "ready_to_delete/scanned_sources"
 INTAKE_DUPLICATE_ARCHIVE_DIR_NAME = "ready_to_delete/intake_duplicates"
 INTAKE_NEAR_VISUAL_REVIEW_DIR_NAME = f"{PERSON_REVIEW_DIR}/near_visual"
+UNASSIGNED_INTAKE_DIR_NAME = "unassigned_intake"
+UNASSIGNED_INTAKE_REPORT_DIR_NAME = "unassigned_intake/reports"
 
 GOOGLE_LENS_URL = "https://lens.google.com/"
 LENS_SEARCH_CROP_SIZE = 512
@@ -211,7 +265,7 @@ VIDEO_EXTS = {
     ".3g2", ".3gp", ".avi", ".m4v", ".mkv", ".mov", ".mp4",
     ".mpeg", ".mpg", ".mts", ".m2ts", ".webm", ".wmv",
 }
-TO_PROCESS_DIR = Path.home() / "Pictures" / "To Process"
+TO_PROCESS_DIR = pipeline_paths.TO_PROCESS
 VIDEOS_DIR = Path.home() / "Pictures" / "videos"
 INVALID_NAME_CHARS = '/\\:*?"<>|'
 DEFAULT_EXCLUDED_SCAN_DIRS = {
@@ -291,6 +345,12 @@ class FaceRecord:
     cluster_id: int = -1
     prior_label: str | None = None
     _crop_array: np.ndarray | None = None
+    pose_label: str = "unknown"
+    identity_review_reason: str = ""
+    recovery_assigned: bool = False
+    bbox: tuple[float, ...] = ()
+    keypoints: tuple[tuple[float, ...], ...] = ()
+    content_sha256: str = ""
 
     def crop(self) -> np.ndarray:
         if self._crop_array is not None:
@@ -321,6 +381,10 @@ class CachedFace:
     image_phash: np.ndarray
     crop_jpeg: bytes
     label: str | None = None
+    pose_label: str = "unknown"
+    bbox: tuple[float, ...] = ()
+    keypoints: tuple[tuple[float, ...], ...] = ()
+    content_sha256: str = ""
 
 
 @dataclass
@@ -346,6 +410,7 @@ class LabelingState:
     cluster_ids: list[int] = field(default_factory=list)   # parallel to faces
     name_map: dict[int, str] = field(default_factory=dict)
     completed: bool = False
+    recovery_metadata: list[tuple[str, bool]] = field(default_factory=list)
 
 
 @dataclass
@@ -354,6 +419,20 @@ class IdentityDB:
     config_fingerprint: str = ""
     identities: dict[str, np.ndarray] = field(default_factory=dict)
     source_counts: dict[str, int] = field(default_factory=dict)
+    prototypes: dict[str, list[np.ndarray]] = field(default_factory=dict)
+    intrinsic_match_thresholds: dict[str, float] = field(default_factory=dict)
+    intrinsic_strict_thresholds: dict[str, float] = field(default_factory=dict)
+    match_thresholds: dict[str, float] = field(default_factory=dict)
+    strict_thresholds: dict[str, float] = field(default_factory=dict)
+    nearest_impostor_distances: dict[str, float] = field(default_factory=dict)
+    source_signatures: dict[str, str] = field(default_factory=dict)
+    prototype_sources: dict[str, list[str]] = field(default_factory=dict)
+    pose_prototypes: dict[str, dict[str, list[np.ndarray]]] = field(default_factory=dict)
+    pose_prototype_sources: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    appearance_prototypes: dict[str, dict[str, list[np.ndarray]]] = field(default_factory=dict)
+    appearance_prototype_sources: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    appearance_era_cutoffs: dict[str, float] = field(default_factory=dict)
+    calibration_version: int = IDENTITY_CALIBRATION_VERSION
 
 
 def install_pickle_class_aliases() -> None:
@@ -392,6 +471,35 @@ def iter_images(root: Path,
             p = base / filename
             if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
                 yield p
+
+
+def bounded_input_images(images: Iterable[Path], limit: int = 0) -> list[Path]:
+    """Return a deterministic input slice so interrupted intake can resume."""
+    ordered = sorted(images, key=lambda path: str(path).casefold())
+    return ordered[:limit] if limit > 0 else ordered
+
+
+def cache_path_key(path: str | os.PathLike[str]) -> str:
+    """Return a stable path key without touching every path component on disk.
+
+    ``realpath`` performs several filesystem lookups per path. Building cache
+    indexes with it made large external libraries appear frozen for minutes.
+    A lexical absolute path is sufficient here; a symlink alias can only cause
+    a safe cache miss and re-analysis, never an incorrect cache hit.
+    """
+    return os.path.normcase(os.path.abspath(os.path.expanduser(os.fspath(path))))
+
+
+def iter_person_original_images(people_dir: Path) -> Iterable[Path]:
+    """Yield only canonical person-library originals, never sibling staging folders."""
+    if not people_dir.exists():
+        return
+    for person_dir in sorted(people_dir.iterdir(), key=lambda p: p.name.casefold()):
+        if not person_dir.is_dir() or person_dir.name.startswith((".", "_")):
+            continue
+        photos_dir = person_dir / PERSON_PHOTOS_DIR
+        scan_root = photos_dir if photos_dir.exists() else person_dir
+        yield from iter_images(scan_root, excluded_dir_names=set())
 
 
 def iter_videos(root: Path) -> Iterable[Path]:
@@ -433,126 +541,53 @@ def move_to_process_videos(input_dir: Path, videos_dir: Path = VIDEOS_DIR) -> in
     videos = list(iter_videos(resolved_input))
     if not videos:
         return 0
-
-    moved = 0
-    videos_dir = videos_dir.expanduser().resolve()
-    for src in sorted(videos, key=lambda p: str(p).lower()):
-        if not src.exists():
-            continue
-        try:
-            rel = src.resolve().relative_to(resolved_input)
-        except ValueError:
-            rel = Path(src.name)
-        dest = unique_path(videos_dir / rel)
-        try:
-            operation_ledger.move_path(
-                src,
-                dest,
-                sorted_root=DEFAULT_OUTPUT,
-                operation="sort_photos.move_to_process_videos",
-                reason="move video files out of To Process before image scan",
-                extra={"relative_path": rel.as_posix()},
-            )
-            moved += 1
-        except Exception as e:  # noqa: BLE001
-            log.warning("Could not move video %s to %s: %s", src, dest, e)
-    if moved:
-        removed = prune_empty_dirs(resolved_input)
-        log.info("Moved %d video file(s) from To Process to %s; removed %d empty folder(s).",
-                 moved, videos_dir, removed)
-    return moved
+    log.warning(
+        "Leaving %d video file(s) in To Process. Face Terminal classifies videos "
+        "with sort_videos.py before the image scan.",
+        len(videos),
+    )
+    return 0
 
 
 def imread_unicode(path: Path) -> np.ndarray | None:
     with suppress_native_stderr():
-        try:
-            data = np.fromfile(str(path), dtype=np.uint8)
-            if data.size == 0:
-                return None
-            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-            if img is not None and getattr(img, "size", 0) > 0:
-                return img
-        except Exception:
-            pass
-
-        try:
-            from PIL import Image, ImageFile
-            import pillow_heif
-
-            ImageFile.LOAD_TRUNCATED_IMAGES = True
-            if hasattr(pillow_heif, "register_heif_opener"):
-                pillow_heif.register_heif_opener()
-            with Image.open(path) as im:
-                im.load()
-            return cv2.cvtColor(np.array(im.convert("RGB")), cv2.COLOR_RGB2BGR)
-        except Exception:
-            return None
+        decoded = asset_processing.decode_image(path)
+    return decoded.bgr if decoded is not None else None
 
 
 def sharpness(bgr: np.ndarray) -> float:
-    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if bgr.ndim == 3 else bgr
-    return float(cv2.Laplacian(g, cv2.CV_64F).var())
+    return face_detection.sharpness(bgr)
 
 
 def square_pad_bbox(x1, y1, x2, y2, img_w, img_h, pad_ratio):
-    w, h = x2 - x1, y2 - y1
-    cx, cy = x1 + w / 2, y1 + h / 2
-    side = max(w, h)
-    half = side / 2 * (1 + pad_ratio)
-    nx1, ny1, nx2, ny2 = cx - half, cy - half, cx + half, cy + half
-    return (max(0, int(round(nx1))), max(0, int(round(ny1))),
-            min(img_w, int(round(nx2))), min(img_h, int(round(ny2))))
+    return face_detection.square_pad_bbox(
+        x1, y1, x2, y2, img_w, img_h, pad_ratio,
+    )
 
 
 def yaw_proxy_from_kps(kps, bbox: np.ndarray) -> float:
-    if kps is None or len(kps) < 3:
-        return 0.5
-    left_eye, right_eye, nose = kps[0], kps[1], kps[2]
-    eye_mid_x = (left_eye[0] + right_eye[0]) / 2.0
-    face_w = max(1.0, bbox[2] - bbox[0])
-    offset = abs(nose[0] - eye_mid_x) / face_w
-    return float(np.clip(1.0 - offset * 4.0, 0.0, 1.0))
+    return face_detection.yaw_proxy_from_keypoints(kps, bbox)
 
 
 def quality_score_from_parts(det_score: float, bbox_size: float,
                               sharp: float, yaw: float) -> float:
-    s_det   = np.clip((det_score - 0.4) / 0.55, 0.0, 1.0)
-    s_size  = np.clip((bbox_size - 60.0) / 240.0, 0.0, 1.0)
-    s_sharp = np.clip(np.log1p(sharp) / np.log1p(400.0), 0.0, 1.0)
-    parts = np.array([s_det, s_size, s_sharp, yaw]) + 1e-3
-    return float(np.exp(np.log(parts).mean()))
+    return face_detection.quality_score(det_score, bbox_size, sharp, yaw)
 
 
 def perceptual_hash(bgr: np.ndarray, hash_size: int = 8) -> np.ndarray:
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if bgr.ndim == 3 else bgr
-    resized = cv2.resize(gray, (hash_size * 4, hash_size * 4),
-                         interpolation=cv2.INTER_AREA).astype(np.float32)
-    dct = cv2.dct(resized)
-    dct_low = dct[:hash_size, :hash_size].flatten()
-    median = float(np.median(dct_low[1:]))
-    return dct_low > median
+    return asset_processing.perceptual_hash(bgr, hash_size)
 
 
 def phash_to_int(bits: np.ndarray) -> int:
-    value = 0
-    for bit in bits.flatten():
-        value = (value << 1) | int(bool(bit))
-    return value
+    return asset_processing.phash_to_int(bits)
 
 
 def sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    return file_operations.sha256_file(path)
 
 
 def decoded_pixel_sha256(img: np.ndarray) -> str:
-    h = hashlib.sha256()
-    h.update(str(img.shape).encode("ascii"))
-    h.update(np.ascontiguousarray(img).tobytes())
-    return h.hexdigest()
+    return asset_processing.decoded_pixel_sha256(img)
 
 
 def hamming(a: np.ndarray, b: np.ndarray) -> int:
@@ -564,19 +599,87 @@ def hamming_int(a: int, b: int) -> int:
 
 
 def duplicate_nudity_status_for_path(path: Path) -> str:
-    parts = [p.casefold() for p in path.parts]
-    name = path.name.casefold()
-    for i, part in enumerate(parts):
-        next_part = parts[i + 1] if i + 1 < len(parts) else ""
-        if part in {"photos", "all", "review"} and next_part in {"nude", "nudity_possible"}:
-            return "possible"
-        if part in {"photos_nude", "_possible_nudity", "nudity_possible"}:
-            return "possible"
-        if part in {"_uncertain_nudity", "uncertain_nudity"}:
-            return "uncertain"
-    if "nudity_possible" in name or "_nude" in name or "_nudity_" in name:
+    return routing_policy.duplicate_nudity_status_for_path(path)
+
+
+def classified_nudity_status(
+    path: Path,
+    file_hash: str | None = None,
+    asset_index: analysis_index.AnalysisIndex | None = None,
+) -> str:
+    """Return a duplicate category without merging normal and nude variants.
+
+    Explicit folder/name markers take precedence. Otherwise NudeNet is used and
+    the decision is cached by content hash so the copied destination does not
+    need to be analysed a second time. Detection failures are deliberately
+    returned as ``unknown`` so an intake file is preserved instead of being
+    discarded as a normal duplicate.
+    """
+    try:
+        current_hash = content_identity.content_sha256(path)
+    except OSError:
+        return "unknown"
+    if file_hash and file_hash != current_hash:
+        return "unknown"
+    file_hash = current_hash
+    if nudity_confirmations.is_confirmed(path, sha256=file_hash):
+        if asset_index is not None:
+            asset_index.record_nudity(
+                path, model="manual-confirmation-v1", status="possible", detections=[], expected_sha256=file_hash)
+        if file_hash:
+            _NUDITY_STATUS_CACHE[file_hash] = "possible"
         return "possible"
-    return "safe"
+
+    path_status = duplicate_nudity_status_for_path(path)
+    if path_status != "safe":
+        if asset_index is not None:
+            asset_index.record_nudity(
+                path, model="path-policy-v1", status=path_status, detections=[], expected_sha256=file_hash)
+        return path_status
+
+    if file_hash and file_hash in _NUDITY_STATUS_CACHE:
+        return _NUDITY_STATUS_CACHE[file_hash]
+    if asset_index is not None:
+        cached = asset_index.cached_nudity(path, NUDITY_ANALYSIS_VERSION)
+        if cached is not None:
+            status, _detections = cached
+            if file_hash:
+                _NUDITY_STATUS_CACHE[file_hash] = status
+            return status
+
+    detector = _get_nudity_detector()
+    if detector is None or not path.exists():
+        return "unknown"
+    try:
+        detections = _detect_nudity_with_fallback(detector, path)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Nudity classification unavailable for %s: %s", path.name, exc)
+        return "unknown"
+
+    subdir, _best_class, _best_score = _nudity_category(detections)
+    try:
+        unchanged = content_identity.content_sha256(path) == file_hash
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        return "unknown"
+    if subdir == NUDITY_POSSIBLE_DIR:
+        status = "possible"
+    elif subdir == NUDITY_UNCERTAIN_DIR:
+        status = "uncertain"
+    else:
+        status = "safe"
+    if asset_index is not None:
+        asset_index.record_nudity(
+            path,
+            model=NUDITY_ANALYSIS_VERSION,
+            status=status,
+            detections=detections,
+            expected_sha256=file_hash,
+        )
+    if file_hash:
+        _NUDITY_STATUS_CACHE[file_hash] = status
+    return status
 
 
 def sanitize_name(name: str) -> str:
@@ -587,10 +690,12 @@ def sanitize_name(name: str) -> str:
 
 
 def is_real_person_label(name: str | None) -> bool:
-    return bool(name
-                and name != "unknown"
-                and name != "__junk__"
-                and not name.startswith("person_"))
+    normalized = str(name or "").strip().casefold()
+    return bool(
+        normalized
+        and normalized not in {"unknown", "__junk__", "junk"}
+        and not normalized.startswith("person_")
+    )
 
 
 def unique_dest(dest_dir: Path, filename: str) -> Path:
@@ -630,32 +735,45 @@ def filename_prefix_from_person(person: str) -> str:
 
 
 def next_numbered_dest(base_dir: Path,
+                       person_dir: Path,
                        person: str,
                        src: Path,
                        next_indexes: dict[Path, int]) -> Path:
     prefix = filename_prefix_from_person(person)
-    if base_dir not in next_indexes:
+    if person_dir not in next_indexes:
         max_index = 0
-        pattern_prefix = f"{prefix}_"
-        if base_dir.exists():
-            for existing in base_dir.iterdir():
+        pattern = re.compile(
+            rf"^{re.escape(prefix)}_(\d+)(?:_[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*)?$",
+            re.IGNORECASE,
+        )
+        photos_root = person_dir / PERSON_PHOTOS_DIR
+        if photos_root.exists():
+            for existing in photos_root.rglob("*"):
                 if not existing.is_file():
                     continue
                 if existing.suffix.lower() not in IMAGE_EXTS:
                     continue
-                stem = existing.stem
-                if not stem.startswith(pattern_prefix):
+                relative_parts = existing.relative_to(photos_root).parts
+                if any(part in {
+                    "all",
+                    "_smart_albums",
+                    "_smart_albums_v2",
+                    "_smart_albums_simple_preview",
+                    "review",
+                    "_duplicates",
+                    "_near_visual_review",
+                } for part in relative_parts[:-1]):
                     continue
-                suffix = stem[len(pattern_prefix):]
-                if suffix.isdigit():
-                    max_index = max(max_index, int(suffix))
-        next_indexes[base_dir] = max_index + 1
+                match = pattern.fullmatch(existing.stem)
+                if match:
+                    max_index = max(max_index, int(match.group(1)))
+        next_indexes[person_dir] = max_index + 1
 
     ext = src.suffix.lower() or ".jpg"
     while True:
-        i = next_indexes[base_dir]
-        next_indexes[base_dir] = i + 1
-        candidate = base_dir / f"{prefix}_{i:03d}{ext}"
+        i = next_indexes[person_dir]
+        next_indexes[person_dir] = i + 1
+        candidate = base_dir / f"{prefix}_{i:05d}{ext}"
         if not candidate.exists():
             return candidate
 
@@ -678,18 +796,29 @@ def _get_nudity_detector():
     return _NUDITY_DETECTOR
 
 
+def nudity_decision(detections: list[dict]) -> tuple[str, str, float, str]:
+    """Return confirmed_nude, likely_safe, or needs_review.
+
+    NudeNet is a useful candidate detector, not a final semantic judge. In
+    particular, swimsuits can trigger BUTTOCKS_EXPOSED and sheer/skin-toned
+    clothing can trigger breast classes. Only strong, non-conflicting evidence
+    is allowed to auto-file an image as confirmed nudity.
+    """
+    return routing_policy.nudity_decision(
+        detections,
+        class_thresholds=NUDITY_CLASS_THRESHOLDS,
+        default_threshold=NUDITY_THRESHOLD,
+        uncertain_threshold=NUDITY_UNCERTAIN_THRESHOLD,
+        exposed_over_covered_margin=NUDITY_EXPOSED_OVER_COVERED_MARGIN,
+    )
+
+
 def _nudity_category(detections: list[dict]) -> tuple[str | None, str, float]:
-    explicit = [d for d in detections if d.get("class") in NUDITY_EXPLICIT_CLASSES]
-    if not explicit:
-        return None, "", 0.0
-    best = max(explicit, key=lambda d: float(d.get("score", 0.0)))
-    best_class = str(best.get("class", ""))
-    best_score = float(best.get("score", 0.0))
-    class_threshold = max(NUDITY_THRESHOLD, NUDITY_CLASS_THRESHOLDS.get(best_class, NUDITY_THRESHOLD))
-    if best_score >= class_threshold:
+    decision, best_class, best_score, _reason = nudity_decision(detections)
+    if decision == "confirmed_nude":
         return NUDITY_POSSIBLE_DIR, best_class, best_score
-    if best_score >= NUDITY_UNCERTAIN_THRESHOLD:
-        return NUDITY_POSSIBLE_DIR, best_class, best_score
+    if decision == "needs_review" and best_class:
+        return NUDITY_UNCERTAIN_DIR, best_class, best_score
     return None, best_class, best_score
 
 
@@ -724,9 +853,12 @@ def _detect_nudity_with_fallback(detector, path: Path) -> list[dict]:
                     pass
 
 
-def maybe_move_to_nudity_subfolder(path: Path, person_dir: Path) -> tuple[Path, str | None]:
-    detector = _get_nudity_detector()
-    if detector is None or not path.exists():
+def maybe_move_to_nudity_subfolder(path: Path,
+                                   person_dir: Path,
+                                   file_hash: str | None = None,
+                                   preclassified_status: str | None = None,
+                                   ) -> tuple[Path, str | None]:
+    if not path.exists():
         return path, None
     try:
         rel_parts = path.relative_to(person_dir).parts
@@ -742,25 +874,36 @@ def maybe_move_to_nudity_subfolder(path: Path, person_dir: Path) -> tuple[Path, 
         or "_uncertain_nudity" in rel_parts
     ):
         return path, None
-    try:
-        detections = _detect_nudity_with_fallback(detector, path)
-    except Exception as e:  # noqa: BLE001
-        log.debug("Nudity check skipped for %s: %s", path.name, e)
+    status = preclassified_status or classified_nudity_status(path, file_hash=file_hash)
+    if status == "unknown":
         return path, "error"
-    subdir, _best_class, _best_score = _nudity_category(detections)
-    if not subdir:
+    if status == "possible":
+        target_subdir = NUDITY_POSSIBLE_DIR
+    elif status == "uncertain":
+        target_subdir = (
+            NUDITY_POSSIBLE_DIR
+            if ROUTE_UNCERTAIN_NUDITY_TO_NUDE
+            else NUDITY_UNCERTAIN_DIR
+        )
+    else:
         return path, None
-    dest = unique_dest(person_dir / subdir, path.name)
+    dest = unique_dest(person_dir / target_subdir, path.name)
     sorted_root = person_dir.parent.parent if person_dir.parent.name == "photos_by_person" else DEFAULT_OUTPUT
     operation_ledger.move_path(
         path,
         dest,
         sorted_root=sorted_root,
         operation="sort_photos.nudity_subfolder",
-        reason="move detected nudity candidate into per-person photos/nude folder",
-        extra={"nudity_subdir": subdir},
+        reason=(
+            "move confirmed nudity into per-person photos/nude folder"
+            if status == "possible"
+            else "move user-routed uncertain nudity into per-person photos/nude folder"
+            if target_subdir == NUDITY_POSSIBLE_DIR
+            else "move ambiguous explicit nudity evidence into per-person review folder"
+        ),
+        extra={"nudity_subdir": target_subdir, "nudity_status": status},
     )
-    return dest, subdir
+    return dest, target_subdir
 
 
 # ============================================================================
@@ -770,7 +913,25 @@ def maybe_move_to_nudity_subfolder(path: Path, person_dir: Path) -> tuple[Path, 
 def config_fingerprint() -> str:
     parts = [MODEL_NAME, str(DET_SIZE), str(MIN_DET_SCORE),
              str(MIN_FACE_PX), str(MIN_SHARPNESS), str(CROP_SIZE), str(PADDING_RATIO)]
+    parts.extend(["recovery=" + str(face_detection.RECOVERY_VERSION),
+                  "quality=" + str(face_detection.QUALITY_VERSION),
+                  str(RECOVERY_MIN_DET_SCORE), str(RECOVERY_MIN_FACE_PX),
+                  str(RECOVERY_MIN_SHARPNESS), str(FACE_PRESENCE_MIN_DET_SCORE),
+                  str(FALLBACK_MAX_IMAGE_DIMENSION), model_fingerprint()])
     return "|".join(parts)
+
+
+def model_fingerprint() -> str:
+    root = Path.home() / ".insightface" / "models" / MODEL_NAME
+    parts = [MODEL_NAME]
+    for model in sorted(root.glob("*.onnx")):
+        if model.name in {"genderage.onnx", "1k3d68.onnx", "2d106det.onnx"}:
+            continue
+        try:
+            parts.append(f"{model.name}:{content_identity.content_sha256(model)}")
+        except OSError:
+            parts.append(f"{model.name}:unavailable")
+    return "model=" + hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
 def file_signature(path: Path) -> tuple[float, int]:
@@ -789,14 +950,69 @@ def load_cache() -> CacheState:
             log.warning("Cache version changed. Discarding cache.")
             return CacheState(config_fingerprint=config_fingerprint())
         if data.config_fingerprint != config_fingerprint():
-            log.warning("Detection config changed. Discarding face cache, keeping labels.")
+            log.warning("Detection config changed. Invalidating negative results, preserving labeled evidence.")
             preserved = [c for c in data.faces if c.label]
+            old_model = str(data.config_fingerprint).split("|")[-1]
+            compatible = (str(data.config_fingerprint).split("|")[0] == MODEL_NAME
+                          and (not old_model.startswith("model=") or old_model == model_fingerprint()))
+            preserved_sources = {c.src_str for c in preserved} if compatible else set()
             data = CacheState(config_fingerprint=config_fingerprint(),
-                              file_signatures={}, faces=preserved)
+                              file_signatures={p: sig for p, sig in data.file_signatures.items()
+                                               if p in preserved_sources}, faces=preserved)
+        for face in data.faces:
+            if not getattr(face, "pose_label", "") or face.pose_label == "unknown":
+                face.pose_label = face_detection.pose_label_from_yaw_proxy(face.yaw_proxy)
         return data
     except Exception as e:  # noqa: BLE001
         log.warning("Cache load failed (%s). Starting fresh.", e)
         return CacheState(config_fingerprint=config_fingerprint())
+
+
+def normalize_identity_db(db: IdentityDB) -> IdentityDB:
+    """Upgrade older single-centroid pickles in memory without data loss."""
+    if not hasattr(db, "prototypes"):
+        db.prototypes = {}
+    if not hasattr(db, "match_thresholds"):
+        db.match_thresholds = {}
+    if not hasattr(db, "strict_thresholds"):
+        db.strict_thresholds = {}
+    if not hasattr(db, "intrinsic_match_thresholds"):
+        db.intrinsic_match_thresholds = dict(db.match_thresholds)
+    if not hasattr(db, "intrinsic_strict_thresholds"):
+        db.intrinsic_strict_thresholds = dict(db.strict_thresholds)
+    if not hasattr(db, "nearest_impostor_distances"):
+        db.nearest_impostor_distances = {}
+    if not hasattr(db, "source_signatures"):
+        db.source_signatures = {}
+    if not hasattr(db, "prototype_sources"):
+        db.prototype_sources = {}
+    if not hasattr(db, "pose_prototypes"):
+        db.pose_prototypes = {}
+    if not hasattr(db, "pose_prototype_sources"):
+        db.pose_prototype_sources = {}
+    if not hasattr(db, "appearance_prototypes"):
+        db.appearance_prototypes = {}
+    if not hasattr(db, "appearance_prototype_sources"):
+        db.appearance_prototype_sources = {}
+    if not hasattr(db, "appearance_era_cutoffs"):
+        db.appearance_era_cutoffs = {}
+    if not hasattr(db, "calibration_version"):
+        db.calibration_version = 1
+    for name, centroid in db.identities.items():
+        db.prototypes.setdefault(name, [np.asarray(centroid, dtype=np.float32)])
+        db.pose_prototypes.setdefault(name, {})
+        db.pose_prototype_sources.setdefault(name, {})
+        db.appearance_prototypes.setdefault(name, {})
+        db.appearance_prototype_sources.setdefault(name, {})
+        db.appearance_era_cutoffs.setdefault(name, 0.0)
+        db.intrinsic_match_thresholds.setdefault(
+            name, db.match_thresholds.get(name, AUTO_PERSON_MATCH_DIST))
+        db.intrinsic_strict_thresholds.setdefault(
+            name, db.strict_thresholds.get(name, AUTO_PERSON_SINGLE_MATCH_DIST))
+        db.match_thresholds.setdefault(name, AUTO_PERSON_MATCH_DIST)
+        db.strict_thresholds.setdefault(name, AUTO_PERSON_SINGLE_MATCH_DIST)
+    db.version = IDENTITY_DB_VERSION
+    return db
 
 
 def load_identity_db() -> IdentityDB | None:
@@ -806,13 +1022,18 @@ def load_identity_db() -> IdentityDB | None:
         with IDENTITY_DB_FILE.open("rb") as f:
             install_pickle_class_aliases()
             db: IdentityDB = pickle.load(f)
-        if db.version != IDENTITY_DB_VERSION:
+        version = int(getattr(db, "version", 1))
+        if version not in {1, IDENTITY_DB_VERSION}:
             log.warning("Identity DB version changed. Rebuild it.")
             return None
         if db.config_fingerprint != config_fingerprint():
-            log.warning("Identity DB model config changed. Rebuild it.")
-            return None
-        return db
+            old_model = str(db.config_fingerprint).split("|")[-1]
+            if (str(db.config_fingerprint).split("|")[0] != MODEL_NAME
+                    or (old_model.startswith("model=") and old_model != model_fingerprint())):
+                log.warning("Identity embedding model changed. Rebuild required.")
+                return None
+            db.config_fingerprint = config_fingerprint()
+        return normalize_identity_db(db)
     except Exception as e:  # noqa: BLE001
         log.warning("Could not load identity DB: %s", e)
         return None
@@ -831,6 +1052,7 @@ def load_reference_centroids(path: Path) -> IdentityDB | None:
         names = list(payload.get("names", []))
         centroids = np.asarray(payload.get("centroids"), dtype=np.float32)
         counts = list(payload.get("counts", [0] * len(names)))
+        payload_prototypes = payload.get("prototypes", {})
         if len(names) == 0 or centroids.ndim != 2 or len(names) != len(centroids):
             log.warning("Reference DB is malformed: %s", path)
             return None
@@ -841,6 +1063,15 @@ def load_reference_centroids(path: Path) -> IdentityDB | None:
                 continue
             db.identities[clean] = _l2norm(centroids[i:i + 1])[0]
             db.source_counts[clean] = int(counts[i]) if i < len(counts) else 0
+            raw_prototypes = payload_prototypes.get(clean, []) if isinstance(payload_prototypes, dict) else []
+            db.prototypes[clean] = (
+                [_l2norm(np.asarray(value, dtype=np.float32)[None, :])[0] for value in raw_prototypes]
+                or [db.identities[clean]]
+            )
+            db.intrinsic_match_thresholds[clean] = AUTO_PERSON_MATCH_DIST
+            db.intrinsic_strict_thresholds[clean] = AUTO_PERSON_SINGLE_MATCH_DIST
+            db.match_thresholds[clean] = AUTO_PERSON_MATCH_DIST
+            db.strict_thresholds[clean] = AUTO_PERSON_SINGLE_MATCH_DIST
         log.info("Loaded reference identity DB: %s (%d people)",
                  path, len(db.identities))
         return db
@@ -858,24 +1089,189 @@ def merge_identity_dbs(primary: IdentityDB | None,
     merged = IdentityDB(config_fingerprint=config_fingerprint())
     merged.identities.update(primary.identities)
     merged.source_counts.update(primary.source_counts)
+    merged.prototypes.update(primary.prototypes)
+    merged.intrinsic_match_thresholds.update(primary.intrinsic_match_thresholds)
+    merged.intrinsic_strict_thresholds.update(primary.intrinsic_strict_thresholds)
+    merged.match_thresholds.update(primary.match_thresholds)
+    merged.strict_thresholds.update(primary.strict_thresholds)
+    merged.nearest_impostor_distances.update(primary.nearest_impostor_distances)
+    merged.source_signatures.update(primary.source_signatures)
+    merged.prototype_sources.update(primary.prototype_sources)
+    merged.pose_prototypes.update(primary.pose_prototypes)
+    merged.pose_prototype_sources.update(primary.pose_prototype_sources)
+    merged.appearance_prototypes.update(primary.appearance_prototypes)
+    merged.appearance_prototype_sources.update(primary.appearance_prototype_sources)
+    merged.appearance_era_cutoffs.update(primary.appearance_era_cutoffs)
     added = 0
     for name, centroid in extra.identities.items():
         if name in merged.identities:
             continue
         merged.identities[name] = centroid
         merged.source_counts[name] = extra.source_counts.get(name, 0)
+        merged.prototypes[name] = extra.prototypes.get(name, [centroid])
+        merged.intrinsic_match_thresholds[name] = extra.intrinsic_match_thresholds.get(
+            name, extra.match_thresholds.get(name, AUTO_PERSON_MATCH_DIST))
+        merged.intrinsic_strict_thresholds[name] = extra.intrinsic_strict_thresholds.get(
+            name, extra.strict_thresholds.get(name, AUTO_PERSON_SINGLE_MATCH_DIST))
+        merged.match_thresholds[name] = extra.match_thresholds.get(name, AUTO_PERSON_MATCH_DIST)
+        merged.strict_thresholds[name] = extra.strict_thresholds.get(name, AUTO_PERSON_SINGLE_MATCH_DIST)
+        if name in extra.nearest_impostor_distances:
+            merged.nearest_impostor_distances[name] = extra.nearest_impostor_distances[name]
+        if name in extra.source_signatures:
+            merged.source_signatures[name] = extra.source_signatures[name]
+        if name in extra.prototype_sources:
+            merged.prototype_sources[name] = list(extra.prototype_sources[name])
+        if name in extra.pose_prototypes:
+            merged.pose_prototypes[name] = {
+                pose: list(values)
+                for pose, values in extra.pose_prototypes[name].items()
+            }
+        if name in extra.pose_prototype_sources:
+            merged.pose_prototype_sources[name] = {
+                pose: list(values)
+                for pose, values in extra.pose_prototype_sources[name].items()
+            }
+        if name in extra.appearance_prototypes:
+            merged.appearance_prototypes[name] = {
+                label: list(values)
+                for label, values in extra.appearance_prototypes[name].items()
+            }
+        if name in extra.appearance_prototype_sources:
+            merged.appearance_prototype_sources[name] = {
+                label: list(values)
+                for label, values in extra.appearance_prototype_sources[name].items()
+            }
+        if name in extra.appearance_era_cutoffs:
+            merged.appearance_era_cutoffs[name] = float(extra.appearance_era_cutoffs[name])
         added += 1
     if added:
         log.info("Added %d people from reference DB to matcher.", added)
     return merged
 
 
-def save_identity_db(db: IdentityDB) -> None:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = IDENTITY_DB_FILE.with_suffix(".pkl.tmp")
+def write_identity_db(db: IdentityDB, destination: Path) -> None:
+    db = normalize_identity_db(db)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tmp = destination.with_suffix(destination.suffix + ".tmp")
     with tmp.open("wb") as f:
         pickle.dump(db, f, protocol=pickle.HIGHEST_PROTOCOL)
-    tmp.replace(IDENTITY_DB_FILE)
+    tmp.replace(destination)
+
+
+def save_identity_db(db: IdentityDB) -> None:
+    """Atomically promote a complete identity DB and retain the prior version."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    if IDENTITY_DB_FILE.exists():
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        backup = IDENTITY_DB_FILE.with_name(
+            f"{IDENTITY_DB_FILE.name}.bak.profile_refresh_{stamp}"
+        )
+        shutil.copy2(IDENTITY_DB_FILE, backup)
+    write_identity_db(db, IDENTITY_DB_FILE)
+
+
+def identity_source_images(person_dir: Path) -> list[Path]:
+    photos_dir = person_dir / PERSON_PHOTOS_DIR
+    scan_root = photos_dir if photos_dir.exists() else person_dir
+    images = [
+        path for path in iter_images(scan_root, excluded_dir_names=set())
+        if not any(
+            part in {
+                LEGACY_DUPLICATES_DIR,
+                BLURRED_DIR,
+                PERSON_REVIEW_DIR,
+                "all",
+                "_smart_albums",
+                "_smart_albums_v2",
+                "_smart_albums_simple_preview",
+            }
+            for part in path.relative_to(person_dir).parts[:-1]
+        )
+    ]
+    return sorted(images, key=lambda path: (
+        len(path.relative_to(person_dir).parts),
+        str(path).casefold(),
+    ))
+
+
+def identity_source_signature(person_dir: Path, images: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for image in images:
+        try:
+            stat = image.stat()
+            relative = image.relative_to(person_dir).as_posix()
+            digest.update(relative.encode("utf-8", errors="surrogateescape"))
+            digest.update(f"\0{stat.st_size}\0{stat.st_mtime_ns}\n".encode("ascii"))
+        except (OSError, ValueError):
+            continue
+    return digest.hexdigest()
+
+
+def evenly_sample_paths(paths: list[Path], limit: int) -> list[Path]:
+    if limit <= 0 or len(paths) <= limit:
+        return paths
+    indexes = np.linspace(0, len(paths) - 1, num=limit, dtype=int)
+    return [paths[int(index)] for index in sorted(set(indexes.tolist()))]
+
+
+def copy_identity_profile(source: IdentityDB, destination: IdentityDB, name: str) -> None:
+    destination.identities[name] = source.identities[name]
+    destination.source_counts[name] = source.source_counts.get(name, 0)
+    destination.prototypes[name] = list(source.prototypes.get(name, [source.identities[name]]))
+    destination.intrinsic_match_thresholds[name] = source.intrinsic_match_thresholds.get(
+        name, source.match_thresholds.get(name, AUTO_PERSON_MATCH_DIST))
+    destination.intrinsic_strict_thresholds[name] = source.intrinsic_strict_thresholds.get(
+        name, source.strict_thresholds.get(name, AUTO_PERSON_SINGLE_MATCH_DIST))
+    destination.match_thresholds[name] = source.match_thresholds.get(name, AUTO_PERSON_MATCH_DIST)
+    destination.strict_thresholds[name] = source.strict_thresholds.get(
+        name, AUTO_PERSON_SINGLE_MATCH_DIST)
+    if name in source.nearest_impostor_distances:
+        destination.nearest_impostor_distances[name] = source.nearest_impostor_distances[name]
+    if name in source.source_signatures:
+        destination.source_signatures[name] = source.source_signatures[name]
+    if name in source.prototype_sources:
+        destination.prototype_sources[name] = list(source.prototype_sources[name])
+    if name in source.pose_prototypes:
+        destination.pose_prototypes[name] = {
+            pose: list(values)
+            for pose, values in source.pose_prototypes[name].items()
+        }
+    if name in source.pose_prototype_sources:
+        destination.pose_prototype_sources[name] = {
+            pose: list(values)
+            for pose, values in source.pose_prototype_sources[name].items()
+        }
+    if name in source.appearance_prototypes:
+        destination.appearance_prototypes[name] = {
+            label: list(values)
+            for label, values in source.appearance_prototypes[name].items()
+        }
+    if name in source.appearance_prototype_sources:
+        destination.appearance_prototype_sources[name] = {
+            label: list(values)
+            for label, values in source.appearance_prototype_sources[name].items()
+        }
+    if name in source.appearance_era_cutoffs:
+        destination.appearance_era_cutoffs[name] = float(source.appearance_era_cutoffs[name])
+
+
+def calibrate_identity_db_against_impostors(db: IdentityDB) -> IdentityDB:
+    db = normalize_identity_db(db)
+    for name in db.identities:
+        consensus, strict, nearest = identity_profiles.impostor_aware_thresholds(
+            name,
+            db.identities,
+            db.prototypes,
+            base_consensus_distance=db.intrinsic_match_thresholds.get(
+                name, AUTO_PERSON_MATCH_DIST),
+            base_strict_distance=db.intrinsic_strict_thresholds.get(
+                name, AUTO_PERSON_SINGLE_MATCH_DIST),
+        )
+        db.match_thresholds[name] = consensus
+        db.strict_thresholds[name] = strict
+        db.nearest_impostor_distances[name] = nearest
+    db.calibration_version = IDENTITY_CALIBRATION_VERSION
+    return db
 
 
 def build_identity_db_from_person_folders(people_dir: Path,
@@ -889,62 +1285,276 @@ def build_identity_db_from_person_folders(people_dir: Path,
 
     person_dirs = sorted([p for p in people_dir.iterdir() if p.is_dir()],
                          key=lambda p: p.name.lower())
-    current_names = {
-        p.name for p in person_dirs
-        if not p.name.startswith("_") and not p.name.startswith(".") and is_real_person_label(p.name)
-    }
     existing = None if force_rebuild else load_identity_db()
+    partial: IdentityDB | None = None
+    if not force_rebuild and IDENTITY_DB_BUILD_FILE.is_file():
+        try:
+            with IDENTITY_DB_BUILD_FILE.open("rb") as handle:
+                install_pickle_class_aliases()
+                candidate_partial = normalize_identity_db(pickle.load(handle))
+            if candidate_partial.config_fingerprint == config_fingerprint():
+                partial = candidate_partial
+                log.info(
+                    "Resuming identity profile checkpoint: %d completed people.",
+                    len(partial.identities),
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Ignoring unreadable identity build checkpoint: %s", exc)
     db = IdentityDB(config_fingerprint=config_fingerprint())
-    if existing and existing.config_fingerprint == config_fingerprint():
-        db.identities = {
-            name: emb for name, emb in existing.identities.items()
-            if name in current_names
-        }
-        db.source_counts = {
-            name: count for name, count in existing.source_counts.items()
-            if name in db.identities
-        }
+    work: list[tuple[Path, list[Path], str, list[Path]]] = []
+    for person_dir in person_dirs:
+        name = person_dir.name
+        if name.startswith(("_", ".")) or not is_real_person_label(name):
+            continue
+        images = identity_source_images(person_dir)
+        confirmed_paths = identity_confirmations.paths_for_person(
+            IDENTITY_CONFIRMATIONS_FILE, name, people_dir
+        )
+        source_signature = identity_source_signature(person_dir, images)
+        confirmation_signature = identity_confirmations.signature_for_person(
+            IDENTITY_CONFIRMATIONS_FILE, name, people_dir
+        )
+        signature = (
+            hashlib.sha256(
+                f"{source_signature}:{confirmation_signature}".encode("ascii")
+            ).hexdigest()
+            if confirmed_paths
+            else source_signature
+        )
+        if (
+            partial is not None
+            and name in partial.identities
+            and partial.source_signatures.get(name) == signature
+        ):
+            copy_identity_profile(partial, db, name)
+            continue
+        if (
+            existing is not None
+            and existing.calibration_version == IDENTITY_CALIBRATION_VERSION
+            and name in existing.identities
+            and existing.source_signatures.get(name) == signature
+        ):
+            copy_identity_profile(existing, db, name)
+            continue
+        work.append((person_dir, images, signature, confirmed_paths))
 
-    app = _build_app()
-    for person_dir in tqdm(person_dirs, desc="Building identity DB", unit="person"):
-        if person_dir.name.startswith("_") or person_dir.name.startswith(".") or not is_real_person_label(person_dir.name):
-            continue
-        if person_dir.name in db.identities:
-            continue
-        embs: list[np.ndarray] = []
-        images = [
-            p for p in iter_images(person_dir, excluded_dir_names=set())
-            if not any(
-                part in {
-                    LEGACY_DUPLICATES_DIR,
-                    BLURRED_DIR,
-                    PERSON_REVIEW_DIR,
-                    "all",
-                    "_smart_albums",
-                    "_smart_albums_v2",
-                    "_smart_albums_simple_preview",
-                }
-                for part in p.relative_to(person_dir).parts[:-1]
+    if not work:
+        if len(db.nearest_impostor_distances) != len(db.identities):
+            calibrate_identity_db_against_impostors(db)
+            save_identity_db(db)
+            log.info(
+                "Identity DB calibration evidence upgraded: %d people.",
+                len(db.identities),
             )
-        ]
-        images = sorted(images, key=lambda p: (len(p.relative_to(person_dir).parts), str(p).lower()))
-        if IDENTITY_MAX_IMAGES_PER_PERSON > 0:
-            images = images[:IDENTITY_MAX_IMAGES_PER_PERSON]
-        for img in images:
-            faces = _detect_one_image(img, app)
-            if not faces:
-                continue
-            best = max(faces, key=lambda f: f.quality)
-            embs.append(best.embedding)
-        if embs:
-            c = np.mean(np.stack(embs), axis=0)
-            db.identities[person_dir.name] = _l2norm(c[None, :])[0]
-            db.source_counts[person_dir.name] = len(embs)
-            if len(db.identities) % 5 == 0:
-                save_identity_db(db)
+            return db
+        log.info("Identity DB already current: %d people.", len(db.identities))
+        return db
 
+    cache = load_cache()
+    cached_signatures_by_path = {
+        os.path.realpath(path): signature
+        for path, signature in cache.file_signatures.items()
+    }
+    cached_faces_by_path: dict[str, list[CachedFace]] = defaultdict(list)
+    for cached_face in cache.faces:
+        cached_faces_by_path[os.path.realpath(cached_face.src_str)].append(cached_face)
+
+    app = None
+    rebuilt = 0
+    for person_dir, images, signature, confirmed_paths in tqdm(
+        work, desc="Refreshing identity profiles", unit="person"
+    ):
+        name = person_dir.name
+        pool_limit = (
+            max(IDENTITY_CANDIDATE_POOL_MIN, IDENTITY_MAX_IMAGES_PER_PERSON)
+            if IDENTITY_MAX_IMAGES_PER_PERSON > 0 else 0
+        )
+        candidate_images = evenly_sample_paths(images, pool_limit)
+        candidate_keys = {os.path.realpath(str(path)) for path in candidate_images}
+        for confirmed_path in confirmed_paths:
+            confirmed_key = os.path.realpath(str(confirmed_path))
+            if confirmed_key not in candidate_keys:
+                candidate_images.append(confirmed_path)
+                candidate_keys.add(confirmed_key)
+        confirmed_keys = {os.path.realpath(str(path)) for path in confirmed_paths}
+        confirmed_examples = identity_confirmations.examples_for_person(
+            IDENTITY_CONFIRMATIONS_FILE, name, people_dir)
+        samples: list[identity_profiles.ReferenceSample] = []
+        trusted_samples: list[identity_profiles.ReferenceSample] = []
+        for image in candidate_images:
+            image_key = str(image)
+            canonical_image_key = os.path.realpath(image_key)
+            try:
+                current_signature = file_signature(image)
+            except OSError:
+                continue
+            cache_is_current = cached_signatures_by_path.get(canonical_image_key) == current_signature
+            cached_candidates = (
+                cached_faces_by_path.get(canonical_image_key, []) if cache_is_current else []
+            )
+            if cache_is_current:
+                matching_labels = [
+                    face for face in cached_candidates
+                    if face.label and face.label.casefold() == name.casefold()
+                ]
+                usable_faces = matching_labels or cached_candidates
+            elif existing is not None and name in existing.identities:
+                # A changed source that has not reached the detector cache yet
+                # must not force a long native-model session during profile
+                # maintenance. The existing profile remains active until the
+                # normal bounded detector worker analyzes that source.
+                continue
+            else:
+                if app is None:
+                    app = _build_app()
+                usable_faces = _detect_one_image(image, app)
+            for face in usable_faces:
+                sample = identity_profiles.ReferenceSample(
+                    source=image_key,
+                    embedding=np.asarray(face.embedding, dtype=np.float32),
+                    quality=float(face.quality),
+                    pose_label=str(getattr(face, "pose_label", "unknown") or "unknown"),
+                    lighting_label=appearance_profiles.lighting_label(
+                        bytes(getattr(face, "crop_jpeg", b"") or b"")
+                    ),
+                    capture_timestamp=appearance_profiles.capture_timestamp(image),
+                )
+                samples.append(sample)
+                example = confirmed_examples.get(Path(canonical_image_key))
+                if example is not None and any(
+                    selected is face for selected in identity_confirmations.selected_faces(example, usable_faces)
+                ):
+                    trusted_samples.append(sample)
+
+        dominant = identity_profiles.dominant_identity_samples(samples)
+        centroid_samples = identity_profiles.select_diverse_samples(
+            dominant,
+            limit=max(1, IDENTITY_MAX_PROTOTYPES_PER_PERSON),
+        )
+        selected = identity_profiles.select_profile_prototypes(
+            dominant,
+            trusted_samples,
+            limit=max(1, IDENTITY_MAX_PROTOTYPES_PER_PERSON),
+            trusted_limit=min(
+                IDENTITY_MAX_TRUSTED_PROTOTYPES_PER_PERSON,
+                max(1, IDENTITY_MAX_PROTOTYPES_PER_PERSON // 2),
+            ),
+        )
+        if not selected:
+            log.warning("No usable identity references for %s; keeping it out of auto-match.", name)
+            if existing is not None and name in existing.identities:
+                copy_identity_profile(existing, db, name)
+            continue
+        # Keep the centroid tied to the dominant, repeatedly observed identity.
+        # Explicit confirmations extend pose coverage only through prototypes.
+        centroid = identity_profiles.weighted_centroid(centroid_samples or selected)
+        prototypes = [identity_profiles.normalize_vector(sample.embedding) for sample in selected]
+        # Old cached detections retain a safe ``profile_unknown`` bucket.
+        # Newly analyzed faces carry signed left/right pose labels. Avoiding a
+        # mass redetection here keeps profile refresh memory-bounded.
+        pose_evidence = list(selected)
+        consensus_threshold, strict_threshold = identity_profiles.calibrated_thresholds(
+            dominant,
+            centroid,
+            prototypes,
+            maximum_consensus_distance=AUTO_PERSON_MATCH_DIST,
+        )
+        db.identities[name] = centroid
+        db.prototypes[name] = prototypes
+        db.prototype_sources[name] = [sample.source for sample in selected]
+        pose_prototypes: dict[str, list[np.ndarray]] = {}
+        pose_prototype_sources: dict[str, list[str]] = {}
+        for pose in ("frontal", "left_profile", "right_profile", "profile_unknown"):
+            pose_samples = [sample for sample in pose_evidence if sample.pose_label == pose]
+            pose_selected = identity_profiles.select_diverse_samples(pose_samples, limit=2)
+            if pose_selected:
+                pose_prototypes[pose] = [
+                    identity_profiles.normalize_vector(sample.embedding)
+                    for sample in pose_selected
+                ]
+                pose_prototype_sources[pose] = [sample.source for sample in pose_selected]
+        db.pose_prototypes[name] = pose_prototypes
+        db.pose_prototype_sources[name] = pose_prototype_sources
+        person_era_cutoff = appearance_profiles.era_cutoff(
+            [sample.capture_timestamp for sample in dominant]
+        )
+        appearance_values: dict[str, list[np.ndarray]] = {}
+        appearance_sources: dict[str, list[str]] = {}
+        for label in ("low_light", "normal_light", "era_older", "era_newer"):
+            matching = [
+                sample for sample in pose_evidence
+                if label in appearance_profiles.labels(
+                    light=sample.lighting_label,
+                    timestamp=sample.capture_timestamp,
+                    person_era_cutoff=person_era_cutoff,
+                )
+            ]
+            appearance_selected = identity_profiles.select_diverse_samples(
+                matching, limit=2
+            )
+            if appearance_selected:
+                appearance_values[label] = [
+                    identity_profiles.normalize_vector(sample.embedding)
+                    for sample in appearance_selected
+                ]
+                appearance_sources[label] = [sample.source for sample in appearance_selected]
+        db.appearance_prototypes[name] = appearance_values
+        db.appearance_prototype_sources[name] = appearance_sources
+        db.appearance_era_cutoffs[name] = person_era_cutoff
+        db.source_counts[name] = identity_profiles.source_count(dominant)
+        db.intrinsic_match_thresholds[name] = consensus_threshold
+        db.intrinsic_strict_thresholds[name] = strict_threshold
+        db.match_thresholds[name] = consensus_threshold
+        db.strict_thresholds[name] = strict_threshold
+        db.source_signatures[name] = signature
+        rebuilt += 1
+        if rebuilt % 5 == 0:
+            # Checkpoints are deliberately not made active. If the refresh is
+            # interrupted, normal sorting continues with the previous complete
+            # database rather than a partially rebuilt one.
+            write_identity_db(db, IDENTITY_DB_BUILD_FILE)
+
+    calibrate_identity_db_against_impostors(db)
+    if existing is not None and existing.identities:
+        import evaluation_enrollment
+        import identity_evaluation
+
+        evaluation_enrollment.backfill_confirmations(
+            identity_confirmations.load(IDENTITY_CONFIRMATIONS_FILE),
+            cache.faces,
+            path=evaluation_enrollment.DEFAULT_PATH,
+        )
+        allowed, gate = identity_evaluation.activation_gate(
+            db,
+            existing,
+            cache,
+            confirmed_set=evaluation_enrollment.DEFAULT_PATH,
+        )
+        gate_path = (
+            pipeline_paths.SOURCE_REVIEW
+            / "identity_evaluation"
+            / "latest_profile_activation_gate.json"
+        )
+        gate_path.parent.mkdir(parents=True, exist_ok=True)
+        gate_path.write_text(json.dumps(gate, indent=2, default=str) + "\n", encoding="utf-8")
+        if not allowed:
+            IDENTITY_DB_BUILD_FILE.unlink(missing_ok=True)
+            log.error(
+                "Identity profile refresh blocked by activation gate: %s. Report: %s",
+                "; ".join(str(value) for value in gate["failures"]),
+                gate_path,
+            )
+            return existing
+        log.info("Identity activation gate passed: %s", gate_path)
     save_identity_db(db)
-    log.info("Identity DB saved: %s (%d people)", IDENTITY_DB_FILE, len(db.identities))
+    IDENTITY_DB_BUILD_FILE.unlink(missing_ok=True)
+    log.info(
+        "Identity DB saved: %s (%d people, %d refreshed, %d reused)",
+        IDENTITY_DB_FILE,
+        len(db.identities),
+        rebuilt,
+        len(db.identities) - rebuilt,
+    )
     return db
 
 
@@ -956,12 +1566,121 @@ def save_cache(cache: CacheState) -> None:
     tmp.replace(CACHE_FILE)
 
 
+def analysis_index_file() -> Path:
+    if FINGERPRINT_CACHE_FILE != DEFAULT_FINGERPRINT_CACHE_FILE:
+        return FINGERPRINT_CACHE_FILE.parent / "analysis_index.sqlite3"
+    return pipeline_paths.ANALYSIS_INDEX
+
+
+def cached_face_to_index_record(face: CachedFace) -> analysis_index.DetectionRecord:
+    embedding = np.asarray(face.embedding, dtype=np.float32).reshape(-1)
+    phash = np.asarray(face.image_phash, dtype=np.uint8).reshape(-1)
+    return analysis_index.DetectionRecord(
+        face_index=int(face.face_index),
+        det_score=float(face.det_score),
+        bbox_size=float(face.bbox_size),
+        sharpness=float(face.sharpness),
+        yaw_proxy=float(face.yaw_proxy),
+        quality=float(face.quality),
+        embedding=embedding.tobytes(),
+        embedding_dimension=int(embedding.size),
+        image_phash=np.packbits(phash).tobytes(),
+        image_phash_bits=int(phash.size),
+        crop_jpeg=bytes(face.crop_jpeg),
+        label=face.label,
+        pose_label=str(getattr(face, "pose_label", "unknown") or "unknown"),
+        bbox=tuple(getattr(face, "bbox", ())),
+        keypoints=tuple(getattr(face, "keypoints", ())),
+    )
+
+
+def index_record_to_cached_face(
+    path: Path,
+    record: analysis_index.DetectionRecord,
+) -> CachedFace:
+    embedding = np.frombuffer(record.embedding, dtype=np.float32).copy()
+    if record.embedding_dimension > 0:
+        embedding = embedding[:record.embedding_dimension]
+    packed_phash = np.frombuffer(record.image_phash, dtype=np.uint8)
+    image_phash = np.unpackbits(packed_phash)[:record.image_phash_bits].astype(bool)
+    return CachedFace(
+        src_str=str(path),
+        face_index=int(record.face_index),
+        det_score=float(record.det_score),
+        bbox_size=float(record.bbox_size),
+        sharpness=float(record.sharpness),
+        yaw_proxy=float(record.yaw_proxy),
+        quality=float(record.quality),
+        embedding=embedding,
+        image_phash=image_phash,
+        crop_jpeg=bytes(record.crop_jpeg),
+        label=record.label,
+        pose_label=(
+            face_detection.pose_label_from_yaw_proxy(record.yaw_proxy)
+            if not record.pose_label or record.pose_label == "unknown"
+            else str(record.pose_label)
+        ),
+        bbox=record.bbox,
+        keypoints=record.keypoints,
+    )
+
+
+def persist_detection_batch(
+    paths: Iterable[Path],
+    faces: Iterable[CachedFace],
+    diagnostics: dict[str, str],
+    index_path: Path | None,
+    fingerprints: dict[str, dict[str, int | str]] | None = None,
+) -> None:
+    if index_path is None:
+        return
+    by_source: dict[str, list[CachedFace]] = defaultdict(list)
+    for face in faces:
+        by_source[os.path.realpath(face.src_str)].append(face)
+    try:
+        with analysis_index.AnalysisIndex(index_path) as index:
+            for path in paths:
+                canonical = os.path.realpath(str(path))
+                source_faces = by_source.get(canonical, [])
+                fingerprint_data = (fingerprints or {}).get(str(path))
+                if fingerprint_data is None:
+                    fingerprint_data = (fingerprints or {}).get(canonical)
+                if fingerprint_data is not None:
+                    index.upsert_fingerprint(
+                        path,
+                        analysis_index.AssetFingerprint(
+                            sha256=str(fingerprint_data["sha256"]),
+                            pixel_sha256=str(fingerprint_data["pixel_sha256"]),
+                            phash=int(fingerprint_data["phash"]),
+                            width=int(fingerprint_data["width"]),
+                            height=int(fingerprint_data["height"]),
+                        ),
+                    )
+                status = diagnostics.get(
+                    str(path),
+                    "accepted_face" if source_faces else "no_usable_face",
+                )
+                index.replace_detections(
+                    path,
+                    config_fingerprint(),
+                    status,
+                    [cached_face_to_index_record(face) for face in source_faces],
+                    expected_sha256=str(fingerprint_data["sha256"]) if fingerprint_data else None,
+                )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not mirror detection batch into SQLite: %s", exc)
+
+
 def cached_to_record(c: CachedFace) -> FaceRecord:
     return FaceRecord(
         src=Path(c.src_str), face_index=c.face_index, det_score=c.det_score,
         bbox_size=c.bbox_size, sharpness=c.sharpness, yaw_proxy=c.yaw_proxy,
         embedding=c.embedding, crop_jpeg=c.crop_jpeg, image_phash=c.image_phash,
         quality=c.quality, prior_label=c.label,
+        pose_label=str(getattr(c, "pose_label", "unknown") or "unknown"),
+        bbox=tuple(getattr(c, "bbox", ())),
+        keypoints=tuple(getattr(c, "keypoints", ())),
+        content_sha256=str(getattr(c, "content_sha256", "")),
     )
 
 
@@ -971,6 +1690,10 @@ def record_to_cached(rec: FaceRecord, label: str | None) -> CachedFace:
         bbox_size=rec.bbox_size, sharpness=rec.sharpness, yaw_proxy=rec.yaw_proxy,
         quality=rec.quality, embedding=rec.embedding, image_phash=rec.image_phash,
         crop_jpeg=rec.crop_jpeg, label=label,
+        bbox=tuple(getattr(rec, "bbox", ())),
+        keypoints=tuple(getattr(rec, "keypoints", ())),
+        content_sha256=str(getattr(rec, "content_sha256", "")),
+        pose_label=str(getattr(rec, "pose_label", "unknown") or "unknown"),
     )
 
 
@@ -993,6 +1716,8 @@ def save_labeling_state(records: list[FaceRecord],
         config_fingerprint=config_fingerprint(),
         faces=[record_to_cached(r, label=None) for r in records],
         cluster_ids=[r.cluster_id for r in records],
+        recovery_metadata=[(getattr(r, "identity_review_reason", ""),
+                            getattr(r, "recovery_assigned", False)) for r in records],
         name_map=dict(name_map),
         completed=completed,
     )
@@ -1024,6 +1749,12 @@ def clear_labeling_state() -> None:
             LABEL_STATE_FILE.unlink()
         except OSError:
             pass
+
+
+def restore_recovery_state(record: FaceRecord, state: LabelingState, index: int) -> None:
+    metadata = getattr(state, "recovery_metadata", [])
+    if index < len(metadata):
+        record.identity_review_reason, record.recovery_assigned = metadata[index]
 
 
 def save_remaining_labeling_state(records: list[FaceRecord],
@@ -1230,62 +1961,228 @@ def quiet_model_startup():
             yield
 
 
-def _build_app():
+def _build_app(det_size: tuple[int, int] | None = None):
     from insightface.app import FaceAnalysis
     with quiet_model_startup():
-        app = FaceAnalysis(name=MODEL_NAME, providers=PROVIDERS)
-        app.prepare(ctx_id=0, det_size=DET_SIZE, det_thresh=MIN_DET_SCORE * 0.8)
+        # Sorting needs only face boxes/keypoints and identity embeddings.
+        # Loading age/gender and extra landmark models makes every image slower
+        # without contributing to classification.
+        app = FaceAnalysis(
+            name=MODEL_NAME,
+            allowed_modules=["detection", "recognition"],
+            providers=PROVIDERS,
+        )
+        app.prepare(
+            ctx_id=0,
+            det_size=det_size or DET_SIZE,
+            det_thresh=MIN_DET_SCORE * 0.8,
+        )
     return app
 
 
-def _detect_one_image(src: Path, app) -> list[CachedFace]:
+def _fallback_detection_views(img: np.ndarray) -> Iterable[np.ndarray]:
+    """Yield alternate views only after the normal detector pass fails.
+
+    Overlapping tiles make a small face occupy more of the detector input
+    without upscaling or modifying the original file. Rotation is reserved for
+    smaller files where regional detection cannot help and orientation metadata
+    is more likely to be absent.
+    """
+    yield from face_detection.fallback_detection_views(
+        img, max_dimension=FALLBACK_MAX_IMAGE_DIMENSION,
+    )
+
+
+def _cached_face_from_detection(src: Path,
+                                img: np.ndarray,
+                                detection,
+                                image_phash: np.ndarray,
+                                face_index: int,
+                                *,
+                                min_score: float,
+                                min_face_px: float,
+                                min_sharpness: float,
+                                ) -> tuple[CachedFace | None, str]:
+    score = float(getattr(detection, "det_score", 0.0))
+    if score < min_score:
+        return None, "face_below_detection_confidence"
+    bbox = np.asarray(detection.bbox, dtype=np.float32)
+    x1, y1, x2, y2 = bbox.tolist()
+    bbox_size = float(min(x2 - x1, y2 - y1))
+    if bbox_size < min_face_px:
+        return None, "face_too_small"
+    height, width = img.shape[:2]
+    nx1, ny1, nx2, ny2 = square_pad_bbox(
+        x1, y1, x2, y2, width, height, PADDING_RATIO
+    )
+    crop = img[ny1:ny2, nx1:nx2]
+    if crop.size == 0:
+        return None, "invalid_face_crop"
+    face_sharpness = sharpness(crop)
+    if face_sharpness < min_sharpness:
+        return None, "face_too_blurry"
+    embedding = getattr(detection, "normed_embedding", None)
+    if embedding is None:
+        return None, "missing_face_embedding"
+    keypoints = getattr(detection, "kps", None)
+    yaw = yaw_proxy_from_kps(keypoints, bbox)
+    pose_label = face_detection.pose_label_from_keypoints(keypoints, bbox)
+    if CROP_SIZE:
+        crop = cv2.resize(crop, (CROP_SIZE, CROP_SIZE), interpolation=cv2.INTER_AREA)
+    ok, jpeg = cv2.imencode(
+        ".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+    )
+    if not ok:
+        return None, "face_crop_encode_failed"
+    return CachedFace(
+        src_str=str(src),
+        face_index=face_index,
+        det_score=score,
+        bbox_size=bbox_size,
+        sharpness=face_sharpness,
+        yaw_proxy=yaw,
+        quality=quality_score_from_parts(score, bbox_size, face_sharpness, yaw),
+        embedding=np.asarray(embedding, dtype=np.float32),
+        image_phash=image_phash,
+        crop_jpeg=jpeg.tobytes(),
+        label=None,
+        pose_label=pose_label,
+        bbox=tuple(map(float, bbox)),
+        keypoints=tuple(tuple(map(float, p)) for p in keypoints) if keypoints is not None else (),
+    ), "accepted"
+
+
+def _detect_one_image(src: Path,
+                      app,
+                      diagnostics: dict[str, str] | None = None,
+                      fallback_app=None,
+                      fingerprints: dict[str, dict[str, int | str]] | None = None,
+                      ) -> list[CachedFace]:
     out: list[CachedFace] = []
+    strict_rejected: Counter[str] = Counter()
+    recovery_rejected: Counter[str] = Counter()
+
+    def record_status(status: str) -> None:
+        if diagnostics is not None:
+            diagnostics[str(src)] = status
+
     try:
-        img = imread_unicode(src)
-        if img is None:
+        with suppress_native_stderr():
+            decoded = asset_processing.load_decoded_asset(src)
+        if decoded is None:
+            record_status("unreadable_image")
             return out
-        H, W = img.shape[:2]
-        img_phash = perceptual_hash(img)
+        img = decoded.bgr
+        img_phash = decoded.phash_bits
+        if fingerprints is not None:
+            fingerprints[str(src)] = {
+                "sha256": decoded.sha256,
+                "pixel_sha256": decoded.pixel_sha256,
+                "phash": phash_to_int(decoded.phash_bits),
+                "width": decoded.width,
+                "height": decoded.height,
+            }
         faces = app.get(img)
-        if not faces:
-            return out
         for i, f in enumerate(faces):
-            score = float(getattr(f, "det_score", 0.0))
-            if score < MIN_DET_SCORE:
-                continue
-            bbox = np.asarray(f.bbox, dtype=np.float32)
-            x1, y1, x2, y2 = bbox.tolist()
-            bw, bh = x2 - x1, y2 - y1
-            if min(bw, bh) < MIN_FACE_PX:
-                continue
-            nx1, ny1, nx2, ny2 = square_pad_bbox(x1, y1, x2, y2, W, H, PADDING_RATIO)
-            crop = img[ny1:ny2, nx1:nx2]
-            if crop.size == 0:
-                continue
-            sharp = sharpness(crop)
-            if sharp < MIN_SHARPNESS:
-                continue
-            emb = getattr(f, "normed_embedding", None)
-            if emb is None:
-                continue
-            yaw = yaw_proxy_from_kps(getattr(f, "kps", None), bbox)
-            if CROP_SIZE:
-                crop = cv2.resize(crop, (CROP_SIZE, CROP_SIZE),
-                                  interpolation=cv2.INTER_AREA)
-            ok, jpeg = cv2.imencode(".jpg", crop,
-                                    [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-            if not ok:
-                continue
-            q = quality_score_from_parts(score, float(min(bw, bh)), sharp, yaw)
-            out.append(CachedFace(
-                src_str=str(src), face_index=i, det_score=score,
-                bbox_size=float(min(bw, bh)), sharpness=sharp, yaw_proxy=yaw,
-                quality=q, embedding=np.asarray(emb, dtype=np.float32),
-                image_phash=img_phash, crop_jpeg=jpeg.tobytes(), label=None,
-            ))
+            cached, reason = _cached_face_from_detection(
+                src, img, f, img_phash, i,
+                min_score=MIN_DET_SCORE,
+                min_face_px=MIN_FACE_PX,
+                min_sharpness=MIN_SHARPNESS,
+            )
+            if cached is None:
+                strict_rejected[reason] += 1
+            else:
+                cached.content_sha256 = decoded.sha256
+                out.append(cached)
+        if out and not strict_rejected:
+            record_status("accepted_face")
+            return out
+
+        # A soft/small face is still a face. Keep its embedding at a lower
+        # quality score so downstream identity consensus remains conservative.
+        saw_raw_face = bool(faces)
+        recovery_index = 0
+
+        def recover_from_view(view: np.ndarray, view_faces: list, transform=None) -> None:
+            nonlocal recovery_index
+            for f in view_faces:
+                cached, reason = _cached_face_from_detection(
+                    src, view, f, img_phash, recovery_index,
+                    min_score=RECOVERY_MIN_DET_SCORE,
+                    min_face_px=RECOVERY_MIN_FACE_PX,
+                    min_sharpness=RECOVERY_MIN_SHARPNESS,
+                )
+                recovery_index += 1
+                if cached is None:
+                    recovery_rejected[reason] += 1
+                    continue
+                cached.bbox, cached.keypoints = face_detection.original_geometry(
+                    cached.bbox, cached.keypoints, np.eye(3) if transform is None else transform)
+                if any(face_detection.same_detection(existing.bbox, cached.bbox) for existing in out):
+                    continue
+                cached.face_index = max((face.face_index for face in out), default=-1) + 1
+                cached.content_sha256 = decoded.sha256
+                out.append(cached)
+
+        recover_from_view(img, faces)
+        if not out:
+            alternate_app = fallback_app or app
+            alternate_detector = getattr(alternate_app, "det_model", None)
+            original_threshold = getattr(alternate_detector, "det_thresh", None)
+            if original_threshold is not None:
+                alternate_detector.det_thresh = min(
+                    float(original_threshold), FACE_PRESENCE_MIN_DET_SCORE
+                )
+            try:
+                successful_kind = None
+                for frame in face_detection.fallback_detection_frames(img, max_dimension=FALLBACK_MAX_IMAGE_DIMENSION):
+                    if successful_kind is not None and frame.kind != successful_kind:
+                        break
+                    view_faces = alternate_app.get(frame.image)
+                    saw_raw_face = saw_raw_face or bool(view_faces)
+                    recover_from_view(frame.image, view_faces, frame.to_original)
+                    if out:
+                        successful_kind = frame.kind
+                        if frame.kind != "tile":
+                            break
+            finally:
+                if original_threshold is not None:
+                    alternate_detector.det_thresh = original_threshold
+
+        if out:
+            record_status("accepted_face_recovery")
+        elif saw_raw_face:
+            reason_counts = recovery_rejected or strict_rejected
+            reason = (
+                reason_counts.most_common(1)[0][0]
+                if reason_counts else "face_failed_recovery_thresholds"
+            )
+            record_status(f"face_quality_review:{reason}")
+        else:
+            record_status("no_face_detected")
     except Exception as e:  # noqa: BLE001
+        record_status(f"detector_error:{type(e).__name__}")
         sys.stderr.write(f"Skipped {src.name}: {e}\n")
     return out
+
+
+def validate_detection_batch(paths, faces, fingerprints, diagnostics):
+    """Do not attach worker results to a source that changed during inference."""
+    accepted, keys = [], set()
+    for path in paths:
+        expected = fingerprints.get(str(path), {}).get("sha256")
+        try:
+            if expected and content_identity.content_sha256(path) != expected:
+                raise OSError("source changed during detection")
+            if not path.is_file():
+                raise OSError("source disappeared during detection")
+        except OSError:
+            diagnostics[str(path)] = "processing_failed:source_changed"
+            continue
+        accepted.append(path)
+        keys.add(os.path.realpath(str(path)))
+    return accepted, [face for face in faces if os.path.realpath(face.src_str) in keys]
 
 
 def run_detection_worker(job_path: Path) -> int:
@@ -1303,23 +2200,39 @@ def run_detection_worker(job_path: Path) -> int:
     from tqdm import tqdm
     app = _build_app()
     all_faces: list[CachedFace] = []
+    diagnostics: dict[str, str] = {}
+    fingerprints: dict[str, dict[str, int | str]] = {}
     for s in tqdm(input_paths, desc="Worker", unit="img"):
-        faces = _detect_one_image(Path(s), app)
+        faces = _detect_one_image(
+            Path(s), app, diagnostics=diagnostics, fingerprints=fingerprints,
+        )
         all_faces.extend(faces)
 
     with output_path.open("wb") as f:
-        pickle.dump(all_faces, f, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump(
+            {
+                "faces": all_faces,
+                "diagnostics": diagnostics,
+                "fingerprints": fingerprints,
+            },
+            f,
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
     return 0
 
 
 def detect_in_batches_subprocess(new_images: list[Path],
                                  cache: CacheState,
                                  batch_size: int,
-                                 workers: int = 1) -> list[FaceRecord]:
+                                 workers: int = 1,
+                                 index_path: Path | None = None,
+                                 ) -> tuple[list[FaceRecord], set[Path], dict[str, str]]:
     all_new_records: list[FaceRecord] = []
+    processed_sources: set[Path] = set()
+    diagnostics: dict[str, str] = {}
     total = len(new_images)
     if total == 0:
-        return all_new_records
+        return all_new_records, processed_sources, diagnostics
 
     n_batches = (total + batch_size - 1) // batch_size
     workers = max(1, int(workers))
@@ -1435,32 +2348,44 @@ def detect_in_batches_subprocess(new_images: list[Path],
                     proc = run_worker_with_retry(cmd, batch_idx + 1)
                 except KeyboardInterrupt:
                     log.warning("Interrupted. Cache up to last completed batch is saved.")
-                    return all_new_records
+                    return all_new_records, processed_sources, diagnostics
 
                 if proc is None:
-                    return all_new_records
+                    return all_new_records, processed_sources, diagnostics
 
                 if proc.returncode != 0:
                     log.error("Worker for batch %d exited with code %d.",
                               batch_idx + 1, proc.returncode)
                     if proc.stdout:
                         log.error("Worker output:\n%s", proc.stdout[-4000:])
-                    return all_new_records
+                    return all_new_records, processed_sources, diagnostics
 
                 if not out_path.exists():
                     log.error("Worker for batch %d produced no output.", batch_idx + 1)
-                    return all_new_records
+                    return all_new_records, processed_sources, diagnostics
 
                 with out_path.open("rb") as f:
-                    batch_faces: list[CachedFace] = pickle.load(f)
+                    payload = pickle.load(f)
+                if isinstance(payload, dict):
+                    batch_faces = list(payload.get("faces", []))
+                    diagnostics.update(payload.get("diagnostics", {}))
+                    batch_fingerprints = dict(payload.get("fingerprints", {}))
+                else:
+                    batch_faces = list(payload)
+                    batch_fingerprints = {}
 
+                batch, batch_faces = validate_detection_batch(batch, batch_faces, batch_fingerprints, diagnostics)
                 for src in batch:
                     try:
                         cache.file_signatures[str(src)] = file_signature(src)
                     except OSError:
                         pass
+                    processed_sources.add(src)
                 cache.faces.extend(batch_faces)
                 save_cache(cache)
+                persist_detection_batch(
+                    batch, batch_faces, diagnostics, index_path, batch_fingerprints,
+                )
 
                 log.info("Batch %d/%d: %d new faces. Cache saved (%d files, %d faces).",
                          batch_idx + 1, n_batches, len(batch_faces),
@@ -1493,7 +2418,7 @@ def detect_in_batches_subprocess(new_images: list[Path],
                         if proc is None:
                             for active_proc in active:
                                 active_proc.terminate()
-                            return all_new_records
+                            return all_new_records, processed_sources, diagnostics
                         active[proc] = job_info
 
                     time.sleep(0.5)
@@ -1507,24 +2432,37 @@ def detect_in_batches_subprocess(new_images: list[Path],
                                       batch_idx + 1, proc.returncode)
                             for p in active:
                                 p.terminate()
-                            return all_new_records
+                            return all_new_records, processed_sources, diagnostics
                         if not out_path.exists():
                             log.error("Worker for batch %d produced no output.",
                                       batch_idx + 1)
                             for p in active:
                                 p.terminate()
-                            return all_new_records
+                            return all_new_records, processed_sources, diagnostics
 
                         with out_path.open("rb") as f:
-                            batch_faces: list[CachedFace] = pickle.load(f)
+                            payload = pickle.load(f)
+                        if isinstance(payload, dict):
+                            batch_faces = list(payload.get("faces", []))
+                            diagnostics.update(payload.get("diagnostics", {}))
+                            batch_fingerprints = dict(payload.get("fingerprints", {}))
+                        else:
+                            batch_faces = list(payload)
+                            batch_fingerprints = {}
 
+                        batch, batch_faces = validate_detection_batch(batch, batch_faces, batch_fingerprints, diagnostics)
                         for src in batch:
                             try:
                                 cache.file_signatures[str(src)] = file_signature(src)
                             except OSError:
                                 pass
+                            processed_sources.add(src)
                         cache.faces.extend(batch_faces)
                         save_cache(cache)
+                        persist_detection_batch(
+                            batch, batch_faces, diagnostics, index_path,
+                            batch_fingerprints,
+                        )
 
                         completed += 1
                         log.info("Batch %d/%d complete (%d/%d finished): %d new faces. "
@@ -1547,14 +2485,14 @@ def detect_in_batches_subprocess(new_images: list[Path],
                             "completed batch is saved.")
                 for proc in active:
                     proc.terminate()
-                return all_new_records
+                return all_new_records, processed_sources, diagnostics
     finally:
         try:
             shutil.rmtree(tmp_dir)
         except OSError:
             pass
 
-    return all_new_records
+    return all_new_records, processed_sources, diagnostics
 
 
 # ============================================================================
@@ -1664,6 +2602,19 @@ def merge_close_clusters(records: list[FaceRecord]) -> int:
         C = np.stack([centroids[i] for i in ids])
         dist = 1.0 - C @ C.T
         np.fill_diagonal(dist, np.inf)
+        labels: dict[int, set[str]] = defaultdict(set)
+        protected = set()
+        for record in records:
+            if record.prior_label:
+                labels[record.cluster_id].add(record.prior_label.casefold())
+            if record.identity_review_reason:
+                protected.add(record.cluster_id)
+        for left, left_id in enumerate(ids):
+            for right in range(left + 1, len(ids)):
+                right_id = ids[right]
+                if (left_id in protected or right_id in protected
+                        or len(labels[left_id] | labels[right_id]) > 1):
+                    dist[left, right] = dist[right, left] = np.inf
         i_min, j_min = np.unravel_index(np.argmin(dist), dist.shape)
         if dist[i_min, j_min] >= MERGE_CENTROID_DIST:
             break
@@ -1686,26 +2637,43 @@ def stage_b_reassign(records: list[FaceRecord]) -> int:
         if r.cluster_id != -1:
             continue
         sims = C @ r.embedding
-        j = int(np.argmin(1.0 - sims))
-        if (1.0 - sims[j]) <= STAGE_B_MAX_DIST:
+        order = np.argsort(-sims)
+        j = int(order[0])
+        best_distance = 1.0 - float(sims[j])
+        second_distance = (
+            1.0 - float(sims[int(order[1])]) if len(order) > 1 else 1.0
+        )
+        if (
+            best_distance <= STAGE_B_MAX_DIST
+            and second_distance - best_distance >= STAGE_B_MIN_MARGIN
+        ):
             r.cluster_id = ids[j]
             reassigned += 1
     return reassigned
 
 
 def anchor_pass(records: list[FaceRecord]) -> int:
-    anchored = [(r, r.prior_label) for r in records if r.prior_label and r.cluster_id != -1]
-    if not anchored:
+    anchored_cids = sorted({r.cluster_id for r in records if r.prior_label and r.cluster_id != -1})
+    if not anchored_cids:
         return 0
-    anchor_embs = np.stack([r.embedding for r, _ in anchored])
-    anchor_cids = [r.cluster_id for r, _ in anchored]
+    centroids = compute_centroids(records)
+    anchor_cids = [cid for cid in anchored_cids if cid in centroids]
+    anchor_embs = np.stack([centroids[cid] for cid in anchor_cids])
     n_reassigned = 0
     for r in records:
         if r.cluster_id != -1:
             continue
         sims = anchor_embs @ r.embedding
-        j = int(np.argmax(sims))
-        if (1.0 - sims[j]) <= ANCHOR_MAX_DIST:
+        order = np.argsort(-sims)
+        j = int(order[0])
+        best_distance = 1.0 - float(sims[j])
+        second_distance = (
+            1.0 - float(sims[int(order[1])]) if len(order) > 1 else 1.0
+        )
+        if (
+            best_distance <= ANCHOR_MAX_DIST
+            and second_distance - best_distance >= ANCHOR_MIN_MARGIN
+        ):
             r.cluster_id = anchor_cids[j]
             n_reassigned += 1
     return n_reassigned
@@ -1721,11 +2689,10 @@ def make_initial_name_map(records: list[FaceRecord]) -> dict[int, str]:
         if cid == -1:
             continue
         labels = [r.prior_label for r in group if r.prior_label]
-        if labels:
+        if labels and len(labels) == len(group) and len(set(labels)) == 1:
             top = Counter(labels).most_common(1)[0][0]
-            if top not in used_names:
-                name_map[cid] = top
-                used_names.add(top)
+            name_map[cid] = top
+            used_names.add(top)
     remaining = [cid for cid in by_id if cid not in name_map and cid != -1]
     remaining.sort(key=lambda c: -len(by_id[c]))
     counter = 1
@@ -1743,35 +2710,14 @@ def make_initial_name_map(records: list[FaceRecord]) -> dict[int, str]:
 
 def apply_identity_db_labels(records: list[FaceRecord],
                              name_map: dict[int, str],
-                             identity_db: IdentityDB | None) -> int:
-    if not AUTO_PERSON_MATCH_ENABLED or identity_db is None or not identity_db.identities:
-        return 0
-    centroids = compute_centroids(records)
-    names = sorted(identity_db.identities.keys())
-    identity_C = np.stack([identity_db.identities[n] for n in names])
-    assigned = 0
-    used_real = {
-        n for n in name_map.values()
-        if is_real_person_label(n) and not n.startswith("person_")
-    }
-    for cid, current_name in sorted(name_map.items(), key=lambda kv: kv[0]):
-        if cid == -1 or not current_name.startswith("person_") or cid not in centroids:
-            continue
-        sims = identity_C @ centroids[cid]
-        order = np.argsort(-sims)
-        best_idx = int(order[0])
-        best_dist = 1.0 - float(sims[best_idx])
-        second_dist = 1.0 - float(sims[int(order[1])]) if len(order) > 1 else 1.0
-        matched_name = names[best_idx]
-        if matched_name in used_real:
-            continue
-        if best_dist <= AUTO_PERSON_MATCH_DIST and (second_dist - best_dist) >= AUTO_PERSON_MATCH_MARGIN:
-            log.info("Existing-person match: %s -> %s (dist %.3f, margin %.3f)",
-                     current_name, matched_name, best_dist, second_dist - best_dist)
-            name_map[cid] = matched_name
-            used_real.add(matched_name)
-            assigned += 1
-    return assigned
+                             identity_db: IdentityDB | None,
+                             decision_recorder=None,
+                             source_batch_root: Path | None = None,
+                             use_secondary_verifier: bool = True) -> int:
+    import identity_assignment
+    return identity_assignment.assign_identity_labels(
+        records, name_map, identity_db, decision_recorder, source_batch_root,
+        use_secondary_verifier, pipeline=sys.modules[__name__])
 
 
 # ============================================================================
@@ -2146,31 +3092,53 @@ def anchor_cluster_merge(records: list[FaceRecord],
                          name_map: dict[int, str],
                          clusters_dir: Path) -> int:
     centroids = compute_centroids(records)
+    recovered_cids = {record.cluster_id for record in records
+                      if getattr(record, "recovery_assigned", False)}
     labeled_cids = [cid for cid, n in name_map.items()
-                    if cid != -1 and not n.startswith("person_") and cid in centroids]
+                    if cid != -1 and not n.startswith("person_") and cid in centroids
+                    and cid not in recovered_cids]
     if not labeled_cids:
         return 0
-    labeled_C = np.stack([centroids[c] for c in labeled_cids])
     unlabeled_cids = [cid for cid, n in name_map.items()
                        if cid != -1 and n.startswith("person_") and cid in centroids]
+    held_cids = {record.cluster_id for record in records
+                 if getattr(record, "identity_review_reason", "")}
     n_merged = 0
     for ucid in unlabeled_cids:
-        if ucid not in name_map:
+        # A later centroid merge must not undo an individual recovery rejection.
+        if ucid not in name_map or ucid in held_cids:
             continue
         c = centroids.get(ucid)
         if c is None:
             continue
-        sims = labeled_C @ c
-        j = int(np.argmax(sims))
-        d = 1.0 - float(sims[j])
-        if d <= ANCHOR_CLUSTER_MERGE_DIST:
-            target_cid = labeled_cids[j]
-            target_name = name_map[target_cid]
-            log.info("Auto-merge: %s → %s (centroid distance %.3f)",
-                     name_map[ucid], target_name, d)
+        # Compare unique identities, not labeled cluster IDs. Separate pose
+        # clusters already carrying the same label are supporting evidence for
+        # one person and must not consume the second-place margin.
+        candidates: list[tuple[float, str, int]] = []
+        for target_name in sorted({name_map[cid] for cid in labeled_cids}, key=str.casefold):
+            same_name = [cid for cid in labeled_cids if name_map[cid] == target_name]
+            target_cid = max(same_name, key=lambda cid: float(centroids[cid] @ c))
+            distance = 1.0 - float(centroids[target_cid] @ c)
+            candidates.append((distance, target_name, target_cid))
+        candidates.sort(key=lambda item: (item[0], item[1].casefold()))
+        best_distance, target_name, target_cid = candidates[0]
+        second_distance = candidates[1][0] if len(candidates) > 1 else 1.0
+        margin = second_distance - best_distance
+        if (
+            best_distance <= ANCHOR_CLUSTER_MERGE_DIST
+            and margin >= ANCHOR_CLUSTER_MERGE_MIN_MARGIN
+        ):
+            log.info("Auto-merge: %s → %s (centroid distance %.3f, margin %.3f)",
+                     name_map[ucid], target_name, best_distance, margin)
             merge_clusters_on_disk(records, name_map, clusters_dir,
                                     keep_cid=target_cid, drop_cid=ucid)
             n_merged += 1
+        elif best_distance <= ANCHOR_CLUSTER_MERGE_DIST:
+            log.info(
+                "Anchor merge held for review: %s → %s "
+                "(centroid distance %.3f, margin %.3f).",
+                name_map[ucid], target_name, best_distance, margin,
+            )
     return n_merged
 
 
@@ -2246,17 +3214,22 @@ def review_close_pairs(records: list[FaceRecord],
 # ============================================================================
 
 def dedup_within_bucket(items: list[tuple[Path, float, np.ndarray]],
-                        threshold: int) -> tuple[list[Path], dict[Path, Path]]:
+                        threshold: int,
+                        category_for_path: Callable[[Path], str] | None = None,
+                        ) -> tuple[list[Path], dict[Path, Path]]:
     items_sorted = sorted(items, key=lambda x: -x[1])
     keepers: list[Path] = []
-    keeper_hashes: list[np.ndarray] = []
+    keeper_hashes: list[tuple[str, np.ndarray]] = []
     dup_to_winner: dict[Path, Path] = {}
     for src, _q, h in items_sorted:
+        category = category_for_path(src) if category_for_path is not None else "all"
         if h.size == 0:
-            keepers.append(src); keeper_hashes.append(h); continue
+            keepers.append(src); keeper_hashes.append((category, h)); continue
         best_match: Path | None = None
         best_dist = threshold + 1
-        for kept_src, kept_h in zip(keepers, keeper_hashes):
+        for kept_src, (kept_category, kept_h) in zip(keepers, keeper_hashes):
+            if category != kept_category:
+                continue
             if kept_h.size == 0:
                 continue
             d = hamming(h, kept_h)
@@ -2266,7 +3239,7 @@ def dedup_within_bucket(items: list[tuple[Path, float, np.ndarray]],
         if best_match is not None:
             dup_to_winner[src] = best_match
         else:
-            keepers.append(src); keeper_hashes.append(h)
+            keepers.append(src); keeper_hashes.append((category, h))
     return keepers, dup_to_winner
 
 
@@ -2302,24 +3275,11 @@ def _save_checkpoint(originals_dir: Path, completed: set[str]) -> None:
 
 
 def _atomic_copy(src: Path, dest: Path) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if USE_HARDLINKS:
-        try:
-            os.link(str(src), str(dest))
-            return
-        except OSError:
-            pass
-    tmp = dest.parent / (dest.name + ".part")
-    try:
-        shutil.copy2(str(src), str(tmp))
-        tmp.replace(dest)
-    except Exception:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-        raise
+    file_operations.atomic_copy(src, dest, use_hardlinks=USE_HARDLINKS)
+
+
+def verify_original_copy(src: Path, dest: Path, expected_sha256: str = "") -> str:
+    return file_operations.verify_original_copy(src, dest, expected_sha256)
 
 
 def archive_organized_sources(sources: set[Path],
@@ -2400,6 +3360,179 @@ def archive_scanned_sources(sources: Iterable[Path],
         except Exception as e:  # noqa: BLE001
             log.warning("Could not archive scanned source %s: %s", resolved, e)
     return moved
+
+
+def archive_unassigned_sources(sources: Iterable[Path],
+                               records: list[FaceRecord],
+                               name_map: dict[int, str],
+                               organized_sources: set[Path],
+                               input_dir: Path,
+                               output_dir: Path,
+                               processed_sources: set[Path] | None = None,
+                               detection_outcomes: dict[str, str] | None = None,
+                               ) -> tuple[dict[str, int], Path | None]:
+    """Move unresolved inbox images into visible, reason-specific review queues.
+
+    A scanned image is not considered handled merely because face detection ran.
+    It is handled only after an original was copied (or confirmed already present)
+    in a named person's library. Everything else remains recoverable for review.
+    """
+    input_dir = input_dir.resolve()
+    output_dir = output_dir.resolve()
+    review_root = output_dir / "_source_review" / UNASSIGNED_INTAKE_DIR_NAME
+    records_by_source: dict[Path, list[FaceRecord]] = defaultdict(list)
+    for record in records:
+        try:
+            records_by_source[record.src.resolve()].append(record)
+        except OSError:
+            records_by_source[record.src].append(record)
+
+    resolved_organized: set[Path] = set()
+    for source in organized_sources:
+        try:
+            resolved_organized.add(source.resolve())
+        except OSError:
+            resolved_organized.add(source)
+    resolved_processed: set[Path] | None = None
+    if processed_sources is not None:
+        resolved_processed = set()
+        for source in processed_sources:
+            try:
+                resolved_processed.add(source.resolve())
+            except OSError:
+                resolved_processed.add(source)
+
+    counts: Counter[str] = Counter()
+    report_rows: list[dict[str, str | int]] = []
+    for src in sorted(set(sources), key=lambda p: str(p).lower()):
+        try:
+            resolved = src.resolve()
+        except OSError:
+            resolved = src
+        if resolved in resolved_organized:
+            continue
+
+        source_records = records_by_source.get(resolved, [])
+        assigned_people = sorted({
+            name_map.get(record.cluster_id, "")
+            for record in source_records
+            if is_real_person_label(name_map.get(record.cluster_id))
+        })
+        detector_status = (detection_outcomes or {}).get(str(resolved), "")
+        if not src.exists():
+            if not assigned_people:
+                continue
+            reason = "copy_failed"
+            detail = "source_missing_before_review"
+        elif not source_records and resolved_processed is not None and resolved not in resolved_processed:
+            reason = "processing_failed"
+            detail = "detector_batch_did_not_complete"
+        elif not source_records and detector_status.startswith("detector_error:"):
+            reason = "processing_failed"
+            detail = detector_status
+        elif not source_records and detector_status == "unreadable_image":
+            reason = "unreadable_image"
+            detail = "image_decoder_failed"
+        elif not source_records and detector_status.startswith("face_quality_review:"):
+            reason = "face_quality_review"
+            detail = detector_status.split(":", 1)[1]
+        elif not source_records and not detector_status and imread_unicode(src) is None:
+            reason = "unreadable_image"
+            detail = "image_decoder_failed"
+        elif not source_records:
+            reason = "no_usable_face"
+            detail = detector_status or "no_face_passed_detection_and_quality_thresholds"
+        elif not assigned_people:
+            reason = "unknown_identity"
+            details = {getattr(record, "identity_review_reason", "")
+                       for record in source_records}
+            detail = ";".join(sorted(details - {""})) or "usable_face_not_confidently_assigned"
+        else:
+            reason = "copy_failed"
+            detail = "assigned_source_not_confirmed_in_person_library"
+
+        if not src.exists():
+            counts[reason] += 1
+            report_rows.append({
+                "outcome": reason,
+                "reason_detail": detail,
+                "source_path": str(resolved),
+                "review_path": "",
+                "detected_faces": len(source_records),
+                "assigned_people": " | ".join(assigned_people),
+                "error": "source file is missing",
+            })
+            continue
+
+        try:
+            rel = resolved.relative_to(input_dir)
+        except ValueError:
+            rel = Path(resolved.name)
+        dest = unique_path(review_root / reason / rel)
+        try:
+            operation_ledger.move_path(
+                resolved,
+                dest,
+                sorted_root=output_dir,
+                operation="sort_photos.archive_unassigned_sources",
+                reason=f"preserve unresolved intake image: {reason}",
+                extra={
+                    "relative_path": rel.as_posix(),
+                    "outcome": reason,
+                    "detected_faces": len(source_records),
+                    "assigned_people": assigned_people,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not preserve unresolved source %s: %s", resolved, exc)
+            counts["move_failed"] += 1
+            report_rows.append({
+                "outcome": "move_failed",
+                "reason_detail": detail,
+                "source_path": str(resolved),
+                "review_path": "",
+                "detected_faces": len(source_records),
+                "assigned_people": " | ".join(assigned_people),
+                "error": str(exc),
+            })
+            continue
+
+        # Unknown-cluster review state is saved after this function returns.
+        # Point those records at the preserved file so later review can still
+        # render the source instead of retaining a stale To Process path.
+        for record in source_records:
+            record.src = dest
+        counts[reason] += 1
+        report_rows.append({
+            "outcome": reason,
+            "reason_detail": detail,
+            "source_path": str(resolved),
+            "review_path": str(dest),
+            "detected_faces": len(source_records),
+            "assigned_people": " | ".join(assigned_people),
+            "error": "",
+        })
+
+    if not report_rows:
+        return dict(counts), None
+
+    run_id = os.environ.get("PHOTO_PIPELINE_RUN_ID") or time.strftime("intake_%Y%m%d_%H%M%S")
+    safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_id)
+    report_path = (
+        output_dir
+        / "_source_review"
+        / UNASSIGNED_INTAKE_REPORT_DIR_NAME
+        / f"{safe_run_id}.csv"
+    )
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    with report_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=[
+            "outcome", "reason_detail", "source_path", "review_path",
+            "detected_faces", "assigned_people", "error",
+        ])
+        writer.writeheader()
+        writer.writerows(report_rows)
+    return dict(counts), report_path
 
 
 def archive_intake_duplicates(sources: Iterable[Path],
@@ -2528,10 +3661,22 @@ def image_duplicate_fingerprint(
     path: Path,
     cache_entries: dict | None = None,
     stats: Counter | None = None,
+    asset_index: analysis_index.AnalysisIndex | None = None,
 ) -> tuple[str, str, int, float] | None:
     try:
         sig = _fingerprint_signature(path)
         path_key = str(path)
+        if asset_index is not None:
+            indexed = asset_index.fingerprint(path)
+            if indexed is not None:
+                if stats is not None:
+                    stats["sqlite_hits"] += 1
+                return (
+                    indexed.sha256,
+                    indexed.pixel_sha256,
+                    indexed.phash,
+                    indexed.width / max(1, indexed.height),
+                )
         if cache_entries is not None:
             cached = cache_entries.get(path_key)
             if cached and cached.get("signature") == sig:
@@ -2541,23 +3686,40 @@ def image_duplicate_fingerprint(
                     phash = int(str(cached["phash"]), 16)
                     width = int(cached["width"])
                     height = int(cached["height"])
+                    if asset_index is not None:
+                        asset_index.upsert_fingerprint(path, analysis_index.AssetFingerprint(
+                            sha256=file_hash,
+                            pixel_sha256=pixel_hash,
+                            phash=phash,
+                            width=width,
+                            height=height,
+                        ))
                     if stats is not None:
-                        stats["cache_hits"] += 1
+                        stats["json_cache_hits"] += 1
                     return file_hash, pixel_hash, phash, width / max(1, height)
                 except Exception:
                     pass
         if stats is not None:
             stats["cache_misses"] += 1
-        file_hash = sha256_file(path)
-        img = imread_unicode(path)
-        if img is None:
+        with suppress_native_stderr():
+            decoded = asset_processing.load_decoded_asset(path)
+        if decoded is None:
             if stats is not None:
                 stats["decode_errors"] += 1
             return None
-        h, w = img.shape[:2]
+        file_hash = decoded.sha256
+        h, w = decoded.height, decoded.width
         ratio = w / max(1, h)
-        pixel_hash = decoded_pixel_sha256(img)
-        phash = phash_to_int(perceptual_hash(img))
+        pixel_hash = decoded.pixel_sha256
+        phash = phash_to_int(decoded.phash_bits)
+        if asset_index is not None:
+            asset_index.upsert_fingerprint(path, analysis_index.AssetFingerprint(
+                sha256=file_hash,
+                pixel_sha256=pixel_hash,
+                phash=phash,
+                width=w,
+                height=h,
+            ))
         if cache_entries is not None:
             cache_entries[path_key] = {
                 "signature": sig,
@@ -2582,7 +3744,7 @@ def filter_existing_person_duplicates(images: list[Path],
     if not images or not people_dir.exists():
         return images, [], []
 
-    person_images = list(iter_images(people_dir, excluded_dir_names=set()))
+    person_images = list(iter_person_original_images(people_dir))
     if not person_images:
         return images, [], []
 
@@ -2592,48 +3754,87 @@ def filter_existing_person_duplicates(images: list[Path],
     entries = fp_cache.setdefault("entries", {})
     stats: Counter = Counter()
     exact: dict[tuple[str, str], Path] = {}
-    for i, path in enumerate(person_images, start=1):
-        fp = image_duplicate_fingerprint(path, entries, stats)
-        if fp is None:
-            continue
-        file_hash, _pixel_hash, _phash, _ratio = fp
-        nudity_status = duplicate_nudity_status_for_path(path)
-        exact.setdefault((nudity_status, file_hash), path)
-        if i % 1000 == 0:
-            log.info("Intake duplicate check: indexed %d/%d existing image(s).",
-                     i, len(person_images))
-
+    exact_statuses_by_hash: dict[str, set[str]] = defaultdict(set)
+    incoming_first_by_hash: dict[str, tuple[Path, str]] = {}
     kept: list[Path] = []
     safe_duplicates: list[Path] = []
     near_visual_review: list[tuple[Path, Path]] = []
     counts = {"exact_file": 0, "same_pixels": 0, "near_visual": 0, "errors": 0}
+    index_path = analysis_index_file()
+    with analysis_index.AnalysisIndex(index_path) as asset_index:
+        for i, path in enumerate(person_images, start=1):
+            fp = image_duplicate_fingerprint(path, entries, stats, asset_index)
+            if fp is None:
+                continue
+            file_hash, _pixel_hash, _phash, _ratio = fp
+            nudity_status = duplicate_nudity_status_for_path(path)
+            exact.setdefault((nudity_status, file_hash), path)
+            exact_statuses_by_hash[file_hash].add(nudity_status)
+            if i % 1000 == 0:
+                asset_index.commit()
+                log.info("Intake duplicate check: indexed %d/%d existing image(s).",
+                         i, len(person_images))
 
-    log.info("Intake duplicate check: checking %d incoming image(s).", len(images))
-    for i, path in enumerate(images, start=1):
-        fp = image_duplicate_fingerprint(path, entries, stats)
-        if fp is None:
-            counts["errors"] += 1
-            kept.append(path)
-            continue
-        file_hash, _pixel_hash, _phash, _ratio = fp
-        nudity_status = duplicate_nudity_status_for_path(path)
-        duplicate_kind: str | None = None
-        if (nudity_status, file_hash) in exact:
-            duplicate_kind = "exact_file"
+        log.info("Intake duplicate check: checking %d incoming image(s).", len(images))
+        for i, path in enumerate(images, start=1):
+            fp = image_duplicate_fingerprint(path, entries, stats, asset_index)
+            if fp is None:
+                counts["errors"] += 1
+                kept.append(path)
+                continue
+            file_hash, _pixel_hash, _phash, _ratio = fp
+            nudity_status = duplicate_nudity_status_for_path(path)
+            if file_hash in exact_statuses_by_hash and nudity_status == "safe":
+                nudity_status = classified_nudity_status(
+                    path, file_hash=file_hash, asset_index=asset_index)
 
-        if duplicate_kind is None:
-            kept.append(path)
-        else:
-            safe_duplicates.append(path)
-            counts[duplicate_kind] += 1
-        if i % 500 == 0 or i == len(images):
-            log.info("Intake duplicate check: checked %d/%d incoming image(s).",
-                     i, len(images))
+            first_incoming = incoming_first_by_hash.get(file_hash)
+            if first_incoming is not None:
+                first_path, first_status = first_incoming
+                # Resolve provisional path-only "safe" categories when the
+                # same bytes occur again in this intake. Content classification
+                # is cached by hash, so both copies receive one stable result.
+                if first_status == "safe":
+                    resolved_first_status = classified_nudity_status(
+                        first_path, file_hash=file_hash, asset_index=asset_index)
+                    if resolved_first_status != first_status:
+                        if exact.get((first_status, file_hash)) == first_path:
+                            exact.pop((first_status, file_hash), None)
+                            exact_statuses_by_hash[file_hash].discard(first_status)
+                        exact.setdefault((resolved_first_status, file_hash), first_path)
+                        exact_statuses_by_hash[file_hash].add(resolved_first_status)
+                        incoming_first_by_hash[file_hash] = (
+                            first_path, resolved_first_status)
+                        first_status = resolved_first_status
+                if nudity_status == "safe":
+                    nudity_status = classified_nudity_status(
+                        path, file_hash=file_hash, asset_index=asset_index)
+            asset_index.update_classification(path, nudity_status=nudity_status)
+            duplicate_kind: str | None = None
+            if (nudity_status, file_hash) in exact:
+                duplicate_kind = "exact_file"
+
+            if duplicate_kind is None:
+                kept.append(path)
+                # Treat the first occurrence in this intake batch as part of
+                # the baseline immediately. Otherwise identical files from
+                # separate intake subfolders can reach clustering twice and
+                # be routed to different people in the same run.
+                exact.setdefault((nudity_status, file_hash), path)
+                exact_statuses_by_hash[file_hash].add(nudity_status)
+                incoming_first_by_hash.setdefault(file_hash, (path, nudity_status))
+            else:
+                safe_duplicates.append(path)
+                counts[duplicate_kind] += 1
+            if i % 500 == 0 or i == len(images):
+                asset_index.commit()
+                log.info("Intake duplicate check: checked %d/%d incoming image(s).",
+                         i, len(images))
 
     save_fingerprint_cache(fp_cache)
-    log.info("Intake duplicate fingerprint cache: hits=%d, misses=%d, "
+    log.info("Intake duplicate fingerprint cache: sqlite=%d, json=%d, misses=%d, "
              "decode_errors=%d, errors=%d.",
-             stats["cache_hits"], stats["cache_misses"],
+             stats["sqlite_hits"], stats["json_cache_hits"], stats["cache_misses"],
              stats["decode_errors"], stats["errors"])
 
     if safe_duplicates or near_visual_review:
@@ -2652,7 +3853,7 @@ def organize_originals(records: list[FaceRecord],
                        name_map: dict[int, str],
                        originals_dir: Path,
                        input_dir: Path | None = None,
-                       output_dir: Path | None = None) -> None:
+                       output_dir: Path | None = None) -> set[Path]:
     from tqdm import tqdm
 
     best_per_pair: dict[tuple[str, Path], FaceRecord] = {}
@@ -2672,6 +3873,14 @@ def organize_originals(records: list[FaceRecord],
     for (person, src), rec in best_per_pair.items():
         if not src.exists():
             continue
+        expected_hash = str(getattr(rec, "content_sha256", ""))
+        if expected_hash:
+            try:
+                if content_identity.content_sha256(src) != expected_hash:
+                    log.warning("Keeping changed source unfiled; its recognition is stale: %s", src)
+                    continue
+            except OSError:
+                continue
         is_blurred = rec.sharpness < SHARPNESS_BLUR_THRESHOLD
         kind = "blurred" if is_blurred else "sharp"
         buckets[(person, kind)].append((src, rec.sharpness, rec.image_phash))
@@ -2679,13 +3888,14 @@ def organize_originals(records: list[FaceRecord],
     originals_dir.mkdir(parents=True, exist_ok=True)
     completed = _load_checkpoint(originals_dir)
     if completed:
-        log.info("Resume: %d copy task(s) already completed in previous run.",
+        log.info("Resume: verifying %d legacy copy hint(s) against original content.",
                  len(completed))
+    journal = copy_journal.CopyJournal(originals_dir)
 
     counts = {"sharp_keep": 0, "sharp_dup": 0,
               "blurred_keep": 0, "blurred_dup": 0,
               "missing": 0, "skipped_existing": 0,
-              "nudity_possible": 0, "nudity_errors": 0}
+              "nudity_possible": 0, "nudity_review": 0, "nudity_errors": 0}
     per_person: dict[str, dict[str, int]] = defaultdict(
         lambda: {"sharp_keep": 0, "sharp_dup": 0,
                  "blurred_keep": 0, "blurred_dup": 0})
@@ -2694,26 +3904,55 @@ def organize_originals(records: list[FaceRecord],
     pending_writes = 0
     next_indexes: dict[Path, int] = {}
     organized_sources: set[Path] = set()
-    existing_hashes_by_person: dict[str, set[str]] = {}
+    existing_hashes_by_person: dict[str, dict[str, dict[str, Path]]] = {}
+    source_hashes: dict[Path, str] = {}
+    source_nudity_statuses: dict[Path, str] = {}
+    asset_index = analysis_index.AnalysisIndex(analysis_index_file())
 
-    def existing_original_hashes(person: str, person_dir: Path) -> set[str]:
+    def source_hash_and_nudity_status(src: Path) -> tuple[str, str]:
+        if src in source_hashes:
+            return source_hashes[src], source_nudity_statuses[src]
+        indexed = asset_index.fingerprint(src)
+        if indexed is not None:
+            file_hash = indexed.sha256
+        else:
+            try:
+                file_hash = sha256_file(src)
+            except OSError:
+                file_hash = ""
+        status = classified_nudity_status(
+            src,
+            file_hash=file_hash or None,
+            asset_index=asset_index,
+        )
+        # Nudity caching may begin a SQLite write transaction. Release that
+        # transaction before operation_ledger opens its short-lived SQLite
+        # mirror while moving a possible-nudity copy. The JSONL ledger remains
+        # authoritative, but leaving this transaction open caused a 30-second
+        # self-lock for every move.
+        if asset_index.connection.in_transaction:
+            asset_index.commit()
+        source_hashes[src] = file_hash
+        source_nudity_statuses[src] = status
+        return file_hash, status
+
+    def existing_original_hashes(person: str, person_dir: Path) -> dict[str, dict[str, Path]]:
         if person in existing_hashes_by_person:
             return existing_hashes_by_person[person]
-        hashes: set[str] = set()
-        roots = [
-            person_dir / PERSON_PHOTOS_DIR,
-            person_dir / PERSON_PHOTOS_DIR / NUDITY_POSSIBLE_DIR,
-        ]
-        for root in roots:
-            if not root.exists():
-                continue
+        hashes: dict[str, dict[str, Path]] = defaultdict(dict)
+        root = person_dir / PERSON_PHOTOS_DIR
+        if root.exists():
             for existing in root.rglob("*"):
                 if not existing.is_file() or existing.suffix.lower() not in IMAGE_EXTS:
                     continue
                 try:
-                    hashes.add(sha256_file(existing))
+                    file_hash = asset_index.content_sha256(existing)
                 except OSError:
                     continue
+                status = duplicate_nudity_status_for_path(existing)
+                if file_hash:
+                    hashes[status][file_hash] = existing
+        asset_index.commit()
         existing_hashes_by_person[person] = hashes
         return hashes
 
@@ -2728,40 +3967,62 @@ def organize_originals(records: list[FaceRecord],
             base_dir.mkdir(parents=True, exist_ok=True)
 
             if DEDUP_DUPLICATES:
-                keepers, dup_map = dedup_within_bucket(items, threshold=PHASH_THRESHOLD)
+                keepers, dup_map = dedup_within_bucket(
+                    items,
+                    threshold=PHASH_THRESHOLD,
+                    category_for_path=lambda src: source_hash_and_nudity_status(src)[1],
+                )
             else:
                 keepers = [it[0] for it in items]; dup_map = {}
 
             for src in keepers:
                 key = f"{person}||{src}||{kind}||main"
-                if key in completed:
-                    counts["skipped_existing"] += 1
-                    continue
                 if not src.exists():
                     counts["missing"] += 1
                     completed.add(key)
                     continue
-                try:
-                    src_hash = sha256_file(src)
-                except OSError:
-                    src_hash = ""
-                if src_hash and src_hash in existing_original_hashes(person, person_dir):
+                src_hash, src_nudity_status = source_hash_and_nudity_status(src)
+                operation_id = journal.operation_id(person, src_hash, f"{src_nudity_status}:{kind}:main")
+                if src_hash and journal.verified_destination(operation_id, src_hash) is not None:
+                    counts["skipped_existing"] += 1
+                    organized_sources.add(src)
+                    continue
+                if (src_hash
+                        and src_hash in existing_original_hashes(person, person_dir)[src_nudity_status]):
+                    journal.completed(operation_id, src_hash,
+                        existing_original_hashes(person, person_dir)[src_nudity_status][src_hash])
                     completed.add(key)
                     counts["skipped_existing"] += 1
+                    organized_sources.add(src)
                     continue
-                dest = next_numbered_dest(base_dir, person, src, next_indexes)
+                dest = next_numbered_dest(base_dir, person_dir, person, src, next_indexes)
                 try:
+                    journal.planned(operation_id, src_hash)
                     _atomic_copy(src, dest)
-                    dest, nudity_status = maybe_move_to_nudity_subfolder(dest, person_dir)
+                    dest, nudity_status = maybe_move_to_nudity_subfolder(
+                        dest,
+                        person_dir,
+                        file_hash=src_hash or None,
+                        preclassified_status=src_nudity_status,
+                    )
+                    src_hash = verify_original_copy(src, dest, src_hash)
+                    journal.completed(operation_id, src_hash, dest)
                 except Exception as e:  # noqa: BLE001
                     log.error("Copy failed: %s → %s: %s", src.name, dest.name, e)
                     continue
                 if nudity_status == NUDITY_POSSIBLE_DIR:
                     counts["nudity_possible"] += 1
+                elif nudity_status == NUDITY_UNCERTAIN_DIR:
+                    counts["nudity_review"] += 1
                 elif nudity_status == "error":
                     counts["nudity_errors"] += 1
                 if src_hash:
-                    existing_original_hashes(person, person_dir).add(src_hash)
+                    final_status = (
+                        "possible" if nudity_status == NUDITY_POSSIBLE_DIR
+                        else "uncertain" if nudity_status == NUDITY_UNCERTAIN_DIR
+                        else src_nudity_status
+                    )
+                    existing_original_hashes(person, person_dir)[final_status][src_hash] = dest
                 organized_sources.add(src)
                 completed.add(key)
                 counts[f"{kind}_keep"] += 1
@@ -2776,34 +4037,50 @@ def organize_originals(records: list[FaceRecord],
                 dup_dir.mkdir(parents=True, exist_ok=True)
                 for src in dup_map:
                     key = f"{person}||{src}||{kind}||dup"
-                    if key in completed:
-                        counts["skipped_existing"] += 1
-                        continue
                     if not src.exists():
                         counts["missing"] += 1
                         completed.add(key)
                         continue
-                    try:
-                        src_hash = sha256_file(src)
-                    except OSError:
-                        src_hash = ""
-                    if src_hash and src_hash in existing_original_hashes(person, person_dir):
+                    src_hash, src_nudity_status = source_hash_and_nudity_status(src)
+                    operation_id = journal.operation_id(person, src_hash, f"{src_nudity_status}:{kind}:dup")
+                    if src_hash and journal.verified_destination(operation_id, src_hash) is not None:
+                        counts["skipped_existing"] += 1
+                        organized_sources.add(src)
+                        continue
+                    if (src_hash
+                            and src_hash in existing_original_hashes(person, person_dir)[src_nudity_status]):
                         completed.add(key)
                         counts["skipped_existing"] += 1
+                        organized_sources.add(src)
                         continue
-                    dest = next_numbered_dest(dup_dir, person, src, next_indexes)
+                    dest = next_numbered_dest(dup_dir, person_dir, person, src, next_indexes)
                     try:
+                        journal.planned(operation_id, src_hash)
                         _atomic_copy(src, dest)
-                        dest, nudity_status = maybe_move_to_nudity_subfolder(dest, person_dir)
+                        dest, nudity_status = maybe_move_to_nudity_subfolder(
+                            dest,
+                            person_dir,
+                            file_hash=src_hash or None,
+                            preclassified_status=src_nudity_status,
+                        )
+                        src_hash = verify_original_copy(src, dest, src_hash)
+                        journal.completed(operation_id, src_hash, dest)
                     except Exception as e:  # noqa: BLE001
                         log.error("Copy failed: %s → %s: %s", src.name, dest.name, e)
                         continue
                     if nudity_status == NUDITY_POSSIBLE_DIR:
                         counts["nudity_possible"] += 1
+                    elif nudity_status == NUDITY_UNCERTAIN_DIR:
+                        counts["nudity_review"] += 1
                     elif nudity_status == "error":
                         counts["nudity_errors"] += 1
                     if src_hash:
-                        existing_original_hashes(person, person_dir).add(src_hash)
+                        final_status = (
+                            "possible" if nudity_status == NUDITY_POSSIBLE_DIR
+                            else "uncertain" if nudity_status == NUDITY_UNCERTAIN_DIR
+                            else src_nudity_status
+                        )
+                        existing_original_hashes(person, person_dir)[final_status][src_hash] = dest
                     organized_sources.add(src)
                     completed.add(key)
                     counts[f"{kind}_dup"] += 1
@@ -2813,6 +4090,8 @@ def organize_originals(records: list[FaceRecord],
                         _save_checkpoint(originals_dir, completed)
                         pending_writes = 0
     finally:
+        asset_index.close()
+        journal.close()
         _save_checkpoint(originals_dir, completed)
 
     cp = _checkpoint_path(originals_dir)
@@ -2834,12 +4113,14 @@ def organize_originals(records: list[FaceRecord],
              counts["blurred_keep"], counts["blurred_dup"],
              counts["missing"], counts["skipped_existing"])
     if NUDITY_SORT_ENABLED:
-        log.info("Nudity subfolder sort: possible=%d, errors=%d",
-                 counts["nudity_possible"], counts["nudity_errors"])
+        log.info("Nudity subfolder sort: confirmed=%d, review=%d, errors=%d",
+                 counts["nudity_possible"], counts["nudity_review"],
+                 counts["nudity_errors"])
     if ARCHIVE_ORGANIZED_SOURCES and input_dir is not None and output_dir is not None:
         moved = archive_organized_sources(organized_sources, input_dir, output_dir)
         log.info("Archived %d organized source image(s) to %s",
                  moved, output_dir / "_source_review" / SOURCE_ARCHIVE_DIR_NAME)
+    return organized_sources
 
 
 # ============================================================================
@@ -2922,7 +4203,9 @@ def finish_pipeline(all_records: list[FaceRecord],
                     do_review: bool,
                     interactive_was_run: bool,
                     preserve_labeling_state: bool = False,
-                    scanned_sources: Iterable[Path] | None = None) -> None:
+                    scanned_sources: Iterable[Path] | None = None,
+                    processed_sources: set[Path] | None = None,
+                    detection_outcomes: dict[str, str] | None = None) -> None:
     """Anchor-merge → close-pair review → originals copy → manifest → final
     cache save. Called whether labeling was fresh or resumed.
 
@@ -2954,8 +4237,13 @@ def finish_pipeline(all_records: list[FaceRecord],
             return
 
     log.info("Copying originals to: %s", originals_dir)
-    organize_originals(all_records, name_map, originals_dir,
-                       input_dir=input_dir, output_dir=output_dir)
+    organized_sources = organize_originals(
+        all_records,
+        name_map,
+        originals_dir,
+        input_dir=input_dir,
+        output_dir=output_dir,
+    )
 
     centroids = compute_centroids(all_records)
     write_manifest(all_records, name_map, centroids, csv_path)
@@ -3001,9 +4289,37 @@ def finish_pipeline(all_records: list[FaceRecord],
                  sum(1 for c in new_cache.faces if c.label))
 
     if ARCHIVE_SCANNED_SOURCES and scanned_sources is not None:
-        moved = archive_scanned_sources(scanned_sources, input_dir, output_dir)
-        log.info("Archived %d scanned source image(s) to %s",
-                 moved, output_dir / "_source_review" / SCANNED_SOURCE_ARCHIVE_DIR_NAME)
+        outcome_counts, report_path = archive_unassigned_sources(
+            scanned_sources,
+            all_records,
+            name_map,
+            organized_sources,
+            input_dir,
+            output_dir,
+            processed_sources=processed_sources,
+            detection_outcomes=detection_outcomes,
+        )
+        unresolved = sum(
+            outcome_counts.get(reason, 0)
+            for reason in (
+                "no_usable_face", "unknown_identity", "copy_failed",
+                "processing_failed", "unreadable_image",
+            )
+        )
+        log.info(
+            "Preserved %d unresolved intake image(s) for review: "
+            "no usable face=%d, unknown identity=%d, copy failed=%d, "
+            "processing failed=%d, unreadable=%d, move failed=%d.",
+            unresolved,
+            outcome_counts.get("no_usable_face", 0),
+            outcome_counts.get("unknown_identity", 0),
+            outcome_counts.get("copy_failed", 0),
+            outcome_counts.get("processing_failed", 0),
+            outcome_counts.get("unreadable_image", 0),
+            outcome_counts.get("move_failed", 0),
+        )
+        if report_path is not None:
+            log.info("Unassigned intake report: %s", report_path)
 
     if preserve_labeling_state:
         remaining = save_remaining_labeling_state(
@@ -3107,9 +4423,10 @@ def do_resume(state: LabelingState, do_review: bool, use_ai: bool,
 
     # Reconstruct face records with their cluster IDs from the saved state
     all_records: list[FaceRecord] = []
-    for cf, cid in zip(state.faces, state.cluster_ids):
+    for index, (cf, cid) in enumerate(zip(state.faces, state.cluster_ids)):
         rec = cached_to_record(cf)
         rec.cluster_id = cid
+        restore_recovery_state(rec, state, index)
         all_records.append(rec)
     name_map = dict(state.name_map)
 
@@ -3164,9 +4481,10 @@ def mark_small_clusters_junk(state: LabelingState, threshold: int,
 
     all_records: list[FaceRecord] = []
     by_cid: dict[int, int] = defaultdict(int)
-    for cf, cid in zip(state.faces, state.cluster_ids):
+    for index, (cf, cid) in enumerate(zip(state.faces, state.cluster_ids)):
         rec = cached_to_record(cf)
         rec.cluster_id = cid
+        restore_recovery_state(rec, state, index)
         all_records.append(rec)
         by_cid[cid] += 1
 
@@ -3202,6 +4520,7 @@ def main() -> int:
     global INTERACTIVE_LABELING, DEDUP_DUPLICATES, REVIEW_CLOSE_PAIRS
     global USE_AI_SUGGESTIONS, NUDITY_SORT_ENABLED, AUTO_PERSON_MATCH_ENABLED
     global AUTO_PERSON_MATCH_DIST, IDENTITY_MAX_IMAGES_PER_PERSON
+    global IDENTITY_MAX_PROTOTYPES_PER_PERSON
     global POST_PROCESS_OUTPUT, USE_HARDLINKS, ARCHIVE_ORGANIZED_SOURCES
     global ARCHIVE_SCANNED_SOURCES, SOURCE_ARCHIVE_DIR_NAME
     global UNATTENDED_FINISH_KNOWN, ASSUME_MERGE_EXISTING_OUTPUT, DET_SIZE
@@ -3232,7 +4551,10 @@ def main() -> int:
     parser.add_argument("--person-match-dist", type=float, default=AUTO_PERSON_MATCH_DIST,
                         help="Distance threshold for existing-person auto-labels.")
     parser.add_argument("--identity-max-images", type=int, default=IDENTITY_MAX_IMAGES_PER_PERSON,
-                        help="Max images per person used when rebuilding the identity DB.")
+                        help="Max candidate images scanned per person when rebuilding the identity DB.")
+    parser.add_argument("--identity-prototypes", type=int,
+                        default=IDENTITY_MAX_PROTOTYPES_PER_PERSON,
+                        help="Max diverse face prototypes retained per person.")
     parser.add_argument("--no-post-process", action="store_true",
                         help="Skip automatic output cleanup after finishing.")
     parser.add_argument("--skip-output-cleanup", action="store_true",
@@ -3264,6 +4586,9 @@ def main() -> int:
                         help="Do not skip folders named sorted/photos_by_person/face_clusters. Use only for importing old outputs.")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE,
                         help="Images per detection subprocess. Default 50 keeps macOS memory stable.")
+    parser.add_argument("--max-input-images", type=int, default=0,
+                        help="Process at most N input images, in deterministic path order. "
+                             "Used by the memory-bounded daily supervisor; 0 means all images.")
     parser.add_argument("--detect-workers", type=int, default=DETECT_WORKERS,
                         help="Run this many detection subprocess batches in parallel. Use 1 for safest memory use; 2 can be faster on large CPU-only scans.")
     parser.add_argument("--det-size", type=int, default=DET_SIZE[0],
@@ -3286,6 +4611,7 @@ def main() -> int:
         AUTO_PERSON_MATCH_ENABLED = False
     AUTO_PERSON_MATCH_DIST = float(args.person_match_dist)
     IDENTITY_MAX_IMAGES_PER_PERSON = max(0, int(args.identity_max_images))
+    IDENTITY_MAX_PROTOTYPES_PER_PERSON = max(1, int(args.identity_prototypes))
     if args.no_post_process or args.skip_output_cleanup:
         POST_PROCESS_OUTPUT = False
     if args.copy_output:
@@ -3410,34 +4736,137 @@ def main() -> int:
     else:
         excluded_scan_dirs = set() if args.scan_all_dirs else None
         always_excluded_scan_dirs = None
-    images = list(iter_images(input_dir,
-                              excluded_dir_names=excluded_scan_dirs,
-                              always_excluded_dir_names=always_excluded_scan_dirs))
-    log.info("Found %d images under %s", len(images), input_dir)
+    discovered_images = list(iter_images(
+        input_dir,
+        excluded_dir_names=excluded_scan_dirs,
+        always_excluded_dir_names=always_excluded_scan_dirs,
+    ))
+    total_input_images = len(discovered_images)
+    max_input_images = max(0, int(args.max_input_images))
+    images = bounded_input_images(discovered_images, max_input_images)
+    del discovered_images
+    log.info("Found %d images under %s", total_input_images, input_dir)
+    if max_input_images and total_input_images > len(images):
+        log.info(
+            "Memory-bounded intake: processing %d/%d images in this worker; "
+            "the supervisor will resume the remainder.",
+            len(images), total_input_images,
+        )
+    images, generated_matches = generated_artifacts.partition_intake_artifacts(
+        images,
+        index_path=analysis_index_file(),
+    )
+    if generated_matches:
+        moved_generated = generated_artifacts.archive_intake_matches(
+            generated_matches,
+            input_dir=input_dir,
+            sorted_root=output_dir,
+        )
+        log.warning(
+            "Diverted %d/%d generated contact/review sheet(s) before face sorting. "
+            "Recoverable files: %s",
+            moved_generated,
+            len(generated_matches),
+            output_dir / "_source_review" / "ready_to_delete" / "generated_contact_sheets",
+        )
     if not images:
         return 0
 
     cached_records: list[FaceRecord] = []
     new_images: list[Path] = []
+    processed_sources: set[Path] = set()
+    detection_outcomes: dict[str, str] = {}
+    log.info(
+        "Preparing cache lookup for %d file signature(s) and %d cached face(s).",
+        len(cache.file_signatures),
+        len(cache.faces),
+    )
     cache_face_index: dict[str, list[CachedFace]] = defaultdict(list)
-    for c in cache.faces:
-        cache_face_index[c.src_str].append(c)
+    for index, cached_face in enumerate(cache.faces, start=1):
+        cache_face_index[cache_path_key(cached_face.src_str)].append(cached_face)
+        if index % 10_000 == 0 or index == len(cache.faces):
+            log.info(
+                "Cache lookup: indexed %d/%d cached face(s).",
+                index,
+                len(cache.faces),
+            )
+    cache_signature_index: dict[str, tuple[float, int]] = {}
+    signature_total = len(cache.file_signatures)
+    for index, (path, signature) in enumerate(cache.file_signatures.items(), start=1):
+        cache_signature_index[cache_path_key(path)] = signature
+        if index % 10_000 == 0 or index == signature_total:
+            log.info(
+                "Cache lookup: indexed %d/%d file signature(s).",
+                index,
+                signature_total,
+            )
+    stale_cache_keys: set[str] = set()
+    sqlite_hydrated = 0
+    hydrated_signatures: dict[str, tuple[float, int]] = {}
+    hydrated_records: list[CachedFace] = []
+    hydrated_keys: set[str] = set()
+    detection_config = config_fingerprint()
+    with analysis_index.AnalysisIndex(analysis_index_file()) as asset_index:
+        for image_index, img in enumerate(images, start=1):
+            try:
+                sig = file_signature(img)
+            except OSError:
+                continue
+            s = str(img)
+            canonical = cache_path_key(s)
+            if image_index % 500 == 0 or image_index == len(images):
+                log.info(
+                    "Cache lookup: checking intake image %d/%d (%d new or changed so far).",
+                    image_index,
+                    len(images),
+                    len(new_images),
+                )
+            if cache_signature_index.get(canonical) == sig:
+                processed_sources.add(img)
+                cached_faces = cache_face_index.get(canonical, [])
+                detection_outcomes[s] = (
+                    "accepted_face_cached" if cached_faces else "no_usable_face_cached"
+                )
+                for c in cached_faces:
+                    cached_records.append(cached_to_record(c))
+                continue
 
-    for img in images:
-        try:
-            sig = file_signature(img)
-        except OSError:
-            continue
-        s = str(img)
-        if cache.file_signatures.get(s) == sig:
-            for c in cache_face_index.get(s, []):
-                cached_records.append(cached_to_record(c))
-        else:
+            indexed = asset_index.cached_detections(img, detection_config)
+            if indexed is not None:
+                hydrated_faces = [
+                    index_record_to_cached_face(img, record)
+                    for record in indexed.detections
+                ]
+                hydrated_keys.add(canonical)
+                hydrated_signatures[s] = sig
+                hydrated_records.extend(hydrated_faces)
+                cache_signature_index[canonical] = sig
+                cache_face_index[canonical] = hydrated_faces
+                processed_sources.add(img)
+                detection_outcomes[s] = indexed.status
+                cached_records.extend(cached_to_record(face) for face in hydrated_faces)
+                sqlite_hydrated += 1
+                continue
+
             new_images.append(img)
-            cache.file_signatures.pop(s, None)
-            if s in cache_face_index:
-                cache_face_index.pop(s)
-                cache.faces = [c for c in cache.faces if c.src_str != s]
+            stale_cache_keys.add(canonical)
+
+    replaced_keys = stale_cache_keys | hydrated_keys
+    if replaced_keys:
+        cache.file_signatures = {
+            path: signature for path, signature in cache.file_signatures.items()
+            if cache_path_key(path) not in replaced_keys
+        }
+        cache.faces = [
+            face for face in cache.faces
+            if cache_path_key(face.src_str) not in replaced_keys
+        ]
+    cache.file_signatures.update(hydrated_signatures)
+    cache.faces.extend(hydrated_records)
+    if sqlite_hydrated or stale_cache_keys:
+        save_cache(cache)
+    if sqlite_hydrated:
+        log.info("Recovered %d current image analysis result(s) from SQLite.", sqlite_hydrated)
 
     del cache_face_index
     gc.collect()
@@ -3472,14 +4901,33 @@ def main() -> int:
 
     new_records: list[FaceRecord] = []
     if new_images:
-        new_records = detect_in_batches_subprocess(
+        new_records, newly_processed_sources, new_detection_outcomes = detect_in_batches_subprocess(
             new_images, cache, batch_size=batch_size,
-            workers=max(1, int(args.detect_workers)))
+            workers=max(1, int(args.detect_workers)),
+            index_path=analysis_index_file())
+        processed_sources.update(newly_processed_sources)
+        detection_outcomes.update(new_detection_outcomes)
         log.info("Total new faces extracted across all batches: %d.", len(new_records))
 
     all_records = cached_records + new_records
     if not all_records:
-        log.warning("No faces to process. Exiting.")
+        log.warning("No assignable faces were available; preserving scanned images by outcome for review.")
+        if ARCHIVE_SCANNED_SOURCES:
+            outcome_counts, report_path = archive_unassigned_sources(
+                images, [], {}, set(), input_dir, output_dir,
+                processed_sources=processed_sources,
+                detection_outcomes=detection_outcomes,
+            )
+            log.info(
+                "Preserved unresolved intake for review at %s: no usable face=%d, "
+                "processing failed=%d, unreadable=%d.",
+                output_dir / "_source_review" / UNASSIGNED_INTAKE_DIR_NAME,
+                outcome_counts.get("no_usable_face", 0),
+                outcome_counts.get("processing_failed", 0),
+                outcome_counts.get("unreadable_image", 0),
+            )
+            if report_path is not None:
+                log.info("Unassigned intake report: %s", report_path)
         return 0
 
     n_a = stage_a_dbscan(all_records)
@@ -3506,29 +4954,86 @@ def main() -> int:
              len(centroids), sum(1 for r in all_records if r.cluster_id == -1))
 
     name_map = make_initial_name_map(all_records)
+    import daily_identity_recovery
+    manual_count = daily_identity_recovery.apply_manual_overrides(
+        all_records, name_map, None, people_root=output_dir / "photos_by_person")
+    if manual_count:
+        log.info("Preserved %d manual content decision(s) before automatic matching.", manual_count)
     if AUTO_PERSON_MATCH_ENABLED:
         identity_db = load_identity_db()
         if identity_db is None and (output_dir / "photos_by_person").exists():
             log.info("No usable identity DB found; building it from existing person folders.")
             identity_db = build_identity_db_from_person_folders(output_dir / "photos_by_person")
+        # Quick Review and its independent verifier use the canonical database,
+        # not the optional legacy-reference merge used by cluster matching.
+        recovery_identity_db = identity_db
         if not args.no_reference_match:
             reference_db = load_reference_centroids(args.external_centroids)
             identity_db = merge_identity_dbs(identity_db, reference_db)
-        n_identity = apply_identity_db_labels(all_records, name_map, identity_db)
+        if identity_db is not None:
+            identity_db = calibrate_identity_db_against_impostors(identity_db)
+        with analysis_index.AnalysisIndex(analysis_index_file()) as identity_index:
+            def record_identity_decision(
+                record: FaceRecord,
+                identity_name: str,
+                distance: float,
+                margin: float,
+                lane: str,
+            ) -> None:
+                identity_index.record_identity(
+                    record.src,
+                    face_index=record.face_index,
+                    identity_name=identity_name,
+                    distance=distance,
+                    margin=margin,
+                    lane=lane,
+                    run_id=operation_ledger.current_run_id(),
+                )
+
+            n_identity = apply_identity_db_labels(
+                all_records,
+                name_map,
+                identity_db,
+                decision_recorder=record_identity_decision,
+                source_batch_root=input_dir,
+                use_secondary_verifier=False,
+            )
         if n_identity:
             log.info("Existing-person identity DB auto-labeled %d cluster(s).", n_identity)
+        import daily_identity_recovery
+        recovery_plan = daily_identity_recovery.plan_recovery(
+            all_records, name_map, recovery_identity_db, cache,
+            people_root=output_dir / "photos_by_person",
+            progress=log.info,
+        )
+        recovery_report = (
+            output_dir / "_source_review" / UNASSIGNED_INTAKE_DIR_NAME / "reports"
+            / f"{operation_ledger.current_run_id()}_identity_recovery.json"
+        )
+        daily_identity_recovery.write_report(recovery_plan, recovery_report)
+        with analysis_index.AnalysisIndex(analysis_index_file()) as identity_index:
+            recovered = daily_identity_recovery.apply_plan(
+                recovery_plan, all_records, name_map, record_identity_decision
+            )
+        daily_identity_recovery.write_report(recovery_plan, recovery_report)
+        log.info("Individual recovery: %d image(s) accepted; reasons: %s. Report: %s",
+                 recovered, recovery_plan.counts, recovery_report)
+        centroids = compute_centroids(all_records)
     write_cluster_crops(all_records, name_map, clusters_dir, centroids)
     log.info("Wrote face crops to: %s", clusters_dir)
 
-    # Save labeling state BEFORE entering interactive labeling
-    save_labeling_state(all_records, name_map, output_dir, input_dir)
-    log.info("Labeling state saved. You can quit anytime with 'q' and resume "
-             "with: python sort_photos.py --resume-label")
+    # Interactive runs need a resumable labeling snapshot. Unattended intake
+    # already routes unresolved sources into review folders, so retaining the
+    # same records here only creates large, obsolete backup files per slice.
+    if not UNATTENDED_FINISH_KNOWN:
+        save_labeling_state(all_records, name_map, output_dir, input_dir)
+        log.info("Labeling state saved. You can quit anytime with 'q' and resume "
+                 "with: python sort_photos.py --resume-label")
 
     if UNATTENDED_FINISH_KNOWN:
-        log.info("Unattended mode: skipping manual labeling and preserving remaining "
-                 "unknown clusters for later.")
-        labeling_complete = False
+        log.info("Unattended mode: skipping manual labeling; unresolved sources "
+                 "will be preserved in review folders.")
+        labeling_complete = True
     elif INTERACTIVE_LABELING:
         labeling_complete = interactive_label(all_records, name_map, clusters_dir,
                                               use_ai=USE_AI_SUGGESTIONS,
@@ -3543,9 +5048,14 @@ def main() -> int:
                     do_review=REVIEW_CLOSE_PAIRS,
                     interactive_was_run=INTERACTIVE_LABELING,
                     preserve_labeling_state=not labeling_complete,
-                    scanned_sources=images)
+                    scanned_sources=images,
+                    processed_sources=processed_sources,
+                    detection_outcomes=detection_outcomes)
     return 0
 
 
 if __name__ == "__main__":
+    # Shared recovery must see this process's CLI settings and compatibility
+    # classes, rather than importing a second sorter with default settings.
+    sys.modules["sort_photos"] = sys.modules[__name__]
     sys.exit(main())

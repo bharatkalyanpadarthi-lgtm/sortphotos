@@ -15,16 +15,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sort_photos  # noqa: E402
 import source_manifest  # noqa: E402
+import pipeline_paths  # noqa: E402
 
 for _name in ("CacheState", "CachedFace", "FaceRecord", "LabelingState", "IdentityDB"):
     if hasattr(sort_photos, _name):
         setattr(sys.modules["__main__"], _name, getattr(sort_photos, _name))
 
-SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
+SORTED = pipeline_paths.SORTED_ROOT
 PEOPLE = SORTED / "photos_by_person"
 SOURCE_REVIEW = SORTED / "_source_review"
 READY = SOURCE_REVIEW / "ready_to_delete"
-TO_PROCESS = Path.home() / "Pictures" / "To Process"
+TO_PROCESS = pipeline_paths.TO_PROCESS
+LEGACY_VIDEO_INBOX = Path.home() / "Pictures" / "videos"
 ADV_REPORT = SOURCE_REVIEW / "duplicate_reports" / "advanced_duplicates.csv"
 FINGERPRINT_CACHE = Path.home() / ".face_sort_cache" / "advanced_duplicate_fingerprints.json"
 SMART_STATE = Path.home() / ".face_sort_cache" / "smart_album_person_state.json"
@@ -93,6 +95,18 @@ def size_bytes(root: Path, exclude_generated_dirs: bool = True) -> int:
             except OSError:
                 pass
     return total
+
+
+def person_original_summary() -> tuple[int, int]:
+    count = 0
+    total_size = 0
+    for path in sort_photos.iter_person_original_images(PEOPLE):
+        count += 1
+        try:
+            total_size += path.stat().st_size
+        except OSError:
+            pass
+    return count, total_size
 
 
 def human_size(n: int) -> str:
@@ -260,13 +274,15 @@ def main() -> int:
     align = identity_alignment()
     face_cache = face_cache_summary()
     manifest = source_manifest_summary()
+    original_count, original_size = person_original_summary()
 
     print("Photo Pipeline Status")
     print("=" * 60)
     print(f"Sorted folder:          {SORTED}")
     print(f"Person folders:         {count_dirs(PEOPLE)}")
-    print(f"Organized images:       {count_images(PEOPLE)}")
-    print(f"People data size:       {human_size(size_bytes(PEOPLE))}")
+    print(f"Organized images:       {original_count}")
+    print(f"Organized videos:       {count_videos(PEOPLE)}")
+    print(f"People data size:       {human_size(original_size)}")
     print(f"Known identities DB:    {identity_count()} people")
     print(f"Identity drift:         {align['stale']} stale / {align['missing']} missing")
     print(f"Reference identities:   {reference_count()} people")
@@ -289,6 +305,7 @@ def main() -> int:
         f"({human_size(size_bytes(TO_PROCESS, exclude_generated_dirs=False))})"
     )
     print(f"To Process videos:      {count_videos(TO_PROCESS, exclude_generated_dirs=False)}")
+    print(f"Legacy videos pending:  {count_videos(LEGACY_VIDEO_INBOX, exclude_generated_dirs=False)}")
     print()
     print("Smart albums")
     print("  Status:               disabled / not generated")
@@ -306,6 +323,22 @@ def main() -> int:
     print(f"  Report:               {ADV_REPORT}")
     print()
     print("Review / delete holding areas")
+    unassigned = SOURCE_REVIEW / "unassigned_intake"
+    print(f"  Unassigned intake:     {count_images(unassigned)}")
+    print(f"    No usable face:      {count_images(unassigned / 'no_usable_face')}")
+    print(f"    Face quality review: {count_images(unassigned / 'face_quality_review')}")
+    print(f"    Unknown identity:    {count_images(unassigned / 'unknown_identity')}")
+    print(f"    Multi-face review:   {count_images(unassigned / 'multi_face_review')}")
+    print(f"    Copy failed:         {count_images(unassigned / 'copy_failed')}")
+    print(f"    Processing failed:   {count_images(unassigned / 'processing_failed')}")
+    print(f"    Unreadable image:    {count_images(unassigned / 'unreadable_image')}")
+    video_review = unassigned / "videos"
+    print(f"  Video review:          {count_videos(video_review, exclude_generated_dirs=False)}")
+    print(f"    Multiple people:     {count_videos(video_review / 'multiple_people', exclude_generated_dirs=False)}")
+    print(f"    Unknown identity:    {count_videos(video_review / 'unknown_identity', exclude_generated_dirs=False)}")
+    print(f"    No usable face:      {count_videos(video_review / 'no_usable_face', exclude_generated_dirs=False)}")
+    print(f"    Unreadable video:    {count_videos(video_review / 'unreadable_video', exclude_generated_dirs=False)}")
+    print(f"  Unassigned path:       {unassigned}")
     print(f"  ready_to_delete size: {human_size(size_bytes(READY))}")
     print(f"  _source_review size:  {human_size(size_bytes(SOURCE_REVIEW))}")
     print(f"  ready_to_delete path: {READY}")

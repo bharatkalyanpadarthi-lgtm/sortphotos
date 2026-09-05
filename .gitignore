@@ -18,3 +18,10 @@ ready_to_delete/
 duplicate_to_review/
 junk_to_review/
 _nudity_review/
+
+# External model weights and private runtime state are not application source.
+models/*.onnx
+!models/face_detection_yunet_2023mar.onnx
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm

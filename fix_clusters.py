@@ -35,7 +35,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-DEFAULT_OUTPUT = Path.home() / "Pictures" / "sorted_all_pictures"
+import pipeline_paths
+
+DEFAULT_OUTPUT = pipeline_paths.SORTED_ROOT
 CACHE_FILE     = Path.home() / ".face_sort_cache" / "cache.pkl"
 
 INVALID_NAME_CHARS = '/\\:*?"<>|'

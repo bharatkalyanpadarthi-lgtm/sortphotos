@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""
-Move NudeNet-flagged originals into subfolders inside each person folder.
+"""Place high-precision nudity classifications inside each person folder.
 
 Reads a nudity review CSV produced by separate_nudity_review.py and moves:
   photos_by_person/<person>/<file>
-to:
-  photos_by_person/<person>/photos/nude/<file>
+Confirmed images go to photos/nude. Ambiguous explicit detections go to the
+person's recoverable review/uncertain_nudity folder. Legacy low-threshold
+reports are rejected.
 
 Default is dry-run. Use --apply to move files.
 """
@@ -17,10 +17,17 @@ import csv
 import shutil
 from pathlib import Path
 
+import pipeline_paths
+
 import operation_ledger
 
-DEFAULT_SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
-SUPPORTED_POLICY_VERSIONS = {"2", "3", ""}
+DEFAULT_SORTED = pipeline_paths.SORTED_ROOT
+SUPPORTED_POLICY_VERSIONS = {"7-spatial-conflicts"}
+ROUTE_UNCERTAIN_NUDITY_TO_NUDE = pipeline_paths.configured_bool(
+    "route_uncertain_nudity_to_nude",
+    False,
+    "FACE_ROUTE_UNCERTAIN_NUDITY_TO_NUDE",
+)
 
 
 def unique_dest(dest: Path) -> Path:
@@ -45,8 +52,15 @@ def latest_report(review_dir: Path) -> Path | None:
 
 
 def target_subdir(category: str, confirm_possible: bool) -> str | None:
-    if category in {"possible_nudity", "uncertain"}:
+    del confirm_possible
+    if category == "confirmed_nude":
         return "photos/nude"
+    if category == "needs_review":
+        return (
+            "photos/nude"
+            if ROUTE_UNCERTAIN_NUDITY_TO_NUDE
+            else "review/uncertain_nudity"
+        )
     return None
 
 
@@ -61,9 +75,9 @@ def main() -> int:
     parser.add_argument("--remove-review-copies", action="store_true",
                         help="After moving originals, remove copied _nudity_review image folders.")
     parser.add_argument("--confirm-possible", action="store_true",
-                        help="Deprecated; flagged rows always move to photos/nude.")
+                        help="Deprecated compatibility option; it no longer changes placement.")
     parser.add_argument("--allow-legacy-report", action="store_true",
-                        help="Accepted for old workflows; legacy reports are allowed by default.")
+                        help="Compatibility flag; legacy low-confidence categories still never move to nude.")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -123,15 +137,23 @@ def main() -> int:
             dest = unique_dest(person_dir / subdir / src.name)
             actions.append((src, dest, category))
 
-    possible = sum(1 for _src, _dest, cat in actions if cat == "possible_nudity")
-    uncertain = sum(1 for _src, _dest, cat in actions if cat == "uncertain")
+    confirmed = sum(1 for _src, _dest, cat in actions if cat == "confirmed_nude")
+    review = sum(1 for _src, _dest, cat in actions if cat == "needs_review")
 
     print(f"Report:                 {report}")
     print(f"Person folders:         {people_root}")
     print(f"Files to move:          {len(actions)}")
-    print(f"  possible_nudity:      {possible}")
-    print(f"  lower-confidence:     {uncertain}")
-    print("Possible target:        photos/nude")
+    print(f"  confirmed nude:       {confirmed}")
+    print(f"  needs review:         {review}")
+    print("Confirmed target:       photos/nude")
+    print(
+        "Ambiguous target:       "
+        + (
+            "photos/nude (saved user preference)"
+            if ROUTE_UNCERTAIN_NUDITY_TO_NUDE
+            else "review/uncertain_nudity"
+        )
+    )
     print(f"Missing source files:   {missing}")
     print(f"Skipped report rows:    {skipped}")
     print(f"Legacy/old-policy rows: {skipped_legacy}")
@@ -160,17 +182,17 @@ def main() -> int:
         operation_ledger.move_path(
             src,
             dest,
-            sorted_root=DEFAULT_SORTED,
-            operation="place_nudity_inside_person_folders.move_to_nude",
-            reason="move reviewed nudity candidate into photos/nude",
+            sorted_root=sorted_root,
+            operation="place_nudity_inside_person_folders.place_classification",
+            reason=f"place high-precision nudity classification: {_category}",
             extra={"category": _category},
         )
         moved += 1
 
-    print(f"Moved {moved} file(s) into person-folder nudity subfolders.")
+    print(f"Placed {moved} file(s) into confirmed/review person subfolders.")
 
     if args.remove_review_copies:
-        for child_name in ("possible_nudity", "uncertain"):
+        for child_name in ("confirmed_nude", "needs_review", "likely_safe"):
             child = review_dir / child_name
             if child.exists():
                 shutil.rmtree(child)

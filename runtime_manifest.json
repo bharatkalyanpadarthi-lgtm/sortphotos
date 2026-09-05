@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "python": "3.12",
+  "architecture": "arm64",
+  "packages": {
+    "numpy": "2.4.4",
+    "opencv-python": "4.13.0.92",
+    "opencv-python-headless": "4.13.0.92",
+    "insightface": "0.7.3",
+    "onnxruntime": "1.25.1",
+    "scikit-learn": "1.8.0",
+    "Pillow": "12.2.0",
+    "pillow-heif": "1.3.0",
+    "nudenet": "3.4.2",
+    "tqdm": "4.67.3",
+    "scipy": "1.17.1"
+  },
+  "models": [
+    {
+      "role": "primary",
+      "model": "antelopev2",
+      "file": "1k3d68.onnx",
+      "byte_size": 143607619,
+      "sha256": "df5c06b8a0c12e422b2ed8947b8869faa4105387f199c477af038aa01f9a45cc"
+    },
+    {
+      "role": "primary",
+      "model": "antelopev2",
+      "file": "2d106det.onnx",
+      "byte_size": 5030888,
+      "sha256": "f001b856447c413801ef5c42091ed0cd516fcd21f2d6b79635b1e733a7109dbf"
+    },
+    {
+      "role": "primary",
+      "model": "antelopev2",
+      "file": "genderage.onnx",
+      "byte_size": 1322532,
+      "sha256": "4fde69b1c810857b88c64a335084f1c3fe8f01246c9a191b48c7bb756d6652fb"
+    },
+    {
+      "role": "primary",
+      "model": "antelopev2",
+      "file": "glintr100.onnx",
+      "byte_size": 260665334,
+      "sha256": "4ab1d6435d639628a6f3e5008dd4f929edf4c4124b1a7169e1048f9fef534cdf"
+    },
+    {
+      "role": "primary",
+      "model": "antelopev2",
+      "file": "scrfd_10g_bnkps.onnx",
+      "byte_size": 16923827,
+      "sha256": "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91"
+    },
+    {
+      "role": "secondary",
+      "model": "buffalo_l",
+      "file": "1k3d68.onnx",
+      "byte_size": 143607619,
+      "sha256": "df5c06b8a0c12e422b2ed8947b8869faa4105387f199c477af038aa01f9a45cc"
+    },
+    {
+      "role": "secondary",
+      "model": "buffalo_l",
+      "file": "2d106det.onnx",
+      "byte_size": 5030888,
+      "sha256": "f001b856447c413801ef5c42091ed0cd516fcd21f2d6b79635b1e733a7109dbf"
+    },
+    {
+      "role": "secondary",
+      "model": "buffalo_l",
+      "file": "det_10g.onnx",
+      "byte_size": 16923827,
+      "sha256": "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91"
+    },
+    {
+      "role": "secondary",
+      "model": "buffalo_l",
+      "file": "genderage.onnx",
+      "byte_size": 1322532,
+      "sha256": "4fde69b1c810857b88c64a335084f1c3fe8f01246c9a191b48c7bb756d6652fb"
+    },
+    {
+      "role": "secondary",
+      "model": "buffalo_l",
+      "file": "w600k_r50.onnx",
+      "byte_size": 174383860,
+      "sha256": "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43"
+    }
+  ]
+}

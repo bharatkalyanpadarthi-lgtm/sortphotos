@@ -10,6 +10,7 @@ Run:
   python cache_tools.py status
   python cache_tools.py rehydrate
   python cache_tools.py rehydrate --apply
+  python cache_tools.py migrate-sqlite --apply
 """
 
 from __future__ import annotations
@@ -26,13 +27,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sort_photos  # noqa: E402
 import source_manifest  # noqa: E402
+import pipeline_paths  # noqa: E402
 
 for _name in ("CacheState", "CachedFace", "FaceRecord", "LabelingState", "IdentityDB"):
     if hasattr(sort_photos, _name):
         setattr(sys.modules["__main__"], _name, getattr(sort_photos, _name))
 
 
-DEFAULT_PEOPLE = Path.home() / "Pictures" / "sorted_all_pictures" / "photos_by_person"
+DEFAULT_PEOPLE = pipeline_paths.PEOPLE_ROOT
 IMAGE_EXTS = sort_photos.IMAGE_EXTS
 CACHE_SCAN_EXCLUDED_DIRS = {
     "_smart_albums",
@@ -188,6 +190,82 @@ def print_status(people_dir: Path, person: str | None = None) -> int:
     if state["present"] and state["existing_sources"] == 0 and state["faces"]:
         print("Note: saved labeling-state source paths are gone, so rehydrate should use")
         print("the current person folders rather than stale To Process paths.")
+    return 0
+
+
+def migrate_sqlite(database: Path, apply: bool, max_images: int | None) -> int:
+    cache = sort_photos.load_cache()
+    fingerprint_entries = sort_photos.load_fingerprint_cache().get("entries", {})
+    fingerprints_by_canonical = {
+        str(Path(source).expanduser().resolve(strict=False)): payload
+        for source, payload in fingerprint_entries.items()
+        if isinstance(payload, dict)
+    }
+    faces_by_source: dict[str, list[sort_photos.CachedFace]] = {}
+    for face in cache.faces:
+        canonical = str(Path(face.src_str).expanduser().resolve(strict=False))
+        faces_by_source.setdefault(canonical, []).append(face)
+    candidates: list[Path] = []
+    for source, signature in cache.file_signatures.items():
+        path = Path(source)
+        if not path.exists() or not signature_matches_current_file(source, signature):
+            continue
+        candidates.append(path)
+    candidates.sort(key=lambda path: str(path).casefold())
+    if max_images is not None:
+        candidates = candidates[:max(0, int(max_images))]
+
+    print("SQLite Analysis Migration")
+    print("=" * 60)
+    print(f"Database:               {database}")
+    print(f"Current cached images:  {len(candidates)}")
+    print(f"Legacy fingerprints:    {len(fingerprints_by_canonical)}")
+    print(f"Mode:                   {'APPLY' if apply else 'DRY RUN'}")
+    if not apply:
+        print("No database records were changed. Add --apply to migrate.")
+        return 0
+
+    fingerprint_migrated = 0
+    fingerprint_stale = 0
+    with sort_photos.analysis_index.AnalysisIndex(database) as index:
+        for position, path in enumerate(candidates, start=1):
+            canonical = str(path.expanduser().resolve(strict=False))
+            faces = faces_by_source.get(canonical, [])
+            fingerprint_payload = fingerprints_by_canonical.get(canonical)
+            if fingerprint_payload is not None:
+                try:
+                    if fingerprint_payload.get("signature") != sort_photos._fingerprint_signature(path):
+                        raise ValueError("stale fingerprint signature")
+                    index.upsert_fingerprint(
+                        path,
+                        sort_photos.analysis_index.AssetFingerprint(
+                            sha256=str(fingerprint_payload["sha256"]),
+                            pixel_sha256=str(fingerprint_payload["pixel_sha256"]),
+                            phash=(
+                                int(fingerprint_payload["phash"])
+                                if isinstance(fingerprint_payload["phash"], int)
+                                else int(str(fingerprint_payload["phash"]), 16)
+                            ),
+                            width=int(fingerprint_payload["width"]),
+                            height=int(fingerprint_payload["height"]),
+                        ),
+                    )
+                    fingerprint_migrated += 1
+                except (KeyError, OSError, TypeError, ValueError):
+                    fingerprint_stale += 1
+            index.replace_detections(
+                path,
+                sort_photos.config_fingerprint(),
+                "accepted_face_cached" if faces else "no_usable_face_cached",
+                [sort_photos.cached_face_to_index_record(face) for face in faces],
+            )
+            if position % 500 == 0:
+                index.commit()
+                print(f"Migrated {position}/{len(candidates)} images...")
+    print(f"Migrated {len(candidates)} image analysis record(s).")
+    print(f"Migrated {fingerprint_migrated} reusable fingerprint(s).")
+    if fingerprint_stale:
+        print(f"Skipped {fingerprint_stale} stale or incomplete fingerprint(s).")
     return 0
 
 
@@ -382,7 +460,11 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
                 return 2
 
             with out_path.open("rb") as f:
-                batch_faces: list[sort_photos.CachedFace] = pickle.load(f)
+                payload = pickle.load(f)
+            if isinstance(payload, dict):
+                batch_faces = list(payload.get("faces", []))
+            else:
+                batch_faces = list(payload)
 
             faces_by_path: dict[str, list[sort_photos.CachedFace]] = {}
             for face in batch_faces:
@@ -470,13 +552,23 @@ def main() -> int:
     rebuild.add_argument("--batch-size", type=int, default=50,
                          help="Images per detection subprocess. Default 50.")
 
+    migrate = sub.add_parser(
+        "migrate-sqlite",
+        help="Copy current pickle detector results into the incremental SQLite index.",
+    )
+    migrate.add_argument("--database", type=Path, default=sort_photos.analysis_index_file())
+    migrate.add_argument("--apply", action="store_true")
+    migrate.add_argument("--max-images", type=int, default=None)
+
     args = parser.parse_args()
-    people_dir = args.people_dir.expanduser().resolve()
     if args.command == "status":
+        people_dir = args.people_dir.expanduser().resolve()
         return print_status(people_dir, args.person)
     if args.command == "coverage":
+        people_dir = args.people_dir.expanduser().resolve()
         return print_coverage(people_dir, args.person, args.min_coverage)
     if args.command == "rehydrate":
+        people_dir = args.people_dir.expanduser().resolve()
         if args.apply:
             manifest_check = source_manifest.validate_current(
                 label="cache_rehydrate_before",
@@ -490,6 +582,8 @@ def main() -> int:
             people_dir, args.person, args.apply, args.replace,
             args.max_images, args.batch_size, args.max_missing,
         )
+    if args.command == "migrate-sqlite":
+        return migrate_sqlite(args.database.expanduser(), args.apply, args.max_images)
     return 1
 
 

@@ -22,12 +22,14 @@ import shutil
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
+
+import pipeline_paths
 from typing import Any
 
 import operation_ledger
 import source_manifest
 
-DEFAULT_SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
+DEFAULT_SORTED = pipeline_paths.SORTED_ROOT
 SMART_DIR_NAMES = {"_smart_albums", "_smart_albums_v2", "_smart_albums_simple_preview"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
 SMART_STATE_FILES = [

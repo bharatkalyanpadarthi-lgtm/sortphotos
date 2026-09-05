@@ -42,6 +42,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sort_photos  # noqa: F401
+import pipeline_paths  # noqa: E402
 from sort_photos import (  # type: ignore
     CACHE_DIR,
     MODEL_NAME,
@@ -52,7 +53,7 @@ from sort_photos import (  # type: ignore
 )
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".heic", ".heif"}
-DEFAULT_REF_DIR = Path.home() / "Pictures" / "Face References"
+DEFAULT_REF_DIR = pipeline_paths.FACE_REFERENCES
 DEFAULT_CHUNK_SIZE = 25
 
 
@@ -118,13 +119,15 @@ def reference_person_dirs(ref_dir: Path) -> list[Path]:
 def save_payload(output: Path,
                  names: list[str],
                  centroids: list[np.ndarray],
-                 counts: list[int]) -> None:
+                 counts: list[int],
+                 prototypes: dict[str, list[np.ndarray]] | None = None) -> None:
     payload = {
-        "version": 1,
+        "version": 2,
         "model": MODEL_NAME,
         "names": names,
         "centroids": np.stack(centroids).astype(np.float32),
         "counts": counts,
+        "prototypes": prototypes or {},
     }
 
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -180,6 +183,7 @@ def build_in_chunks(args: argparse.Namespace, actresses: list[Path]) -> int:
     names: list[str] = []
     centroids: list[np.ndarray] = []
     counts: list[int] = []
+    prototypes: dict[str, list[np.ndarray]] = {}
     seen: set[str] = set()
     for part_path in part_paths:
         if not part_path.exists():
@@ -189,6 +193,7 @@ def build_in_chunks(args: argparse.Namespace, actresses: list[Path]) -> int:
         part_names = list(payload.get("names", []))
         part_centroids = np.asarray(payload.get("centroids", []), dtype=np.float32)
         part_counts = list(payload.get("counts", []))
+        part_prototypes = payload.get("prototypes", {})
         if part_centroids.ndim != 2 or len(part_names) != len(part_centroids):
             print(f"Skipping malformed chunk output: {part_path}", file=sys.stderr)
             continue
@@ -200,12 +205,17 @@ def build_in_chunks(args: argparse.Namespace, actresses: list[Path]) -> int:
             names.append(clean)
             centroids.append(l2_normalize(part_centroids[i]))
             counts.append(int(part_counts[i]) if i < len(part_counts) else 0)
+            if isinstance(part_prototypes, dict) and clean in part_prototypes:
+                prototypes[clean] = [
+                    l2_normalize(np.asarray(value, dtype=np.float32))
+                    for value in part_prototypes[clean]
+                ]
 
     if not names:
         print("\nNo actresses passed the threshold. Nothing saved.")
         return 1
 
-    save_payload(args.output, names, centroids, counts)
+    save_payload(args.output, names, centroids, counts, prototypes)
     shutil.rmtree(parts_dir, ignore_errors=True)
 
     print(f"Saved {len(names)} centroids to {args.output}")
@@ -311,16 +321,28 @@ def main() -> int:
     names: list[str] = []
     centroids: list[np.ndarray] = []
     counts: list[int] = []
+    prototypes: dict[str, list[np.ndarray]] = {}
     skipped_low_n: list[tuple[str, int]] = []
     for name in sorted(by_name.keys()):
         embs = by_name[name]
         if len(embs) < args.min_images:
             skipped_low_n.append((name, len(embs)))
             continue
-        centroid = l2_normalize(np.mean(np.stack(embs, axis=0), axis=0))
+        samples = [
+            sort_photos.identity_profiles.ReferenceSample(
+                source=f"reference:{name}:{index}", embedding=embedding, quality=1.0)
+            for index, embedding in enumerate(embs)
+        ]
+        selected = sort_photos.identity_profiles.select_diverse_samples(
+            samples, limit=sort_photos.IDENTITY_MAX_PROTOTYPES_PER_PERSON)
+        centroid = sort_photos.identity_profiles.weighted_centroid(selected)
         names.append(name)
         centroids.append(centroid)
         counts.append(len(embs))
+        prototypes[name] = [
+            sort_photos.identity_profiles.normalize_vector(sample.embedding)
+            for sample in selected
+        ]
 
     if skipped_low_n:
         print()
@@ -332,7 +354,7 @@ def main() -> int:
         print("\nNo actresses passed the threshold. Nothing saved.")
         return 0 if args.allow_empty else 1
 
-    save_payload(args.output, names, centroids, counts)
+    save_payload(args.output, names, centroids, counts, prototypes)
 
     print()
     print(f"Saved {len(names)} centroids to {args.output}")

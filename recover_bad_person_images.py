@@ -30,6 +30,8 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pipeline_paths
+
 import cv2
 import numpy as np
 
@@ -43,7 +45,7 @@ for _name in ("CacheState", "CachedFace", "FaceRecord", "LabelingState"):
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif", ".gif"}
 CACHE_DIR = Path.home() / ".face_sort_cache"
 DEFAULT_OLD_CACHE = CACHE_DIR / "cache.pkl.bak.mark_small_junk"
-SORTED = Path.home() / "Pictures" / "sorted_all_pictures"
+SORTED = pipeline_paths.SORTED_ROOT
 PEOPLE_ROOT = SORTED / "photos_by_person"
 BAD_DIR = SORTED / "_source_review" / "ready_to_delete" / "bad_person_images"
 REPORT_DIR = SORTED / "_source_review" / "recovery_reports"
@@ -320,7 +322,7 @@ def save_candidate_cache(path: Path, data: dict) -> None:
 
 def default_roots() -> list[tuple[str, Path]]:
     roots = [
-        ("to_process", Path.home() / "Pictures" / "To Process"),
+        ("to_process", pipeline_paths.TO_PROCESS),
         ("source_review", SORTED / "_source_review"),
         ("external_backup", DEFAULT_EXTERNAL_BACKUP),
         ("recovered_backup", DEFAULT_RECOVERED_BACKUP),

@@ -29,7 +29,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-DEFAULT_REF_DIR = Path.home() / "Pictures" / "Face References"
+import pipeline_paths
+
+DEFAULT_REF_DIR = pipeline_paths.FACE_REFERENCES
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif"}
 REVIEW_DIR_NAME = "_reference_review"
 REPORT_NAME = "face_reference_quality_report.csv"
