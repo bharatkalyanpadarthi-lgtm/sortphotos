@@ -216,7 +216,8 @@ def _seed_row(
 
 
 def seed_dataset(path: Path) -> int:
-    existing = {row["source"]: row for row in read_rows(path)}
+    original_rows = read_rows(path)
+    existing = {row["source"]: row for row in original_rows}
     db = sort_photos.load_identity_db()
     cache = sort_photos.load_cache()
     if db is not None:
@@ -280,15 +281,17 @@ def seed_dataset(path: Path) -> int:
             notes=f"Explicit lookalike rejection for {item.get('person', '')}; verify manually.",
         ))
 
-    # Explicit confirmations are already human verified and remain protected.
+    # Enrollment adds candidates; existing benchmark annotations remain authoritative.
     for row in evaluation_enrollment._read(evaluation_enrollment.DEFAULT_PATH):
         source = Path(str(row.get("source", "")))
         if not source.is_file():
             continue
         key = str(source.resolve(strict=False))
-        existing[key] = {field: str(row.get(field, "")) for field in FIELDS}
+        existing.setdefault(key, {field: str(row.get(field, "")) for field in FIELDS})
 
-    write_rows(path, list(existing.values()))
+    rows = list(existing.values())
+    if rows != original_rows:
+        write_rows(path, rows)
     return len(existing)
 
 
@@ -852,10 +855,10 @@ def main() -> int:
     parser.add_argument("--seed-only", action="store_true")
     args = parser.parse_args()
     dataset = args.dataset.expanduser().resolve(strict=False)
-    count = seed_dataset(dataset)
-    print(f"Protected benchmark candidates: {count}")
-    print(f"Dataset: {dataset}")
     if args.seed_only:
+        count = seed_dataset(dataset)
+        print(f"Protected benchmark candidates: {count}")
+        print(f"Dataset: {dataset}")
         return 0
     url = f"http://127.0.0.1:{args.port}/"
     try:
@@ -880,12 +883,15 @@ def main() -> int:
         if args.open:
             webbrowser.open(url)
         return 0
-    server.dataset = dataset
-    server.baseline = args.baseline.expanduser().resolve(strict=False)
-    print(f"Review dashboard: {url}")
-    if args.open:
-        threading.Timer(0.4, lambda: webbrowser.open(url)).start()
     try:
+        count = seed_dataset(dataset)
+        print(f"Protected benchmark candidates: {count}")
+        print(f"Dataset: {dataset}")
+        server.dataset = dataset
+        server.baseline = args.baseline.expanduser().resolve(strict=False)
+        print(f"Review dashboard: {url}")
+        if args.open:
+            threading.Timer(0.4, lambda: webbrowser.open(url)).start()
         server.serve_forever()
     except KeyboardInterrupt:
         pass

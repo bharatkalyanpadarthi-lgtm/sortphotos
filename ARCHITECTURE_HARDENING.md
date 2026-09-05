@@ -105,3 +105,20 @@ every possible bug or recognition error has been eliminated.
 
 New terminal processes load these changes. Let any already-running review queue
 finish before restarting its server; saved decisions are preserved.
+
+## Benchmark persistence repair, 2026-09-06
+
+Dashboard startup previously overwrote existing benchmark rows with older unknown
+review enrollments. This could erase verified case types, nudity labels and source
+groups even though the verification count stayed unchanged. Enrollment now adds
+only absent candidates. Existing annotations, including pending cases and stale
+content hashes requiring review, remain intact. Unchanged startup data is not
+rewritten, and a second dashboard launcher checks the occupied port before seeding.
+
+Three new regressions reproduce those failures and pass after the repair. The
+focused suites pass 67 tests; the full synthetic suite passes all 140 checks.
+Lost local annotations were restored from a pre-restart backup only where the
+current row exactly matched the older enrollment and its original hash still
+matched. Newer group annotations were retained. Two real-dataset seed runs kept
+the same CSV hash, with 3,094 verified cases and all ten categories covered.
+This establishes dataset readiness, not a passing recognition baseline.

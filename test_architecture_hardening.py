@@ -1,5 +1,6 @@
 """Isolated regressions for the September architecture audit."""
 
+import errno
 import hashlib
 import os
 import sqlite3
@@ -20,6 +21,7 @@ import face_detection
 import identity_confirmations
 import identity_evaluation
 import identity_profiles
+import review_identity_benchmark as benchmark
 import review_unknown_identities as review
 import secondary_identity_matcher
 import source_batch_consensus
@@ -366,6 +368,78 @@ class ArchitectureTests(unittest.TestCase):
         with patch.object(review, "_verified_organized_destination", return_value=destination):
             self.assertEqual(daily_identity_recovery._confirmation_person(
                 decision, digest, people, sorter.IdentityDB()), "New Person")
+
+    def test_benchmark_reseed_preserves_reviewed_labels_and_adds_new_cases(self):
+        dataset = self.root / "benchmark.csv"
+        first = self.face("reviewed.jpg", self.alice).src
+        second = self.face("new.jpg", self.bob).src
+        reviewed = {field: "" for field in benchmark.FIELDS}
+        reviewed.update(
+            source=str(first), expected_person="", expected_people="Alice | Bob",
+            expected_face_count="2", case_types="group|known|normal",
+            expected_face="true", expected_nudity="safe", verified="true",
+            content_sha256=content_identity.content_sha256(first),
+            group_id="manually-grouped-shoot", notes="Human-reviewed group",
+        )
+        benchmark.write_rows(dataset, [reviewed])
+        stale = dict(reviewed, expected_person="Wrong Person", expected_people="",
+                     expected_face_count="", case_types="known",
+                     expected_nudity="unknown", group_id="", notes="Old enrollment")
+        new = dict(reviewed, source=str(second), expected_person="Bob",
+                   expected_people="Bob", expected_face_count="1", case_types="known",
+                   content_sha256=content_identity.content_sha256(second))
+        with (
+            patch.object(sorter, "load_identity_db", return_value=None),
+            patch.object(sorter, "load_cache", return_value=SimpleNamespace(faces=[])),
+            patch.object(benchmark.pipeline_paths, "SOURCE_REVIEW", self.root / "review"),
+            patch.object(benchmark.identity_hard_negatives, "load", return_value={}),
+            patch.object(benchmark.evaluation_enrollment, "_read", return_value=[stale, new]),
+        ):
+            self.assertEqual(benchmark.seed_dataset(dataset), 2)
+            rows = {row["source"]: row for row in benchmark.read_rows(dataset)}
+            self.assertEqual(rows[str(first)], reviewed)
+            self.assertEqual(rows[str(second)], new)
+            signature = dataset.stat().st_mtime_ns
+            self.assertEqual(benchmark.seed_dataset(dataset), 2)
+            self.assertEqual(dataset.stat().st_mtime_ns, signature)
+            self.assertEqual({row["source"]: row for row in benchmark.read_rows(dataset)}, rows)
+
+    def test_benchmark_reseed_does_not_reverify_changed_or_pending_cases(self):
+        dataset = self.root / "benchmark.csv"
+        source = self.face("changed.jpg", self.alice).src
+        pending = {field: "" for field in benchmark.FIELDS}
+        pending.update(source=str(source), expected_person="Alice", case_types="known",
+                       expected_face="true", expected_nudity="unknown", verified="false",
+                       content_sha256=content_identity.content_sha256(source))
+        benchmark.write_rows(dataset, [pending])
+        source.write_bytes(b"replacement content must be reviewed")
+        incoming = dict(pending, verified="true", expected_person="Bob",
+                        content_sha256=content_identity.content_sha256(source))
+        with (
+            patch.object(sorter, "load_identity_db", return_value=None),
+            patch.object(sorter, "load_cache", return_value=SimpleNamespace(faces=[])),
+            patch.object(benchmark.pipeline_paths, "SOURCE_REVIEW", self.root / "review"),
+            patch.object(benchmark.identity_hard_negatives, "load", return_value={}),
+            patch.object(benchmark.evaluation_enrollment, "_read", return_value=[incoming]),
+        ):
+            benchmark.seed_dataset(dataset)
+        self.assertEqual(benchmark.read_rows(dataset), [pending])
+        validation = evaluation_dataset.load_dataset(dataset)
+        self.assertFalse(validation.activation_ready)
+        self.assertTrue(any("content changed" in error for error in validation.errors))
+
+    def test_benchmark_second_launcher_does_not_seed_active_dataset(self):
+        with (
+            patch.object(benchmark.sys, "argv", ["review_identity_benchmark.py"]),
+            patch.object(benchmark, "seed_dataset") as seed,
+            patch.object(benchmark, "BenchmarkServer", side_effect=OSError(errno.EADDRINUSE, "in use")),
+            patch.object(benchmark, "urlopen") as request,
+        ):
+            response = request.return_value.__enter__.return_value
+            response.status = 200
+            response.read.return_value = b"Protected Face Benchmark"
+            self.assertEqual(benchmark.main(), 0)
+            seed.assert_not_called()
 
 
 if __name__ == "__main__":
