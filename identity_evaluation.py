@@ -511,7 +511,7 @@ def evaluate_golden_set(
     rows: list[dict[str, object]] = []
 
     with sort_photos.analysis_index.AnalysisIndex(sort_photos.analysis_index_file()) as index:
-        for case in cases:
+        for case_number, case in enumerate(cases, start=1):
             source_faces = faces_by_source.get(os.path.realpath(str(case.source)), [])
             predictions = [
                 prediction for face in source_faces
@@ -595,6 +595,8 @@ def evaluate_golden_set(
                 "evaluation_mode": "fresh_detection" if fresh_detection else "cached_matching_only",
                 "decision_lane": lane,
             })
+            if case_number % 100 == 0 or case_number == len(cases):
+                print(f"Protected scoring: completed {case_number}/{len(cases)}", flush=True)
 
     metrics = evaluation_dataset.EvaluationMetrics(
         identity_precision=identity_correct / max(1, identity_accepted),
@@ -642,12 +644,22 @@ def main() -> int:
         return 0
     cache = sort_photos.CacheState() if args.fresh_detection else sort_photos.load_cache()
     if args.golden_set is not None:
+        def dataset_signature() -> str:
+            try:
+                return content_identity.content_sha256(args.golden_set)
+            except OSError:
+                return ""
+
+        dataset_sha256 = dataset_signature()
         validation = evaluation_dataset.load_dataset(args.golden_set)
         if validation.errors:
             print("ERROR: protected evaluation set is not valid:")
             for error in validation.errors:
                 print(f"  - {error}")
             return 4
+        if not dataset_sha256 or dataset_signature() != dataset_sha256:
+            print("ERROR: benchmark changed while loading; retry with the saved annotations")
+            return 7
         metrics, golden_rows = evaluate_golden_set(
             validation.cases, cache, db, lane=args.lane, fresh_detection=args.fresh_detection)
         report_dir = args.report_dir.expanduser().resolve()
@@ -664,6 +676,8 @@ def main() -> int:
         payload["activation_ready"] = validation.activation_ready
         payload["evaluation_mode"] = "fresh_detection" if args.fresh_detection else "cached_matching_only"
         payload["detector_signature"] = sort_photos.config_fingerprint()
+        payload["dataset_sha256"] = dataset_sha256
+        payload["dataset_unchanged"] = dataset_signature() == dataset_sha256
         json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
         print("Protected Evaluation Set")
@@ -676,9 +690,14 @@ def main() -> int:
         print(f"No-face specificity:  {metrics.no_face_specificity:.2%}")
         print(f"Nudity accuracy:       {metrics.nudity_accuracy:.2%}")
         print(f"Nudity false positive:{metrics.nudity_false_positive_rate:>7.2%}")
-        print(f"Activation ready:      {'yes' if validation.activation_ready else 'no'}")
+        print(f"Dataset categories:    {'complete' if validation.activation_ready else 'incomplete'}")
         print(f"Results:               {csv_path}")
         print(f"Summary:               {json_path}")
+
+        if not payload["dataset_unchanged"] or dataset_signature() != dataset_sha256:
+            print("ERROR: benchmark annotations changed during evaluation; "
+                  "report retained for diagnosis, activation blocked. Run again with the saved annotations.")
+            return 7
 
         needs_activation_gate = args.baseline is not None or args.write_baseline is not None
         if needs_activation_gate and not validation.activation_ready:
@@ -707,7 +726,7 @@ def main() -> int:
                 return 6
             evaluation_dataset.write_baseline(args.write_baseline, metrics,
                 detector_signature=sort_photos.config_fingerprint(),
-                dataset_sha256=content_identity.content_sha256(args.golden_set))
+                dataset_sha256=dataset_sha256)
             print(f"Activation baseline written: {args.write_baseline.expanduser().resolve()}")
         return 0
 

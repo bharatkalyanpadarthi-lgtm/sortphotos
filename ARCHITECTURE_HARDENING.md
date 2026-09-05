@@ -139,3 +139,15 @@ The focused suites pass 72 tests, and all 140 synthetic checks pass. One synthet
 gate test now supplies temporary protected-set paths instead of implicitly
 reading the user's real benchmark. These checks do not substitute for the full
 protected activation result.
+
+The evaluation CLI now binds its report and baseline to the dataset hash read at
+the start. Changed annotations during loading or scoring block activation instead
+of stamping old metrics with a newer CSV hash. Reports retain their evaluated
+hash and indicate whether the dataset remained unchanged. Targeted tests cover
+unchanged input and changes in both phases. Scoring progress is reported every
+100 cases; category coverage is no longer labelled "Activation ready".
+
+A concurrent live run exposed another synthetic-test isolation gap: two gate
+tests could open the user's analysis database. They now use temporary analysis
+databases and explicit temporary confirmed/protected datasets. All 140 synthetic
+checks and 73 focused tests pass after these changes.

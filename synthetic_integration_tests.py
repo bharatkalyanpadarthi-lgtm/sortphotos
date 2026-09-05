@@ -29,6 +29,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
@@ -911,11 +912,13 @@ def test_confirmations_enroll_and_gate_identity_profiles(tmp: Path) -> None:
         prototype_sources={"Alice": [str(tmp / "alice-reference.jpg")], "Bob": [str(tmp / "bob-reference.jpg")]},
         source_counts={"Alice": 5, "Bob": 5},
     ))
-    allowed, report = identity_evaluation.activation_gate(
-        bad, incumbent, sort_photos.CacheState(faces=[face_record]),
-        protected_set=tmp / "missing-protected.csv",
-        protected_baseline=tmp / "missing-baseline.json",
-    )
+    with patch.object(sort_photos, "analysis_index_file", return_value=tmp / "analysis.sqlite3"):
+        allowed, report = identity_evaluation.activation_gate(
+            bad, incumbent, sort_photos.CacheState(faces=[face_record]),
+            confirmed_set=dataset,
+            protected_set=tmp / "missing-protected.csv",
+            protected_baseline=tmp / "missing-baseline.json",
+        )
     assert_true(not allowed and report["failures"],
                 "activation gate promoted a matcher with a new false accept")
 
@@ -950,14 +953,15 @@ def test_confirmation_gate_allows_unchanged_safe_rejections(tmp: Path) -> None:
         prototype_sources={"Alice": [str(tmp / "alice-reference.jpg")], "Bob": [str(tmp / "bob-reference.jpg")]},
         source_counts={"Alice": 5, "Bob": 5},
     ))
-    allowed, report = identity_evaluation.activation_gate(
-        db,
-        db,
-        sort_photos.CacheState(faces=[face, correct]),
-        confirmed_set=dataset,
-        protected_set=tmp / "missing-protected.csv",
-        protected_baseline=tmp / "missing-baseline.json",
-    )
+    with patch.object(sort_photos, "analysis_index_file", return_value=tmp / "analysis.sqlite3"):
+        allowed, report = identity_evaluation.activation_gate(
+            db,
+            db,
+            sort_photos.CacheState(faces=[face, correct]),
+            confirmed_set=dataset,
+            protected_set=tmp / "missing-protected.csv",
+            protected_baseline=tmp / "missing-baseline.json",
+        )
     assert_true(
         allowed
         and report["confirmed"]["recall"] == report["confirmed"]["prior_recall"]

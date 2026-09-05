@@ -2,6 +2,7 @@
 
 import errno
 import hashlib
+import json
 import os
 import pickle
 import sqlite3
@@ -169,6 +170,53 @@ class ArchitectureTests(unittest.TestCase):
                 protected_baseline=baseline,
             )
         self.assertFalse(allowed)
+
+    def test_baseline_is_bound_to_evaluated_annotations(self):
+        for change_at in (None, "load", "evaluate"):
+            with self.subTest(change_at=change_at):
+                folder = self.root / str(change_at)
+                folder.mkdir()
+                dataset = folder / "benchmark.csv"
+                dataset.write_text("original annotations")
+                digest = content_identity.content_sha256(dataset)
+                baseline = folder / "baseline.json"
+                validation = evaluation_dataset.DatasetValidation(
+                    (), (), frozenset(evaluation_dataset.REQUIRED_CASE_TYPES))
+                metrics = evaluation_dataset.EvaluationMetrics(1, 1, 1, 0, 1, 1, 0, 1)
+
+                def load(_path):
+                    if change_at == "load":
+                        dataset.write_text("new annotations")
+                    return validation
+
+                def evaluate(*_args, **_kwargs):
+                    if change_at == "evaluate":
+                        dataset.write_text("new annotations")
+                    return metrics, [{"source": "fixture", "identity_outcome": "correct"}]
+
+                with (
+                    patch("sys.argv", ["identity_evaluation.py", "--golden-set", str(dataset),
+                        "--write-baseline", str(baseline), "--report-dir", str(folder),
+                        "--fresh-detection"]),
+                    patch.object(sorter, "load_identity_db", return_value=SimpleNamespace(
+                        identities={"Alice": self.alice})),
+                    patch.object(sorter, "load_cache", side_effect=AssertionError("live cache accessed")),
+                    patch.object(evaluation_dataset, "load_dataset", side_effect=load),
+                    patch.object(identity_evaluation, "evaluate_golden_set", side_effect=evaluate) as run,
+                ):
+                    result = identity_evaluation.main()
+                if change_at is None:
+                    self.assertEqual(result, 0)
+                    self.assertEqual(json.loads(baseline.read_text())["dataset_sha256"], digest)
+                else:
+                    self.assertEqual(result, 7)
+                    self.assertFalse(baseline.exists())
+                if change_at == "load":
+                    run.assert_not_called()
+                else:
+                    report = json.loads((folder / "golden_set_summary.json").read_text())
+                    self.assertEqual(report["dataset_sha256"], digest)
+                    self.assertEqual(report["dataset_unchanged"], change_at is None)
 
     def test_replaced_bytes_with_same_mtime_and_size_invalidate_all_hashes(self):
         path = self.root / "replace.jpg"
