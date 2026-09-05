@@ -122,3 +122,20 @@ current row exactly matched the older enrollment and its original hash still
 matched. Newer group annotations were retained. Two real-dataset seed runs kept
 the same CSV hash, with 3,094 verified cases and all ten categories covered.
 This establishes dataset readiness, not a passing recognition baseline.
+
+The subsequent fresh-detection run was killed by macOS after 376 images;
+memorystatus reported the evaluator at 40,935 MB with no paging space. The
+benchmark had kept one native detector alive for its entire run, unlike daily
+ingest's bounded workers. Fresh benchmark detection now invokes the existing
+sorting worker in isolated batches of 25, validates every returned fingerprint,
+and refuses partial, missing or failed worker output. It does not save the live
+face cache or detection index. The CLI no longer loads the full library face
+cache when fresh detection is requested.
+
+The dashboard streams batch output and explicitly reports nonzero/signal exits;
+a second gate click cannot start a concurrent evaluator. A 50-image real-data
+canary spanning the former stopping point completed in two isolated batches.
+The focused suites pass 72 tests, and all 140 synthetic checks pass. One synthetic
+gate test now supplies temporary protected-set paths instead of implicitly
+reading the user's real benchmark. These checks do not substitute for the full
+protected activation result.

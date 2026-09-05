@@ -912,7 +912,9 @@ def test_confirmations_enroll_and_gate_identity_profiles(tmp: Path) -> None:
         source_counts={"Alice": 5, "Bob": 5},
     ))
     allowed, report = identity_evaluation.activation_gate(
-        bad, incumbent, sort_photos.CacheState(faces=[face_record])
+        bad, incumbent, sort_photos.CacheState(faces=[face_record]),
+        protected_set=tmp / "missing-protected.csv",
+        protected_baseline=tmp / "missing-baseline.json",
     )
     assert_true(not allowed and report["failures"],
                 "activation gate promoted a matcher with a new false accept")

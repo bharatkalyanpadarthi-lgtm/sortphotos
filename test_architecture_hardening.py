@@ -3,8 +3,10 @@
 import errno
 import hashlib
 import os
+import pickle
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +15,7 @@ from unittest.mock import patch
 import numpy as np
 
 import analysis_index
+import benchmark_detection
 import content_identity
 import copy_journal
 import daily_identity_recovery
@@ -440,6 +443,99 @@ class ArchitectureTests(unittest.TestCase):
             response.read.return_value = b"Protected Face Benchmark"
             self.assertEqual(benchmark.main(), 0)
             seed.assert_not_called()
+
+    def benchmark_cases(self, count=3):
+        cases = []
+        for i in range(count):
+            record = self.face(f"benchmark-{i}.jpg", self.alice)
+            cases.append(evaluation_dataset.EvaluationCase(
+                source=record.src, expected_person="Alice", case_types=frozenset({"known"}),
+                expected_face=True, expected_nudity="unknown", verified=True,
+                content_sha256=content_identity.content_sha256(record.src)))
+        return cases
+
+    def fake_benchmark_worker(self, command, **kwargs):
+        with Path(command[-1]).open("rb") as handle:
+            job = pickle.load(handle)
+        payload = {"faces": [], "diagnostics": {}, "fingerprints": {}}
+        for source in job["input_paths"]:
+            payload["diagnostics"][source] = "no_face_detected"
+            payload["fingerprints"][source] = {
+                "sha256": content_identity.content_sha256(Path(source))}
+        with Path(job["output_path"]).open("wb") as handle:
+            pickle.dump(payload, handle)
+        return SimpleNamespace(returncode=0, stdout="")
+
+    def test_benchmark_detection_uses_bounded_workers_without_live_cache_writes(self):
+        cases = self.benchmark_cases()
+        memo = {}
+        with (
+            patch.object(benchmark_detection.subprocess, "run", side_effect=self.fake_benchmark_worker) as run,
+            patch.object(sorter, "save_cache", side_effect=AssertionError("must not write live cache")),
+            patch.object(sorter, "persist_detection_batch", side_effect=AssertionError("must not write index")),
+            patch.object(sorter, "_build_app", side_effect=AssertionError("no model in parent")),
+        ):
+            result = benchmark_detection.detect_cases(cases, detected_faces=memo, batch_size=2)
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(result, {str(case.source): [] for case in cases})
+            self.assertEqual(result, memo)
+            benchmark_detection.detect_cases(cases, detected_faces=memo, batch_size=2)
+            self.assertEqual(run.call_count, 2)
+
+    def test_benchmark_failed_worker_cannot_return_partial_success(self):
+        cases = self.benchmark_cases()
+        calls = 0
+
+        def worker(command, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                return SimpleNamespace(returncode=-9, stdout="worker killed")
+            return self.fake_benchmark_worker(command, **kwargs)
+
+        memo = {}
+        with patch.object(benchmark_detection.subprocess, "run", side_effect=worker):
+            with self.assertRaisesRegex(RuntimeError, "exit -9"):
+                benchmark_detection.detect_cases(cases, detected_faces=memo, batch_size=2)
+        self.assertEqual(memo, {})
+
+    def test_benchmark_rejects_source_changed_during_worker(self):
+        cases = self.benchmark_cases(1)
+
+        def worker(command, **kwargs):
+            result = self.fake_benchmark_worker(command, **kwargs)
+            cases[0].source.write_bytes(b"changed during detection")
+            return result
+
+        with patch.object(benchmark_detection.subprocess, "run", side_effect=worker):
+            with self.assertRaisesRegex(RuntimeError, "changed benchmark image"):
+                benchmark_detection.detect_cases(cases)
+
+    def test_benchmark_missing_worker_output_is_not_no_face(self):
+        with patch.object(benchmark_detection.subprocess, "run",
+                          return_value=SimpleNamespace(returncode=0, stdout="")):
+            with self.assertRaisesRegex(RuntimeError, "batch failed"):
+                benchmark_detection.detect_cases(self.benchmark_cases(1))
+
+    def test_benchmark_gate_reports_killed_process_and_blocks_duplicate_runs(self):
+        server = SimpleNamespace(gate_lock=threading.Lock(), dataset=self.root / "benchmark.csv",
+                                 baseline=self.root / "baseline.json", last_gate_output="")
+        with (
+            patch.object(benchmark.evaluation_dataset, "load_dataset",
+                         return_value=SimpleNamespace(activation_ready=True)),
+            patch.object(benchmark.subprocess, "Popen") as popen,
+        ):
+            child = popen.return_value.__enter__.return_value
+            child.stdout = ["Protected detection: completed 25/100\n"]
+            child.wait.return_value = -9
+            message = benchmark.BenchmarkServer.run_gate(server)
+            self.assertIn("interrupted by signal 9", message)
+            self.assertIn("no successful result", server.last_gate_output)
+            self.assertFalse(server.gate_lock.locked())
+            server.gate_lock.acquire()
+            self.assertIn("already running", benchmark.BenchmarkServer.run_gate(server))
+            self.assertEqual(popen.call_count, 1)
+            server.gate_lock.release()
 
 
 if __name__ == "__main__":

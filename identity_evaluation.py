@@ -20,6 +20,7 @@ import evaluation_dataset
 import pipeline_paths
 import sort_photos
 import content_identity
+import benchmark_detection
 
 
 DEFAULT_REPORT_DIR = pipeline_paths.SOURCE_REVIEW / "identity_evaluation"
@@ -475,19 +476,8 @@ def evaluate_golden_set(
 ) -> tuple[evaluation_dataset.EvaluationMetrics, list[dict[str, object]]]:
     faces_by_source: dict[str, list[sort_photos.CachedFace]] = defaultdict(list)
     if fresh_detection:
-        app = None
-        for number, case in enumerate(cases, 1):
-            key = os.path.realpath(str(case.source))
-            if detected_faces is not None and key in detected_faces:
-                faces_by_source[key] = detected_faces[key]
-                continue
-            if app is None:
-                app = sort_photos._build_app()
-            faces_by_source[key] = sort_photos._detect_one_image(case.source, app)
-            if detected_faces is not None:
-                detected_faces[key] = faces_by_source[key]
-            print(f"Protected detection {number}/{len(cases)}", flush=True)
-        del app
+        faces_by_source.update(benchmark_detection.detect_cases(
+            cases, detected_faces=detected_faces))
     else:
         for face in cache.faces:
             faces_by_source[os.path.realpath(face.src_str)].append(face)
@@ -650,7 +640,7 @@ def main() -> int:
         print(f"Golden-set template: {args.create_golden_template.expanduser().resolve()}")
         print("Review every row, add all required case types, then set verified=true.")
         return 0
-    cache = sort_photos.load_cache()
+    cache = sort_photos.CacheState() if args.fresh_detection else sort_photos.load_cache()
     if args.golden_set is not None:
         validation = evaluation_dataset.load_dataset(args.golden_set)
         if validation.errors:

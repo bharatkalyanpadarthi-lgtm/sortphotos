@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import webbrowser
+from collections import deque
 from io import BytesIO
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -303,8 +304,49 @@ class BenchmarkServer(ThreadingHTTPServer):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.dataset_lock = threading.Lock()
+        self.gate_lock = threading.Lock()
         self.thumbnail_lock = threading.Lock()
         self.thumbnail_cache: dict[str, tuple[tuple[int, int], bytes]] = {}
+
+    def run_gate(self) -> str:
+        if not self.gate_lock.acquire(blocking=False):
+            return "Activation test is already running"
+        try:
+            validation = evaluation_dataset.load_dataset(self.dataset)
+            if not validation.activation_ready:
+                missing = sorted(evaluation_dataset.REQUIRED_CASE_TYPES - validation.covered_types)
+                self.last_gate_output = (
+                    "Benchmark is not ready. Missing verified types: " + ", ".join(missing)
+                    + ("\n" + "\n".join(validation.errors) if validation.errors else ""))
+                return "Activation blocked"
+            command = [sys.executable, "-u", str(Path(identity_evaluation.__file__).resolve()),
+                       "--golden-set", str(self.dataset)]
+            if self.baseline.is_file():
+                command += ["--baseline", str(self.baseline)]
+            else:
+                command += ["--write-baseline", str(self.baseline), "--fresh-detection"]
+            lines = deque(maxlen=200)
+            self.last_gate_output = "Activation test running..."
+            with subprocess.Popen(command, text=True, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, bufsize=1) as process:
+                for line in process.stdout:
+                    lines.append(line)
+                    self.last_gate_output = "Activation test running...\n" + "".join(lines)
+                    print(line, end="", flush=True)
+                code = process.wait()
+            if code == 0:
+                message = "Activation test passed"
+            elif code < 0:
+                message = f"Activation test interrupted by signal {-code}; no successful result"
+            else:
+                message = f"Activation test failed (exit {code}); no successful result"
+            self.last_gate_output = message + "\n" + "".join(lines)
+            return message
+        except Exception as error:
+            self.last_gate_output = f"Activation test failed: {error}"
+            return "Activation test failed"
+        finally:
+            self.gate_lock.release()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -382,25 +424,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
         if parsed.path == "/gate":
-            validation = evaluation_dataset.load_dataset(self.server.dataset)
-            if not validation.activation_ready:
-                missing = sorted(evaluation_dataset.REQUIRED_CASE_TYPES - validation.covered_types)
-                self.server.last_gate_output = (
-                    "Benchmark is not ready. Missing verified types: " + ", ".join(missing)
-                    + ("\n" + "\n".join(validation.errors) if validation.errors else "")
-                )
-            else:
-                command = [
-                    sys.executable, str(Path(identity_evaluation.__file__).resolve()),
-                    "--golden-set", str(self.server.dataset),
-                ]
-                if self.server.baseline.is_file():
-                    command += ["--baseline", str(self.server.baseline)]
-                else:
-                    command += ["--write-baseline", str(self.server.baseline), "--fresh-detection"]
-                result = subprocess.run(command, text=True, capture_output=True, check=False)
-                self.server.last_gate_output = result.stdout + result.stderr
-            self._redirect("Activation gate finished")
+            self._redirect(self.server.run_gate())
             return
         self._render(parse_qs(parsed.query).get("message", [""])[0])
 
