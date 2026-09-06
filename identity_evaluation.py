@@ -31,12 +31,37 @@ DEFAULT_PROTECTED_BASELINE = DEFAULT_REPORT_DIR / "protected_identity_baseline.j
 CONFIRMED_IDENTITY_ALIASES = {
     "nevetha": "Nivetha Pethuraj",
     "varalakshmi": "Varalakshmi Sarathkumar",
+    "priya bhavani": "Priya Bhavani Sankar",
+    "raashi khanna": "Raasi Khanna",
 }
 
 
 def evaluation_identity_key(name: str) -> str:
     key = " ".join(name.split()).casefold()
     return CONFIRMED_IDENTITY_ALIASES.get(key, key).casefold()
+
+
+def split_excluded_cases(cases, sources):
+    """Exclude explicitly requested cases and their content/holdout peers."""
+    requested = {os.path.realpath(str(source)) for source in sources}
+    available = {os.path.realpath(str(case.source)) for case in cases}
+    missing = requested - available
+    if missing:
+        raise ValueError("Excluded source is not in the benchmark: " + ", ".join(sorted(missing)))
+    excluded = {index for index, case in enumerate(cases)
+                if os.path.realpath(str(case.source)) in requested}
+    while True:
+        hashes = {cases[index].content_sha256 for index in excluded if cases[index].content_sha256}
+        groups = {cases[index].group_id for index in excluded if cases[index].group_id}
+        expanded = excluded | {index for index, case in enumerate(cases)
+                               if case.content_sha256 in hashes or case.group_id in groups}
+        if expanded == excluded:
+            break
+        excluded = expanded
+    retained = tuple(case for index, case in enumerate(cases) if index not in excluded)
+    if not retained:
+        raise ValueError("No benchmark cases remain after exclusions")
+    return retained, tuple(case for index, case in enumerate(cases) if index in excluded)
 
 
 @dataclass(frozen=True)
@@ -484,6 +509,7 @@ def evaluate_golden_set(
     exclude_profile_sources: bool = True,
     fresh_detection: bool = False,
     detected_faces: dict | None = None,
+    excluded_profile_sources: frozenset[str] = frozenset(),
 ) -> tuple[evaluation_dataset.EvaluationMetrics, list[dict[str, object]]]:
     faces_by_source: dict[str, list[sort_photos.CachedFace]] = defaultdict(list)
     if fresh_detection:
@@ -498,7 +524,7 @@ def evaluate_golden_set(
     shadow = None
     if lane == "pipeline":
         import shadow_evaluation
-        excluded = frozenset(str(case.source) for case in cases)
+        excluded = frozenset(str(case.source) for case in cases) | excluded_profile_sources
         heldout = heldout_identity_db(db, next(iter(excluded), ""), excluded)
         selected_faces = [face for case in cases
                           for face in faces_by_source.get(os.path.realpath(str(case.source)), [])]
@@ -539,7 +565,8 @@ def evaluate_golden_set(
                         db,
                         lane=lane,
                         exclude_profile_source=exclude_profile_sources,
-                        excluded_sources=frozenset(groups[case.group_id or case.content_sha256 or str(case.source)]),
+                        excluded_sources=(frozenset(groups[case.group_id or case.content_sha256 or str(case.source)])
+                                          | excluded_profile_sources),
                     )
                 ) is not None
             ] if shadow is None else []
@@ -654,7 +681,11 @@ def main() -> int:
                         help="Write golden-set metrics as a protected activation baseline.")
     parser.add_argument("--fresh-detection", action="store_true",
                         help="Detect benchmark images again without changing the library or face cache.")
+    parser.add_argument("--exclude-source", action="append", type=Path, default=[],
+                        help="Temporarily exclude a benchmark source and its content/group peers; no baseline promotion.")
     args = parser.parse_args()
+    if args.exclude_source and (args.golden_set is None or args.baseline or args.write_baseline):
+        parser.error("--exclude-source requires --golden-set and cannot certify an activation baseline")
     if args.write_baseline is not None and not args.fresh_detection:
         parser.error("--write-baseline requires --fresh-detection; cached matching cannot prove detection quality")
     if args.lane == "pipeline" and args.golden_set is None:
@@ -687,8 +718,21 @@ def main() -> int:
         if not dataset_sha256 or dataset_signature() != dataset_sha256:
             print("ERROR: benchmark changed while loading; retry with the saved annotations")
             return 7
+        input_case_count = len(validation.cases)
+        excluded_cases = ()
+        if args.exclude_source:
+            try:
+                cases, excluded_cases = split_excluded_cases(validation.cases, args.exclude_source)
+            except ValueError as exc:
+                print(f"ERROR: {exc}")
+                return 4
+            validation = replace(validation, cases=cases,
+                covered_types=frozenset(kind for case in cases for kind in case.case_types))
+            print(f"Subset evaluation: {len(cases)} cases; {len(excluded_cases)} excluded. "
+                  "No activation baseline will be created.", flush=True)
         metrics, golden_rows = evaluate_golden_set(
-            validation.cases, cache, db, lane=args.lane, fresh_detection=args.fresh_detection)
+            validation.cases, cache, db, lane=args.lane, fresh_detection=args.fresh_detection,
+            excluded_profile_sources=frozenset(str(case.source) for case in excluded_cases))
         report_dir = args.report_dir.expanduser().resolve()
         report_dir.mkdir(parents=True, exist_ok=True)
         csv_path = report_dir / "golden_set_results.csv"
@@ -700,7 +744,11 @@ def main() -> int:
             writer.writerows(golden_rows)
         payload = asdict(metrics)
         payload["covered_case_types"] = sorted(validation.covered_types)
-        payload["activation_ready"] = validation.activation_ready
+        payload["activation_ready"] = validation.activation_ready and not excluded_cases
+        payload["evaluation_scope"] = "subset" if excluded_cases else "full"
+        payload["input_case_count"] = input_case_count
+        payload["excluded_cases"] = [{"source": str(case.source),
+            "content_sha256": case.content_sha256, "group_id": case.group_id} for case in excluded_cases]
         payload["evaluation_mode"] = "fresh_detection" if args.fresh_detection else "cached_matching_only"
         payload["detector_signature"] = sort_photos.config_fingerprint()
         payload["dataset_sha256"] = dataset_sha256

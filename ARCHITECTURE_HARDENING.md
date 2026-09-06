@@ -194,3 +194,17 @@ The 80 focused tests pass, including alias separation from a similar first name,
 wrong identities, duplicate accepted faces and unknown rejection. All 140
 synthetic checks pass. These are isolated regressions, not a rerun of the real
 protected benchmark or a new activation baseline.
+
+## Temporary evaluation exclusions
+
+`identity_evaluation.py --golden-set <csv> --exclude-source <path>` evaluates a
+subset without rewriting verified annotations or moving photos. Exclusions
+include identical content and linked holdout groups; empty group/hash values
+never join unrelated cases. Excluded sources are withheld from identity-profile
+matching as well as detection. Unknown paths and an empty remaining set fail.
+Subset runs cannot use `--baseline` or `--write-baseline`; reports list the exact
+excluded cases and identify the scope as partial, not activation-ready.
+
+Two existing configured spelling/name aliases also now compare canonically in
+protected scoring. The focused suites pass 83 tests, and all 140 synthetic checks
+pass. No production detection thresholds or folder rules were changed.

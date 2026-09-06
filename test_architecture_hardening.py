@@ -10,6 +10,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -393,6 +394,9 @@ class ArchitectureTests(unittest.TestCase):
         self.assertNotEqual(key("Nevetha"), key("Nivedha Thomas"))
         self.assertNotEqual(key("Nevetha"), key("Nivetha"))
         self.assertNotEqual(key("Nevetha"), key("Nevetha Other"))
+        self.assertEqual(key("Priya Bhavani"), key("Priya Bhavani Sankar"))
+        self.assertEqual(key("Raashi Khanna"), key("Raasi Khanna"))
+        self.assertNotEqual(key("Priya Bhavani"), key("Priya"))
 
     def test_confirmed_aliases_score_both_lanes_without_hiding_wrong_people(self):
         source = self.root / "group.jpg"
@@ -715,6 +719,49 @@ class ArchitectureTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "exit -9"):
                 benchmark_detection.detect_cases(cases, detected_faces=memo, batch_size=2)
         self.assertEqual(memo, {})
+
+    def test_benchmark_exclusion_keeps_annotations_and_excludes_hash_group_peers(self):
+        cases = self.benchmark_cases(5)
+        cases = (replace(cases[0], content_sha256="a", group_id="first"),
+                 replace(cases[1], content_sha256="a", group_id="second"),
+                 replace(cases[2], content_sha256="b", group_id="second"),
+                 replace(cases[3], content_sha256="c", group_id="", notes="keep"),
+                 replace(cases[4], content_sha256="", group_id="", notes="keep empty keys"))
+        before = tuple(cases)
+        retained, excluded = identity_evaluation.split_excluded_cases(cases, [cases[0].source])
+        self.assertEqual(retained, cases[3:])
+        self.assertEqual(excluded, cases[:3])
+        self.assertEqual(cases, before)
+        self.assertEqual(identity_evaluation.split_excluded_cases(cases, []), (cases, ()))
+        self.assertTrue(all(case.source.is_file() for case in cases))
+        with self.assertRaisesRegex(ValueError, "not in the benchmark"):
+            identity_evaluation.split_excluded_cases(cases, [self.root / "absent.jpg"])
+        with self.assertRaisesRegex(ValueError, "No benchmark cases"):
+            identity_evaluation.split_excluded_cases(cases, [case.source for case in cases])
+
+    def test_excluded_benchmark_source_never_reaches_detector_or_profile_matching(self):
+        cases = self.benchmark_cases(2)
+        remaining, excluded = identity_evaluation.split_excluded_cases(cases, [cases[0].source])
+        face = SimpleNamespace(src_str=str(remaining[0].source))
+        excluded_sources = frozenset(str(case.source) for case in excluded)
+        with patch.object(benchmark_detection, "detect_cases", return_value={face.src_str: [face]}) as detector, \
+             patch.object(identity_evaluation, "predict_face", return_value=None) as predict, \
+             patch.object(sorter, "analysis_index_file", return_value=self.root / "index.sqlite"):
+            identity_evaluation.evaluate_golden_set(remaining, sorter.CacheState(), sorter.IdentityDB(),
+                lane="strict", fresh_detection=True, excluded_profile_sources=excluded_sources)
+        self.assertEqual(detector.call_args.args[0], remaining)
+        self.assertTrue(excluded_sources <= predict.call_args.kwargs["excluded_sources"])
+
+    def test_partial_benchmark_cannot_certify_baseline(self):
+        for flag in ("--baseline", "--write-baseline"):
+            with self.subTest(flag=flag), \
+                 patch("sys.argv", ["identity_evaluation.py", "--golden-set", "test.csv",
+                     "--exclude-source", "skip.jpg", "--fresh-detection", flag, "baseline.json"]), \
+                 patch.object(sorter, "load_identity_db") as load:
+                with self.assertRaises(SystemExit) as stopped:
+                    identity_evaluation.main()
+                self.assertEqual(stopped.exception.code, 2)
+                load.assert_not_called()
 
     def test_benchmark_rejects_source_changed_during_worker(self):
         cases = self.benchmark_cases(1)
