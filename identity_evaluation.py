@@ -27,6 +27,17 @@ DEFAULT_REPORT_DIR = pipeline_paths.SOURCE_REVIEW / "identity_evaluation"
 DEFAULT_PROTECTED_SET = DEFAULT_REPORT_DIR / "protected_identity_benchmark.csv"
 DEFAULT_PROTECTED_BASELINE = DEFAULT_REPORT_DIR / "protected_identity_baseline.json"
 
+# Explicit user-confirmed aliases only; do not infer matches from first names.
+CONFIRMED_IDENTITY_ALIASES = {
+    "nevetha": "Nivetha Pethuraj",
+    "varalakshmi": "Varalakshmi Sarathkumar",
+}
+
+
+def evaluation_identity_key(name: str) -> str:
+    key = " ".join(name.split()).casefold()
+    return CONFIRMED_IDENTITY_ALIASES.get(key, key).casefold()
+
 
 @dataclass(frozen=True)
 class EvaluationResult:
@@ -539,8 +550,9 @@ def evaluate_golden_set(
                     if item["person"] and (selected_indices is None or item["face_index"] in selected_indices)]
 
             identity_outcome = "not_scored"
-            expected_names = Counter(case.expected_people or ((case.expected_person,) if case.expected_person else ()))
-            observed_names = Counter(accepted_names)
+            expected_labels = case.expected_people or ((case.expected_person,) if case.expected_person else ())
+            expected_names = Counter(evaluation_identity_key(name) for name in expected_labels)
+            observed_names = Counter(evaluation_identity_key(name) for name in accepted_names)
             if expected_names:
                 known_cases += sum(expected_names.values())
                 identity_accepted += len(accepted_names)
@@ -596,7 +608,10 @@ def evaluate_golden_set(
                 "source": str(case.source),
                 "case_types": "|".join(sorted(case.case_types)),
                 "expected_person": case.expected_person,
+                "expected_people": "|".join(expected_labels),
                 "accepted_names": "|".join(accepted_names),
+                "canonical_expected_names": "|".join(expected_names.elements()),
+                "canonical_accepted_names": "|".join(observed_names.elements()),
                 "identity_outcome": identity_outcome,
                 "faces_detected": len(source_faces),
                 "identity_face_id": case.identity_face_id,
@@ -691,6 +706,7 @@ def main() -> int:
         payload["dataset_sha256"] = dataset_sha256
         payload["dataset_unchanged"] = dataset_signature() == dataset_sha256
         payload["identity_scoped_cases"] = sum(bool(case.identity_face_id) for case in validation.cases)
+        payload["confirmed_identity_aliases"] = dict(CONFIRMED_IDENTITY_ALIASES)
         json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
         print("Protected Evaluation Set")

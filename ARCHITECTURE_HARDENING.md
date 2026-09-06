@@ -180,3 +180,17 @@ validation and HTTP form persistence. The focused suites pass 77 tests and all
 140 synthetic checks pass. A real single-image fresh test detected two faces,
 scored one confirmed foreground face correctly and ignored one background face
 for identity only. No full activation baseline was created.
+
+## Confirmed benchmark name aliases
+
+Protected scoring now resolves two explicitly user-confirmed model-name aliases
+using exact normalized names, without fuzzy or first-name matching. Both strict
+and pipeline evaluations compare canonical multisets, preserving repeated-face
+counts and false-accept checks. Raw expected labels and model predictions remain
+in reports alongside canonical names; the summary records the aliases applied.
+Folder rules, library paths, profiles and detection thresholds are unchanged.
+
+The 80 focused tests pass, including alias separation from a similar first name,
+wrong identities, duplicate accepted faces and unknown rejection. All 140
+synthetic checks pass. These are isolated regressions, not a rerun of the real
+protected benchmark or a new activation baseline.

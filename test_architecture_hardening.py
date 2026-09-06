@@ -386,6 +386,59 @@ class ArchitectureTests(unittest.TestCase):
                     predict.assert_called_once()
                     self.assertIs(predict.call_args.args[0], main)
 
+    def test_confirmed_benchmark_aliases_are_exact_and_separate_people(self):
+        key = identity_evaluation.evaluation_identity_key
+        self.assertEqual(key("  NEVETHA "), key("Nivetha Pethuraj"))
+        self.assertEqual(key("Varalakshmi"), key("Varalakshmi Sarathkumar"))
+        self.assertNotEqual(key("Nevetha"), key("Nivedha Thomas"))
+        self.assertNotEqual(key("Nevetha"), key("Nivetha"))
+        self.assertNotEqual(key("Nevetha"), key("Nevetha Other"))
+
+    def test_confirmed_aliases_score_both_lanes_without_hiding_wrong_people(self):
+        source = self.root / "group.jpg"
+        source.write_bytes(b"synthetic group fixture")
+        names = ("Nivetha Pethuraj", "Tabu", "Varalakshmi Sarathkumar", "Keerthi Suresh")
+        case = evaluation_dataset.EvaluationCase(source, "", frozenset({"group", "known"}),
+            True, "unknown", True, expected_people=names, expected_face_count=4)
+        for lane in ("strict", "pipeline"):
+            for first, outcome, precision in (("Nevetha", "correct", 1),
+                                             ("Nivedha Thomas", "incorrect", .75)):
+                predictions = [first, "Tabu", "Varalakshmi", "Keerthi Suresh"]
+                faces = [SimpleNamespace(src_str=str(source), face_index=i) for i in range(4)]
+                with self.subTest(lane=lane, first=first), \
+                     patch.object(identity_evaluation, "predict_face", side_effect=[
+                         identity_evaluation.FacePrediction(name, 0, 1, True) for name in predictions]), \
+                     patch.object(identity_evaluation, "heldout_identity_db", return_value=sorter.IdentityDB()), \
+                     patch.object(identity_evaluation, "heldout_hard_negatives", return_value={}), \
+                     patch.object(shadow_evaluation, "daily_plan", return_value={str(source): [
+                         {"face_index": i, "person": name} for i, name in enumerate(predictions)]}), \
+                     patch.object(sorter, "analysis_index_file", return_value=self.root / "index.sqlite"):
+                    metrics, rows = identity_evaluation.evaluate_golden_set((case,),
+                        sorter.CacheState(faces=faces), sorter.IdentityDB(), lane=lane)
+                self.assertEqual(rows[0]["identity_outcome"], outcome)
+                self.assertEqual(metrics.identity_precision, precision)
+                self.assertEqual(rows[0]["expected_people"], "|".join(names))
+                self.assertEqual(rows[0]["accepted_names"], "|".join(predictions))
+                self.assertEqual(case.expected_people, names)
+
+    def test_benchmark_aliases_preserve_multiplicity_and_unknown_rejection(self):
+        source = self.root / "synthetic.jpg"
+        source.write_bytes(b"synthetic fixture")
+        face = SimpleNamespace(src_str=str(source))
+        for expected, types, outcome in (("Nivetha Pethuraj", {"known"}, "incorrect"),
+                                          ("", {"unknown"}, "false_accept")):
+            case = evaluation_dataset.EvaluationCase(source, expected, frozenset(types),
+                True, "unknown", True, expected_face_count=2)
+            with self.subTest(expected=expected), \
+                 patch.object(identity_evaluation, "predict_face", side_effect=[
+                     identity_evaluation.FacePrediction(name, 0, 1, True)
+                     for name in ("Nevetha", "Nivetha Pethuraj")]), \
+                 patch.object(sorter, "analysis_index_file", return_value=self.root / "index.sqlite"):
+                metrics, rows = identity_evaluation.evaluate_golden_set((case,),
+                    sorter.CacheState(faces=[face, face]), sorter.IdentityDB(), lane="strict")
+            self.assertEqual(rows[0]["identity_outcome"], outcome)
+            self.assertEqual(metrics.identity_precision, .5 if expected else 0)
+
     def test_missing_or_ambiguous_selected_face_blocks_evaluation(self):
         source = self.root / "selected.jpg"
         source.write_bytes(b"selected image")
