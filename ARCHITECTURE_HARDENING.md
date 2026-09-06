@@ -208,3 +208,13 @@ excluded cases and identify the scope as partial, not activation-ready.
 Two existing configured spelling/name aliases also now compare canonically in
 protected scoring. The focused suites pass 83 tests, and all 140 synthetic checks
 pass. No production detection thresholds or folder rules were changed.
+
+The fresh subset run completed all 3,093 retained cases and 4,011 detections.
+After the confirmed annotations and exact aliases, 435 of 435 accepted identities
+matched, with 428 fully correct cases, 2,643 rejected cases, four partial cases,
+and 18 correct identity rejections. Strict known-identity recall is only 14.07%;
+these results do not certify daily-ingest recall or perfect recognition. Two of
+11 no-face-labelled cases produced detections without accepted identities.
+The input CSV remained byte-identical, the skipped case is absent from results,
+and no baseline was created. Small category samples and the explicit exclusion
+remain limitations. No production model or library files were changed.
