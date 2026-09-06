@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
@@ -28,7 +29,7 @@ TRUE_VALUES = {"1", "true", "yes", "y", "verified"}
 FIELDS = [
     "source", "expected_person", "case_types", "expected_face",
     "expected_nudity", "verified", "notes", "expected_people", "expected_face_count",
-    "content_sha256", "group_id",
+    "content_sha256", "group_id", "identity_face_id",
 ]
 
 
@@ -45,6 +46,7 @@ class EvaluationCase:
     content_sha256: str = ""
     group_id: str = ""
     expected_face_count: int | None = None
+    identity_face_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,21 @@ def parse_case_types(value: str) -> frozenset[str]:
     return frozenset(part.strip().casefold() for part in normalized.split("|") if part.strip())
 
 
+def identity_scope_errors(face_id, types, expected_face, person, people, face_count):
+    if not face_id:
+        return []
+    errors = []
+    if not re.fullmatch(r"crop:[0-9a-f]{64}", face_id):
+        errors.append("selected identity face has an invalid fingerprint")
+    if not expected_face or len(people or ((person,) if person else ())) != 1:
+        errors.append("selected-face identity scoring requires one known person")
+    if "known" not in types or "group" in types or {"unknown", "no_face"} & types:
+        errors.append("selected-face identity scoring cannot certify a group or unknown case")
+    if face_count is None or face_count < 1:
+        errors.append("selected-face identity scoring requires the total visible face count")
+    return errors
+
+
 def load_dataset(path: Path) -> DatasetValidation:
     errors: list[str] = []
     cases: list[EvaluationCase] = []
@@ -111,6 +128,7 @@ def load_dataset(path: Path) -> DatasetValidation:
             expected_nudity = str(row.get("expected_nudity") or "unknown").strip().casefold()
             expected_person = str(row.get("expected_person") or "").strip()
             expected_people = tuple(value.strip() for value in str(row.get("expected_people") or "").split("|") if value.strip())
+            identity_face_id = str(row.get("identity_face_id") or "").strip()
             digest = str(row.get("content_sha256") or "").strip()
             try:
                 actual_digest = content_identity.content_sha256(source)
@@ -145,6 +163,8 @@ def load_dataset(path: Path) -> DatasetValidation:
                 errors.append(f"row {row_number} face count conflicts with labels")
             if expected_face and "unknown" not in types and not (expected_person or expected_people):
                 errors.append(f"row {row_number} needs expected_person")
+            errors.extend(f"row {row_number} {error}" for error in identity_scope_errors(
+                identity_face_id, types, expected_face, expected_person, expected_people, face_count))
             case = EvaluationCase(
                 source=source,
                 expected_person=expected_person,
@@ -157,6 +177,7 @@ def load_dataset(path: Path) -> DatasetValidation:
                 content_sha256=digest,
                 group_id=str(row.get("group_id") or digest),
                 expected_face_count=face_count,
+                identity_face_id=identity_face_id,
             )
             cases.append(case)
             if verified:

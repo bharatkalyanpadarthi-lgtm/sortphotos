@@ -160,3 +160,23 @@ are configured aliases or incomplete multi-face annotations, so they must not al
 be described as proven wrong-person assignments. A saved annotation changed after
 this older evaluator loaded its dataset; its report is diagnostic, not a baseline
 for the newer CSV. The new version guard covers future runs. No model was promoted.
+
+## Explicit foreground-only benchmark cases
+
+An optional `identity_face_id` pins a user-confirmed face by its detected crop
+fingerprint. It is an evaluation-only annotation, not a new automatic filing rule.
+Legacy cases continue to score all detected faces. Scoped cases report ignored
+identity faces separately while retaining the total visible/detected face counts.
+They cannot count as complete group/unknown cases. A missing or ambiguous crop
+fingerprint blocks evaluation rather than choosing another face automatically.
+
+The daily shadow planner still receives every face; only the resulting identity
+scores are scoped to the selected detection. Wrong foreground predictions remain
+errors. The review form preserves the selection, including when an older page
+submits without the new field, and permits explicit reset to all-face evaluation.
+Regression coverage includes strict and pipeline lanes, background exclusion,
+incorrect foreground matches, missing/ambiguous selections, legacy CSV loading,
+validation and HTTP form persistence. The focused suites pass 77 tests and all
+140 synthetic checks pass. A real single-image fresh test detected two faces,
+scored one confirmed foreground face correctly and ignored one background face
+for identity only. No full activation baseline was created.

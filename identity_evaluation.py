@@ -513,8 +513,15 @@ def evaluate_golden_set(
     with sort_photos.analysis_index.AnalysisIndex(sort_photos.analysis_index_file()) as index:
         for case_number, case in enumerate(cases, start=1):
             source_faces = faces_by_source.get(os.path.realpath(str(case.source)), [])
+            identity_faces = source_faces
+            if case.identity_face_id:
+                identity_faces = [face for face in source_faces
+                    if content_identity.face_identity(face) == case.identity_face_id]
+                if len(identity_faces) != 1:
+                    raise RuntimeError(f"Selected benchmark face is missing or ambiguous; "
+                                       f"reverify the face selection: {case.source}")
             predictions = [
-                prediction for face in source_faces
+                prediction for face in identity_faces
                 if (
                     prediction := predict_face(
                         face,
@@ -527,7 +534,9 @@ def evaluate_golden_set(
             ] if shadow is None else []
             accepted_names = [prediction.predicted for prediction in predictions if prediction.accepted]
             if shadow is not None:
-                accepted_names = [item["person"] for item in shadow.get(str(case.source.resolve()), []) if item["person"]]
+                selected_indices = {face.face_index for face in identity_faces} if case.identity_face_id else None
+                accepted_names = [item["person"] for item in shadow.get(str(case.source.resolve()), [])
+                    if item["person"] and (selected_indices is None or item["face_index"] in selected_indices)]
 
             identity_outcome = "not_scored"
             expected_names = Counter(case.expected_people or ((case.expected_person,) if case.expected_person else ()))
@@ -590,6 +599,9 @@ def evaluate_golden_set(
                 "accepted_names": "|".join(accepted_names),
                 "identity_outcome": identity_outcome,
                 "faces_detected": len(source_faces),
+                "identity_face_id": case.identity_face_id,
+                "identity_faces_scored": len(identity_faces),
+                "identity_faces_ignored": len(source_faces) - len(identity_faces),
                 "expected_nudity": case.expected_nudity,
                 "observed_nudity": observed_nudity,
                 "evaluation_mode": "fresh_detection" if fresh_detection else "cached_matching_only",
@@ -678,6 +690,7 @@ def main() -> int:
         payload["detector_signature"] = sort_photos.config_fingerprint()
         payload["dataset_sha256"] = dataset_sha256
         payload["dataset_unchanged"] = dataset_signature() == dataset_sha256
+        payload["identity_scoped_cases"] = sum(bool(case.identity_face_id) for case in validation.cases)
         json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
         print("Protected Evaluation Set")

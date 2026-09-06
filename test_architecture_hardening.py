@@ -1,6 +1,7 @@
 """Isolated regressions for the September architecture audit."""
 
 import errno
+import csv
 import hashlib
 import json
 import os
@@ -350,6 +351,121 @@ class ArchitectureTests(unittest.TestCase):
                 sorter.CacheState(faces=[face, face]), sorter.IdentityDB(), lane="strict")
         self.assertEqual(rows[0]["identity_outcome"], "incorrect")
         self.assertEqual(metrics.identity_precision, .5)
+
+    def test_selected_face_ignores_background_identity_not_detection(self):
+        source = self.root / "foreground.jpg"
+        source.write_bytes(b"foreground and background")
+        main = SimpleNamespace(src_str=str(source), face_index=4, crop_jpeg=b"foreground")
+        background = SimpleNamespace(src_str=str(source), face_index=1, crop_jpeg=b"background")
+        case = evaluation_dataset.EvaluationCase(source, "Alice", frozenset({"known"}),
+            True, "unknown", True, expected_face_count=2,
+            identity_face_id=content_identity.face_identity(main))
+        for lane in ("strict", "pipeline"):
+            for predicted, outcome in (("Alice", "correct"), ("Wrong", "incorrect")):
+                with self.subTest(lane=lane, predicted=predicted), \
+                     patch.object(identity_evaluation, "predict_face", return_value=
+                         identity_evaluation.FacePrediction(predicted, 0, 1, True)) as predict, \
+                     patch.object(identity_evaluation, "heldout_identity_db", return_value=sorter.IdentityDB()), \
+                     patch.object(identity_evaluation, "heldout_hard_negatives", return_value={}), \
+                     patch.object(shadow_evaluation, "daily_plan", return_value={str(source): [
+                         {"face_index": background.face_index, "person": "Bob"},
+                         {"face_index": main.face_index, "person": predicted}]}) as planner, \
+                     patch.object(sorter, "analysis_index_file", return_value=self.root / "index.sqlite"):
+                    metrics, rows = identity_evaluation.evaluate_golden_set((case,),
+                        sorter.CacheState(faces=[background, main]), sorter.IdentityDB(), lane=lane)
+                self.assertEqual(rows[0]["identity_outcome"], outcome)
+                self.assertEqual(rows[0]["faces_detected"], 2)
+                self.assertEqual(rows[0]["identity_faces_scored"], 1)
+                self.assertEqual(rows[0]["identity_faces_ignored"], 1)
+                self.assertEqual(rows[0]["accepted_names"], predicted)
+                self.assertEqual(metrics.missed_face_rate, 0)
+                if lane == "pipeline":
+                    self.assertEqual(planner.call_args.args[0], [background, main])
+                    predict.assert_not_called()
+                else:
+                    predict.assert_called_once()
+                    self.assertIs(predict.call_args.args[0], main)
+
+    def test_missing_or_ambiguous_selected_face_blocks_evaluation(self):
+        source = self.root / "selected.jpg"
+        source.write_bytes(b"selected image")
+        main = SimpleNamespace(src_str=str(source), face_index=0, crop_jpeg=b"foreground")
+        other = SimpleNamespace(src_str=str(source), face_index=1, crop_jpeg=b"other")
+        case = evaluation_dataset.EvaluationCase(source, "Alice", frozenset({"known"}),
+            True, "unknown", True, expected_face_count=2,
+            identity_face_id=content_identity.face_identity(main))
+        for faces in ([], [other], [main, main]):
+            with self.subTest(face_count=len(faces)), \
+                 patch.object(sorter, "analysis_index_file", return_value=self.root / "index.sqlite"), \
+                 patch.object(identity_evaluation, "predict_face") as predict:
+                with self.assertRaisesRegex(RuntimeError, "missing or ambiguous"):
+                    identity_evaluation.evaluate_golden_set((case,), sorter.CacheState(faces=faces),
+                        sorter.IdentityDB(), lane="strict")
+                predict.assert_not_called()
+
+    def test_selected_face_dataset_roundtrip_and_validation(self):
+        source = self.root / "source.jpg"
+        source.write_bytes(b"image")
+        path = self.root / "cases.csv"
+        row = dict(source=str(source), expected_person="Alice", case_types="known",
+            expected_face="true", expected_nudity="unknown", verified="true", notes="Ignore background",
+            expected_face_count="2", identity_face_id="crop:" + "a" * 64)
+        evaluation_dataset.write_template(path, [row])
+        validation = evaluation_dataset.load_dataset(path)
+        self.assertFalse(validation.errors)
+        self.assertEqual(validation.cases[0].identity_face_id, row["identity_face_id"])
+        self.assertEqual(benchmark.read_rows(path)[0]["identity_face_id"], row["identity_face_id"])
+        for updates in ({"identity_face_id": "invalid"}, {"expected_face_count": ""},
+                        {"case_types": "group|known", "expected_people": "Alice | Bob"},
+                        {"expected_person": "", "expected_people": "Alice | Bob"},
+                        {"expected_face": "false"}):
+            invalid = dict(row, **updates)
+            evaluation_dataset.write_template(path, [invalid])
+            self.assertTrue(evaluation_dataset.load_dataset(path).errors)
+            self.assertTrue(benchmark._verification_errors(benchmark._normalized_row(invalid)))
+        row.pop("identity_face_id")
+        evaluation_dataset.write_template(path, [row])
+        self.assertEqual(evaluation_dataset.load_dataset(path).cases[0].identity_face_id, "")
+        with path.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(row))
+            writer.writeheader()
+            writer.writerow(row)
+        legacy = evaluation_dataset.load_dataset(path)
+        self.assertFalse(legacy.errors)
+        self.assertEqual(legacy.cases[0].identity_face_id, "")
+
+    def test_old_review_form_preserves_selected_face_until_explicit_clear(self):
+        from urllib.parse import urlencode
+        from urllib.request import Request, urlopen
+
+        source = self.root / "foreground.jpg"
+        source.write_bytes(b"image")
+        dataset = self.root / "cases.csv"
+        row = dict(source=str(source), expected_person="Alice", case_types="known",
+            expected_face="true", expected_nudity="unknown", verified="true", notes="Foreground only",
+            expected_face_count="2", identity_face_id="crop:" + "a" * 64)
+        evaluation_dataset.write_template(dataset, [row])
+        server = benchmark.BenchmarkServer(("127.0.0.1", 0), benchmark.Handler)
+        server.dataset = dataset
+        server.baseline = self.root / "baseline.json"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/save"
+            old_form = dict(row)
+            old_form.pop("identity_face_id")
+            with urlopen(Request(url, data=urlencode(old_form).encode()), timeout=5) as response:
+                html = response.read().decode()
+            self.assertEqual(benchmark.read_rows(dataset)[0]["identity_face_id"], row["identity_face_id"])
+            self.assertIn("Confirmed face only", html)
+            self.assertIn(f'value="{row["identity_face_id"]}" selected', html)
+            with urlopen(Request(url, data=urlencode(dict(row, identity_face_id="")).encode()), timeout=5) as response:
+                response.read()
+            self.assertEqual(benchmark.read_rows(dataset)[0]["identity_face_id"], "")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
     def test_compiled_profiles_match_scalar_scoring(self):
         rng = np.random.default_rng(42)

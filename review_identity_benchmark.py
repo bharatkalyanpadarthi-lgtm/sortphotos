@@ -127,6 +127,14 @@ def _verification_errors(row: dict[str, str]) -> list[str]:
                 raise ValueError()
         except ValueError:
             errors.append("group requires every known person (separated by |) and total face count")
+    try:
+        total_faces = int(row.get("expected_face_count") or "")
+    except ValueError:
+        total_faces = None
+    errors.extend(evaluation_dataset.identity_scope_errors(
+        row.get("identity_face_id", ""), case_types, expected_face, row["expected_person"],
+        tuple(name.strip() for name in row.get("expected_people", "").split("|") if name.strip()),
+        total_faces))
     if not errors:
         row["content_sha256"] = sort_photos.content_identity.content_sha256(source)
         row["group_id"] = row.get("group_id") or row["content_sha256"]
@@ -439,6 +447,12 @@ class Handler(BaseHTTPRequestHandler):
             if not row["source"]:
                 self._redirect("Source path is required")
                 return
+            if "identity_face_id" not in values:
+                canonical = str(Path(row["source"]).expanduser().resolve(strict=False))
+                with self.server.dataset_lock:
+                    previous = next((item for item in read_rows(self.server.dataset)
+                                     if item["source"] == canonical), {})
+                row["identity_face_id"] = previous.get("identity_face_id", "")
             normalized = _normalized_row(row)
             if evaluation_dataset.parse_bool(normalized["verified"]):
                 errors = _verification_errors(normalized)
@@ -515,6 +529,11 @@ class Handler(BaseHTTPRequestHandler):
                 f'>{value.title()}</option>'
                 for value in ("unknown", "safe", "possible")
             )
+            selected_face = row.get("identity_face_id", "")
+            identity_options = '<option value="">All detected faces</option>'
+            if selected_face:
+                identity_options += (f'<option value="{html.escape(selected_face)}" selected>'
+                                     'Confirmed face only</option>')
             cards.append(f"""
             <article class="case-card {status}" data-status="{status}"
                      data-types="{html.escape('|'.join(case_types))}"
@@ -546,6 +565,7 @@ class Handler(BaseHTTPRequestHandler):
                 <label>Person<input name="expected_person" value="{html.escape(row['expected_person'])}"></label>
                 <label>All known people<input name="expected_people" value="{html.escape(row.get('expected_people', ''))}" placeholder="Alice | Bob"></label>
                 <label>Face count<input type="number" min="0" name="expected_face_count" value="{html.escape(row.get('expected_face_count', ''))}"></label>
+                <label>Identity evaluation<select name="identity_face_id">{identity_options}</select></label>
                 <label>Source group<input name="group_id" value="{html.escape(row.get('group_id', ''))}"></label>
                 <label>Case types<input name="case_types" value="{html.escape(row['case_types'])}"></label>
                 <label>Face<select name="expected_face"><option value="true"{' selected' if expected_face else ''}>Expected</option><option value="false"{' selected' if not expected_face else ''}>No face</option></select></label>
