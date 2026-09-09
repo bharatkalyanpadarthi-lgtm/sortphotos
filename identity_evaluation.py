@@ -22,6 +22,7 @@ import sort_photos
 import content_identity
 import benchmark_detection
 import benchmark_inputs
+import evaluation_runtime
 from pipeline_progress import StageProgress, terminal_progress
 
 
@@ -124,8 +125,10 @@ def same_holdout_group(source: str, query: str, excluded_sources: frozenset[str]
     return False
 
 
-def heldout_identity_db(db, source, excluded_sources=frozenset()):
+def heldout_identity_db(db, source, excluded_sources=frozenset(), *, prepared=None):
     """Remove the tested content/source group from every primary profile."""
+    if prepared is not None:
+        return prepared.heldout_db(source, excluded_sources)
     identities, prototypes = {}, {}
     for name in db.identities:
         center, values = profile_without_source(db, name, str(source), excluded_sources)
@@ -148,7 +151,9 @@ def heldout_identity_db(db, source, excluded_sources=frozenset()):
         appearance_prototypes=filtered(db.appearance_prototypes, db.appearance_prototype_sources))
 
 
-def heldout_hard_negatives(source, embedding, excluded_sources=frozenset()):
+def heldout_hard_negatives(source, embedding, excluded_sources=frozenset(), *, prepared=None):
+    if prepared is not None:
+        return prepared.heldout_negatives(source, embedding, excluded_sources)
     result = {}
     for item in identity_hard_negatives.load(sort_photos.IDENTITY_HARD_NEGATIVES_FILE)["examples"]:
         origin = str(item.get("source_path") or "")
@@ -168,7 +173,12 @@ def predict_face(
     lane: str,
     exclude_profile_source: bool = True,
     excluded_sources: frozenset[str] = frozenset(),
+    prepared=None,
 ) -> FacePrediction | None:
+    if prepared is not None:
+        candidates = prepared.rank(face, excluded_sources=excluded_sources,
+                                   exclude_profile_source=exclude_profile_source)
+        return prediction_from_candidates(face, db, candidates, lane=lane)
     identities: dict[str, np.ndarray] = {}
     profile_map: dict[str, list[np.ndarray]] = {}
     pose_map: dict[str, dict[str, list[np.ndarray]]] = {}
@@ -228,6 +238,10 @@ def predict_face(
             if exclude_profile_source else identity_hard_negatives.vectors_by_person(
                 sort_photos.IDENTITY_HARD_NEGATIVES_FILE)),
     )
+    return prediction_from_candidates(face, db, candidates, lane=lane)
+
+
+def prediction_from_candidates(face, db, candidates, *, lane):
     if not candidates:
         return None
     best = candidates[0]
@@ -260,11 +274,12 @@ def evaluate_face(
     db: sort_photos.IdentityDB,
     *,
     lane: str,
+    prepared=None,
 ) -> EvaluationResult | None:
     expected = str(face.label or "").strip()
     if not expected or expected not in db.identities:
         return None
-    prediction = predict_face(face, db, lane=lane)
+    prediction = predict_face(face, db, lane=lane, prepared=prepared)
     if prediction is None:
         return None
     predicted = prediction.predicted
@@ -331,14 +346,22 @@ def cache_metrics(
     *,
     max_per_person: int = 100,
     progress=terminal_progress,
+    prepared=None,
+    checkpoints=None,
+    selected_faces=None,
 ) -> dict[str, float | int]:
-    faces = select_faces(cache.faces, max_per_person, progress=progress)
-    status = StageProgress("Primary-match safety benchmark", len(faces), progress)
-    results = []
-    for face in status.items(faces):
-        result = evaluate_face(face, db, lane="strict")
-        if result is not None:
-            results.append(result)
+    faces = (selected_faces if selected_faces is not None
+             else select_faces(cache.faces, max_per_person, progress=progress))
+    if prepared is None:
+        from evaluation_profiles import EvaluationProfiles
+        prepared = EvaluationProfiles(db)
+    def evaluate(face):
+        result = evaluate_face(face, db, lane="strict", prepared=prepared)
+        return asdict(result) if result is not None else None
+    rows = evaluation_runtime.evaluate_blocks(faces, evaluate, checkpoints=checkpoints,
+        stage="Primary-match safety benchmark", progress=progress)
+    prepared.validate()
+    results = [EvaluationResult(**row) for row in rows if row is not None]
     correct = sum(result.outcome == "correct" for result in results)
     incorrect = sum(result.outcome == "incorrect" for result in results)
     rejected = sum(result.outcome == "rejected" for result in results)
@@ -363,6 +386,9 @@ def activation_gate(
     protected_baseline: Path = DEFAULT_PROTECTED_BASELINE,
     require_protected: bool | None = None,
     progress=terminal_progress,
+    checkpoints=None,
+    selected_faces=None,
+    fail_fast: bool = False,
 ) -> tuple[bool, dict[str, object]]:
     """Block profile promotion when precision or known-person recall regresses."""
     if require_protected is None:
@@ -379,7 +405,10 @@ def activation_gate(
         if validation is not None and not validation.errors:
             selected_overrides.update(benchmark_inputs.prepare_selected_faces(
                 validation.cases, cache, force_fresh=fresh, progress=progress))
-    current = cache_metrics(candidate, cache, progress=progress)
+    from evaluation_profiles import EvaluationProfiles
+    prepared = EvaluationProfiles(candidate)
+    current = cache_metrics(candidate, cache, progress=progress, prepared=prepared,
+                            checkpoints=checkpoints, selected_faces=selected_faces)
     prior = current if candidate is incumbent else cache_metrics(incumbent, cache, progress=progress)
     failures: list[str] = []
     if int(current["incorrect"]) > int(prior["incorrect"]):
@@ -388,6 +417,11 @@ def activation_gate(
         failures.append("strict accepted precision is below 99.9%")
     if float(current["recall"]) + 0.02 < float(prior["recall"]):
         failures.append("strict known-person recall dropped by more than 2 points")
+    if failures and fail_fast:
+        progress("Safety benchmark blocked by primary matching; further checks skipped (automatic filing stays off).")
+        return False, {"candidate": current, "incumbent": prior, "failures": failures,
+                       "confirmed": {"available": False, "skipped": True},
+                       "protected": {"available": False, "skipped": True}}
 
     confirmed_summary: dict[str, object] = {"available": False}
     if confirmed_set is not None and confirmed_set.is_file():
@@ -408,8 +442,10 @@ def activation_gate(
                 exclude_profile_sources=True,
                 progress=progress,
                 selected_face_overrides=selected_overrides,
+                checkpoints=checkpoints,
+                prepared=prepared,
             )
-            prior_metrics, prior_rows = evaluate_golden_set(
+            prior_metrics, prior_rows = (metrics, rows) if candidate is incumbent else evaluate_golden_set(
                 validation.cases,
                 cache,
                 incumbent,
@@ -417,6 +453,7 @@ def activation_gate(
                 exclude_profile_sources=True,
                 progress=progress,
                 selected_face_overrides=selected_overrides,
+                checkpoints=checkpoints if candidate is incumbent else None,
             )
             incorrect_rows = [
                 row for row in rows
@@ -470,11 +507,23 @@ def activation_gate(
                 detected_faces=detected_faces,
                 progress=progress,
                 selected_face_overrides=selected_overrides,
+                checkpoints=checkpoints if not require_protected else None,
+                prepared=prepared,
             )
+            incorrect_count = sum(row["identity_outcome"] in {"incorrect", "false_accept"} for row in rows)
+            if incorrect_count and fail_fast:
+                protected_summary.update(metrics=asdict(metrics), incorrect_rows=incorrect_count,
+                    pipeline_metrics={"skipped": True})
+                failures.append("protected benchmark has an incorrect identity accept")
+                progress("Safety benchmark blocked by protected matching; filing-planner check skipped (automatic filing stays off).")
+                return False, {"candidate": current, "incumbent": prior,
+                               "confirmed": confirmed_summary, "protected": protected_summary,
+                               "failures": failures}
             pipeline_metrics, pipeline_rows = evaluate_golden_set(
                 validation.cases, cache, candidate, lane="pipeline",
                 fresh_detection=bool(require_protected), detected_faces=detected_faces,
-                progress=progress, selected_face_overrides=selected_overrides)
+                progress=progress, selected_face_overrides=selected_overrides,
+                checkpoints=checkpoints if not require_protected else None, prepared=prepared)
             protected_summary["pipeline_metrics"] = asdict(pipeline_metrics)
             if any(row["identity_outcome"] in {"incorrect", "false_accept"} for row in pipeline_rows):
                 failures.append("protected daily filing planner has an incorrect accept")
@@ -496,6 +545,7 @@ def activation_gate(
                     regressions = [f"protected baseline is unreadable: {exc}"]
                 protected_summary["regressions"] = regressions
                 failures.extend(f"protected benchmark: {item}" for item in regressions)
+    prepared.validate()
     return not failures, {
         "candidate": current,
         "incumbent": prior,
@@ -539,7 +589,18 @@ def evaluate_golden_set(
     excluded_profile_sources: frozenset[str] = frozenset(),
     progress=terminal_progress,
     selected_face_overrides: dict | None = None,
+    checkpoints=None,
+    prepared=None,
 ) -> tuple[evaluation_dataset.EvaluationMetrics, list[dict[str, object]]]:
+    stage = f"Protected benchmark ({lane})"
+    if checkpoints is not None and not fresh_detection:
+        saved = checkpoints.get(stage)
+        if isinstance(saved, dict) and len(saved.get("rows", [])) == len(cases):
+            progress(f"{stage}: reusing completed stage ({len(cases)} cases).")
+            return evaluation_dataset.EvaluationMetrics(**saved["metrics"]), saved["rows"]
+    if prepared is None:
+        from evaluation_profiles import EvaluationProfiles
+        prepared = EvaluationProfiles(db)
     faces_by_source: dict[str, list[sort_photos.CachedFace]] = defaultdict(list)
     if fresh_detection:
         faces_by_source.update(benchmark_detection.detect_cases(
@@ -569,10 +630,10 @@ def evaluate_golden_set(
         progress("Protected benchmark: planning held-out filing decisions...")
         import shadow_evaluation
         excluded = frozenset(str(case.source) for case in cases) | excluded_profile_sources
-        heldout = heldout_identity_db(db, next(iter(excluded), ""), excluded)
+        heldout = heldout_identity_db(db, next(iter(excluded), ""), excluded, prepared=prepared)
         selected_faces = [face for case in cases
                           for face in faces_by_source.get(os.path.realpath(str(case.source)), [])]
-        negatives = heldout_hard_negatives(next(iter(excluded), ""), np.zeros(512), excluded)
+        negatives = heldout_hard_negatives(next(iter(excluded), ""), np.zeros(512), excluded, prepared=prepared)
         shadow = shadow_evaluation.daily_plan(selected_faces, heldout, hard_negatives=negatives)
 
     known_cases = 0
@@ -606,6 +667,7 @@ def evaluate_golden_set(
                         exclude_profile_source=exclude_profile_sources,
                         excluded_sources=(frozenset(groups[case.group_id or case.content_sha256 or str(case.source)])
                                           | excluded_profile_sources),
+                        prepared=prepared,
                     )
                 ) is not None
             ] if shadow is None else []
@@ -701,6 +763,9 @@ def evaluate_golden_set(
         nudity_false_positive_rate=nudity_false_positives / max(1, safe_nudity_cases),
         verified_cases=len(cases),
     )
+    prepared.validate()
+    if checkpoints is not None and not fresh_detection:
+        checkpoints.put(stage, {"metrics": asdict(metrics), "rows": rows})
     return metrics, rows
 
 
@@ -847,10 +912,13 @@ def main() -> int:
         return 0
 
     faces = select_faces(cache.faces, max(0, int(args.max_per_person)))
+    from evaluation_profiles import EvaluationProfiles
+    prepared = EvaluationProfiles(db)
     results = [
         result for face in faces
-        if (result := evaluate_face(face, db, lane=args.lane)) is not None
+        if (result := evaluate_face(face, db, lane=args.lane, prepared=prepared)) is not None
     ]
+    prepared.validate()
     counts = defaultdict(int)
     for result in results:
         counts[result.outcome] += 1

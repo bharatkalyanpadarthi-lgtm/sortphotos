@@ -218,3 +218,44 @@ these results do not certify daily-ingest recall or perfect recognition. Two of
 The input CSV remained byte-identical, the skipped case is absent from results,
 and no baseline was created. Small category samples and the explicit exclusion
 remain limitations. No production model or library files were changed.
+
+## Resumable benchmark performance
+
+The September 9 performance pass prepares run-scoped heldout recognition
+profiles rather than resolving sources, hashing references and normalizing
+every identity again for each query. Snapshots retain bounded affected-profile
+and matrix caches and no decoded original images. Tests compare all candidate
+distances and accept/reject decisions against the scalar implementation,
+including content aliases, provenance gaps, pose/appearance and hard negatives.
+Numerically borderline decisions fall back to scalar scoring.
+
+Automatic gates cache deterministic sample selection and commit completed
+primary/independent blocks of 64 cases to checksummed SQLite. Completed protected
+stages are reusable. Only a finished, input-validated gate can authorize filing;
+checkpoints are not authorization. Files and in-memory cache inputs participate
+in validation. Drift invalidates the namespace; interrupts with stable inputs
+preserve completed blocks. No-op metadata rewrites do not invalidate selection
+or completed verdicts. A single gate lock protects bounded namespace pruning.
+
+Routine gates stop after a definitive primary/protected failure. The independent
+verifier also excludes explicit benchmark group peers. Diagnostic evaluations
+and fresh-detection promotion requirements remain available and unchanged.
+
+Reproducible synthetic timing (100 identities, 8 prototypes each, 50 queries,
+512 dimensions): scalar 2.660 seconds; prepared scoring 0.023 seconds, or 0.155
+seconds including initialization and validation. All 50 predictions were exactly
+equal (26 accepted, 24 rejected). This approximately 17x result measures matcher
+work, not full-library wall time, fresh detection or checkpoint input validation.
+Reproduce without accessing any photo library:
+
+```sh
+.venv/bin/python -c 'from test_evaluation_profiles import synthetic_timing; print(synthetic_timing())'
+```
+
+Validation: 190 isolated unit/regression tests and all 140 synthetic integration
+checks pass. The new cases cover scoring parity, finite/checksummed checkpoints,
+termination/resume, input drift, namespace retention and warm selection reuse.
+
+No live library benchmark, activation baseline, originals or manual labels were
+changed in this pass. Existing incorrect benchmark accepts still block automatic
+filing and need diagnosis; speed improvements do not certify perfect recognition.

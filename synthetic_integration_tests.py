@@ -2144,7 +2144,8 @@ def test_unknown_review_joint_policy_is_benchmark_gated(tmp: Path) -> None:
                 identities={"Alice": alice, "Bob": bob}
             )
 
-        def verify(self, _crop, expected_person, *, excluded_source=None):
+        def verify(self, _crop, expected_person, *, excluded_source=None,
+                   excluded_sources=frozenset(), prepared=None):
             return secondary_identity_matcher.SecondaryVerification(
                 False, expected_person, 0.30, 0.15
             )

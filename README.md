@@ -152,13 +152,46 @@ The refreshed detections are reused by both protected scoring lanes. Missing,
 ambiguous, changed-content, or failed detection results block automatic filing
 without crashing the manual Quick Review dashboard. Interrupted evaluations
 and results whose inputs changed mid-run are not cached as completed verdicts.
-The complete safety benchmark can still take time; this preflight avoids a
-late selected-face failure, not the cost of evaluating the entire library.
+Benchmark scoring now prepares normalized reference matrices and indexed
+source/content holdouts once per session. Primary, protected, and independent
+matching reuse these snapshots instead of resolving and hashing every reference
+for every comparison. The protected lanes share one primary snapshot. Missing
+provenance still excludes a reference; identical content and explicit source
+groups remain held out. Snapshot validation catches replacements and changed
+symlinks before results can authorize filing. Distance/quality thresholds and
+sample coverage are not reduced.
+
+Dominant-component sample selection also has its own checksummed cache keyed
+by selection code, face labels, quality, embeddings and order. An unchanged
+launch does not repeat the pairwise component-selection work. Annotation files
+are compared by content, so a no-op rewrite alone does not trigger re-evaluation.
+
+Daily/Quick Review gates keep resumable work in
+`identity_audits/unknown_review/benchmark_checkpoints.sqlite3` under the configured
+source-review directory. Primary and independent scoring commit blocks of 64
+cases, including skipped/rejected outcomes. Protected scoring reuses completed
+stages. An interrupted block is recomputed; previous complete blocks are reused
+only for the same versioned inputs. Progress distinguishes reused cases from
+new work. Checkpoints alone never authorize automatic filing.
+File and in-memory inputs are revalidated at block boundaries; detected drift
+discards the affected namespace, while an ordinary interruption retains valid
+work. A per-directory advisory lock prevents concurrent gates. SQLite retains
+the current namespace plus two recent namespaces, reusing freed pages.
+
+The final gate signature covers decision code/settings, profile provenance,
+annotation/evidence content, tested cached faces/crops, detector configuration,
+and current source/reference versions. Changed inputs require fresh validation;
+unchanged completed pass or fail verdicts are reused. Routine gates stop after
+a definitive primary/protected failure instead of running further expensive
+checks that cannot authorize filing. Manual review remains available. Explicit
+diagnostic/profile-promotion evaluations still run full checks, and promotion
+still requires fresh protected detection. No unvalidated profile is enabled to
+make a daily run appear faster.
 
 Run the isolated reference safety, reuse, progress, and recovery regressions:
 
 ```sh
-.venv/bin/python -m unittest test_reference_verification test_daily_identity_recovery test_benchmark_inputs
+.venv/bin/python -m unittest discover -p 'test_*.py'
 ```
 
 Confirmed exact-content replays are reused only while the matching organized

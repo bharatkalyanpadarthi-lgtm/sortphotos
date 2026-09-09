@@ -41,6 +41,8 @@ import confirm_unknown_identity
 import appearance_profiles
 import identity_confirmations
 import identity_evaluation
+import evaluation_runtime
+from evaluation_checkpoints import BenchmarkCheckpoints
 import identity_hard_negatives
 import identity_profiles
 import evaluation_enrollment
@@ -75,7 +77,7 @@ AUTO_RESCUE_MAX_SECONDARY_DISTANCE = 0.24
 AUTO_RESCUE_MIN_SECONDARY_MARGIN = 0.14
 AUTO_RESCUE_MIN_QUALITY = 0.45
 AUTO_GATE_MIN_CONFIRMED_CASES = 100
-AUTO_GATE_CACHE_VERSION = 6
+AUTO_GATE_CACHE_VERSION = 7
 AUTO_SWEEP_STATE_VERSION = 3
 TRUSTED_REVIEW_PROTOTYPES_PER_PERSON = 24
 AUTO_SWEEP_BATCH_SIZE = 500
@@ -2191,6 +2193,7 @@ def evaluate_automatic_policy_benchmark(
     review_prototypes: dict[str, list[np.ndarray]] | None = None,
     evaluation_path: Path = evaluation_enrollment.DEFAULT_PATH,
     progress=terminal_progress,
+    checkpoints=None,
 ) -> tuple[bool, dict[str, object]]:
     """Prove the dual-model automatic lane against explicit confirmations."""
     validation = identity_evaluation.evaluation_dataset.load_dataset(evaluation_path)
@@ -2208,41 +2211,44 @@ def evaluate_automatic_policy_benchmark(
     if validation.errors:
         return False, report
 
+    from evaluation_profiles import EvaluationProfiles
+    prepared = EvaluationProfiles(identity_db)
+    verifier_profiles = EvaluationProfiles(sort_photos.IdentityDB(
+        identities=secondary_matcher.db.identities,
+        prototypes=secondary_matcher.db.prototypes,
+        prototype_sources=secondary_matcher.db.prototype_sources), negative_examples=[])
     faces_by_source = _faces_by_source(cache)
-    status = StageProgress("Independent-match safety benchmark", len(validation.cases), progress)
-    for case in status.items(validation.cases, lambda: f"{report['evaluated']} scored; {report['incorrect']} incorrect"):
+    groups = {}
+    for case in validation.cases:
+        groups.setdefault(case.group_id or case.content_sha256 or str(case.source), set()).add(str(case.source))
+    def evaluate(case):
+        result = {"evaluated": 0, "accepted": 0, "correct": 0, "incorrect": 0, "incorrect_rows": []}
         if not case.verified or case.expected_person not in identity_db.identities:
-            continue
+            return result
         source_faces = faces_by_source.get(os.path.realpath(str(case.source)), [])
         face = _confirmed_case_face(case, source_faces, identity_db)
         if face is None:
-            continue
-        report["evaluated"] = int(report["evaluated"]) + 1
-        heldout_db = identity_evaluation.heldout_identity_db(identity_db, case.source)
-        candidates = _rank_face_candidates(
-            face,
-            case.source,
-            heldout_db,
-            identity_evaluation.heldout_hard_negatives(case.source, face.embedding),
-        )
+            return result
+        result["evaluated"] = 1
+        excluded = frozenset(groups[case.group_id or case.content_sha256 or str(case.source)])
+        candidates = prepared.rank(face, excluded_sources=excluded, minimum_references=False)[:3]
         if not candidates:
-            continue
+            return result
         secondary = secondary_matcher.verify(
-            face.crop_jpeg, candidates[0].name, excluded_source=case.source)
+            face.crop_jpeg, candidates[0].name, excluded_source=case.source,
+            excluded_sources=excluded, prepared=verifier_profiles)
         item = UnknownItem("benchmark", case.source, face, candidates, secondary)
         evidence = _automatic_item_evidence(item, identity_db)
         if evidence is None or not bool(
             evidence["secondary"] or evidence["secondary_rescue"]
         ):
-            continue
-        report["accepted"] = int(report["accepted"]) + 1
+            return result
+        result["accepted"] = 1
         if candidates[0].name.casefold() == case.expected_person.casefold():
-            report["correct"] = int(report["correct"]) + 1
-            continue
-        report["incorrect"] = int(report["incorrect"]) + 1
-        rows = report["incorrect_rows"]
-        if isinstance(rows, list) and len(rows) < 20:
-            rows.append({
+            result["correct"] = 1
+            return result
+        result["incorrect"] = 1
+        result["incorrect_rows"].append({
                 "source": str(case.source),
                 "expected": case.expected_person,
                 "predicted": candidates[0].name,
@@ -2252,7 +2258,16 @@ def evaluate_automatic_policy_benchmark(
                 ),
                 "secondary_distance": round(float(secondary.distance), 6),
                 "secondary_margin": round(float(secondary.margin), 6),
-            })
+        })
+        return result
+    results = evaluation_runtime.evaluate_blocks(validation.cases, evaluate, checkpoints=checkpoints,
+        stage="Independent-match safety benchmark", progress=progress)
+    for result in results:
+        for key in ("evaluated", "accepted", "correct", "incorrect"):
+            report[key] += result[key]
+        report["incorrect_rows"].extend(result["incorrect_rows"][:max(0, 20 - len(report["incorrect_rows"]))])
+    prepared.validate()
+    verifier_profiles.validate()
     secondary_matcher.flush()
     evaluated = int(report["evaluated"])
     accepted = int(report["accepted"])
@@ -2278,7 +2293,11 @@ def automatic_review_gate_signature(
     digest.update(secondary_identity_matcher.primary_signature(identity_db).encode("ascii"))
     for module_name in ("recognition_policy.py", "identity_assignment.py", "identity_evaluation.py",
                         "identity_profiles.py", "secondary_identity_matcher.py", "review_unknown_identities.py",
-                        "identity_confirmations.py", "verified_references.py", "benchmark_inputs.py"):
+                        "identity_confirmations.py", "verified_references.py", "benchmark_inputs.py",
+                        "evaluation_profiles.py", "evaluation_runtime.py", "evaluation_checkpoints.py",
+                        "sort_photos.py", "recover_no_usable_faces.py", "appearance_profiles.py",
+                        "evaluation_dataset.py", "benchmark_detection.py", "shadow_evaluation.py",
+                        "identity_hard_negatives.py", "content_identity.py"):
         digest.update(sort_photos.content_identity.content_sha256(Path(__file__).with_name(module_name)).encode("ascii"))
     digest.update(secondary_identity_matcher.identity_signature(secondary_db).encode("ascii"))
     # Calibration and pose changes can alter decisions without changing the
@@ -2288,10 +2307,20 @@ def automatic_review_gate_signature(
         "strict_thresholds": identity_db.strict_thresholds,
         "source_counts": identity_db.source_counts,
         "era_cutoffs": identity_db.appearance_era_cutoffs,
+        "prototype_sources": identity_db.prototype_sources,
+        "pose_sources": identity_db.pose_prototype_sources,
+        "appearance_sources": identity_db.appearance_prototype_sources,
+        "detector": sort_photos.config_fingerprint(),
+        "settings": {name: value for name, value in vars(sort_photos).items()
+                     if name.startswith("AUTO_PERSON_") and isinstance(value, (str, bool, int, float))},
+        "recovery_settings": {name: value for name, value in vars(recover_no_usable_faces).items()
+                              if name.startswith("MATCH_") and isinstance(value, (str, bool, int, float))},
     }, sort_keys=True).encode("utf-8"))
     for person in sorted(identity_db.identities, key=str.casefold):
         digest.update(person.encode("utf-8"))
         digest.update(np.asarray(identity_db.identities[person], dtype=np.float32).tobytes())
+        for prototype in identity_db.prototypes.get(person, []):
+            digest.update(np.asarray(prototype, dtype=np.float32).tobytes())
         for profiles in (identity_db.pose_prototypes, identity_db.appearance_prototypes):
             for label, values in sorted(profiles.get(person, {}).items()):
                 digest.update(label.encode("utf-8"))
@@ -2305,6 +2334,7 @@ def automatic_review_gate_signature(
                 .astype(np.float32).tobytes()
             )
     digest.update(json.dumps({
+        "minimum_cases": AUTO_GATE_MIN_CONFIRMED_CASES,
         "primary_distance": AUTO_JOINT_MAX_PRIMARY_DISTANCE,
         "secondary_distance": AUTO_JOINT_MAX_SECONDARY_DISTANCE,
         "primary_margin": AUTO_JOINT_MIN_PRIMARY_MARGIN,
@@ -2324,8 +2354,7 @@ def automatic_review_gate_signature(
         identity_evaluation.DEFAULT_PROTECTED_BASELINE,
     ):
         try:
-            stat = path.expanduser().stat()
-            value = f"{path.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}"
+            value = f"{path.resolve()}\0{sort_photos.content_identity.content_sha256(path)}"
         except OSError:
             value = f"{path.expanduser().resolve(strict=False)}\0missing"
         digest.update(value.encode("utf-8", errors="surrogateescape"))
@@ -2344,9 +2373,14 @@ def prepare_automatic_review_gate(
 ) -> tuple[bool, dict[str, object], str]:
     """A failed safety evaluation disables auto-filing, not manual review."""
     try:
-        return _prepare_automatic_review_gate(
-            identity_db, cache, secondary_matcher, requested=requested,
-            output_dir=output_dir, review_prototypes=review_prototypes, progress=progress)
+        if not requested:
+            return _prepare_automatic_review_gate(identity_db, cache, secondary_matcher,
+                requested=False, output_dir=output_dir, review_prototypes=review_prototypes, progress=progress)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with evaluation_runtime.exclusive_evaluation(output_dir):
+            return _prepare_automatic_review_gate(
+                identity_db, cache, secondary_matcher, requested=requested,
+                output_dir=output_dir, review_prototypes=review_prototypes, progress=progress)
     except Exception as error:  # noqa: BLE001
         message = f"Safe auto-match unavailable: {type(error).__name__}: {error}. Manual review remains available."
         progress(message)
@@ -2376,11 +2410,26 @@ def _prepare_automatic_review_gate(
         )
 
     progress("Safety benchmark: checking cached result and input versions...")
-    signature = automatic_review_gate_signature(
+    policy_signature = automatic_review_gate_signature(
         identity_db,
         secondary_db=secondary_matcher.db,
         review_prototypes=review_prototypes,
     )
+    primary_faces = evaluation_runtime.selected_faces(cache, output_dir, progress=progress)
+    inputs = evaluation_runtime.GateInputs(cache, identity_db, secondary_matcher.db,
+        datasets=(evaluation_enrollment.DEFAULT_PATH, identity_evaluation.DEFAULT_PROTECTED_SET),
+        evidence_paths=(sort_photos.IDENTITY_HARD_NEGATIVES_FILE,
+                        sort_photos.IDENTITY_CONFIRMATIONS_FILE,
+                        identity_evaluation.DEFAULT_PROTECTED_BASELINE),
+        negative_examples=identity_hard_negatives.load(sort_photos.IDENTITY_HARD_NEGATIVES_FILE)["examples"],
+        primary_faces=primary_faces)
+    signature = hashlib.sha256((policy_signature + inputs.fingerprint).encode()).hexdigest()
+    def validate_inputs():
+        inputs.validate()
+        current_policy = automatic_review_gate_signature(identity_db, secondary_db=secondary_matcher.db,
+                                                         review_prototypes=review_prototypes)
+        if current_policy != policy_signature:
+            raise RuntimeError("Safety benchmark inputs changed during evaluation; retry with the saved annotations")
     gate_path = output_dir / "unknown_auto_review_gate.json"
     try:
         cached = json.loads(gate_path.read_text(encoding="utf-8"))
@@ -2392,6 +2441,7 @@ def _prepare_automatic_review_gate(
         and isinstance(cached.get("allowed"), bool)
     ):
         allowed = bool(cached["allowed"])
+        validate_inputs()
         progress("Safety benchmark: reusing unchanged cached result.")
         return allowed, cached, (
             "Safe auto-match passed the cached full-library safety gate."
@@ -2400,36 +2450,40 @@ def _prepare_automatic_review_gate(
         )
 
     progress("Safety benchmark: inputs changed or no cached result; evaluating primary matcher...")
-    primary_allowed, report = identity_evaluation.activation_gate(
-        identity_db,
-        identity_db,
-        cache,
-        confirmed_set=None,
-        progress=progress,
-    )
-    policy_allowed, policy_report = evaluate_automatic_policy_benchmark(
-        identity_db,
-        cache,
-        secondary_matcher,
-        hard_negatives=identity_hard_negatives.vectors_by_person(
-            sort_photos.IDENTITY_HARD_NEGATIVES_FILE
-        ),
-        review_prototypes=review_prototypes,
-        progress=progress,
-    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with BenchmarkCheckpoints(output_dir / "benchmark_checkpoints.sqlite3", signature) as store:
+        store.prune()
+        checkpoints = evaluation_runtime.GuardedCheckpoints(store, validate_inputs)
+        try:
+            primary_allowed, report = identity_evaluation.activation_gate(
+                identity_db, identity_db, cache, confirmed_set=None, progress=progress,
+                checkpoints=checkpoints, selected_faces=primary_faces, fail_fast=True)
+            checkpoints.check()
+            if primary_allowed:
+                policy_allowed, policy_report = evaluate_automatic_policy_benchmark(
+                    identity_db, cache, secondary_matcher,
+                    hard_negatives=identity_hard_negatives.vectors_by_person(
+                        sort_photos.IDENTITY_HARD_NEGATIVES_FILE),
+                    review_prototypes=review_prototypes, progress=progress,
+                    checkpoints=checkpoints)
+            else:
+                progress("Safety benchmark blocked; skipping independent matcher. Manual review remains available.")
+                policy_allowed, policy_report = False, {"skipped": True, "reason": "primary safety gate blocked"}
+            checkpoints.check()
+        except BaseException:
+            # Keep ordinary interruption checkpoints, discard any mixed-input work.
+            try:
+                checkpoints.check()
+            except Exception:
+                pass
+            raise
     allowed = bool(primary_allowed and policy_allowed)
     report["automatic_policy"] = policy_report
-    if not policy_allowed:
+    if primary_allowed and not policy_allowed:
         report.setdefault("failures", []).append(
             "dual-model automatic policy did not pass the confirmed benchmark"
         )
-    final_signature = automatic_review_gate_signature(
-        identity_db,
-        secondary_db=secondary_matcher.db,
-        review_prototypes=review_prototypes,
-    )
-    if final_signature != signature:
-        raise RuntimeError("Safety benchmark inputs changed during evaluation; retry with the saved annotations")
+    validate_inputs()
     payload: dict[str, object] = {
         "version": AUTO_GATE_CACHE_VERSION,
         "signature": signature,

@@ -179,11 +179,12 @@ class BenchmarkInputTests(unittest.TestCase):
 
     def test_changing_annotations_cannot_cache_an_outdated_verdict(self):
         with patch.object(review, "automatic_review_gate_signature", side_effect=["before", "after"]), \
+             patch.object(review.evaluation_runtime, "GateInputs", return_value=SimpleNamespace(fingerprint="inputs", validate=lambda: None)), \
              patch.object(evaluation, "activation_gate", return_value=(True, {})), \
              patch.object(review, "evaluate_automatic_policy_benchmark", return_value=(True, {})), \
              patch.object(review.identity_hard_negatives, "vectors_by_person", return_value={}):
             allowed, report, message = review.prepare_automatic_review_gate(
-                object(), object(), SimpleNamespace(db=object()), requested=True,
+                object(), SimpleNamespace(faces=[]), SimpleNamespace(db=object()), requested=True,
                 output_dir=self.root, progress=self.messages.append)
         self.assertFalse(allowed)
         self.assertTrue(report["evaluation_incomplete"])

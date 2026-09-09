@@ -262,13 +262,15 @@ class SecondaryMatcher:
         expected_person: str,
         *,
         excluded_source: Path | str | None = None,
+        excluded_sources: frozenset[str] = frozenset(),
+        prepared=None,
     ) -> SecondaryVerification:
         embedding = self.embedding(crop_jpeg)
         if embedding is None or expected_person not in self.db.identities:
             return SecondaryVerification(False, "", 1.0, 0.0)
         identities = self.db.identities
         prototypes = self.db.prototypes
-        if excluded_source is not None:
+        if excluded_source is not None and prepared is None:
             from identity_evaluation import same_holdout_group
             filtered_prototypes: dict[str, list[np.ndarray]] = {}
             filtered_identities = {}
@@ -276,7 +278,7 @@ class SecondaryMatcher:
                 sources = self.db.prototype_sources.get(name, [])
                 kept = [
                     value for value, source in zip(values, sources)
-                    if not same_holdout_group(str(source), str(excluded_source))
+                    if not same_holdout_group(str(source), str(excluded_source), excluded_sources)
                 ] if len(sources) == len(values) else []
                 filtered_prototypes[name] = kept
                 if kept:
@@ -285,10 +287,16 @@ class SecondaryMatcher:
                     )
             identities = filtered_identities
             prototypes = filtered_prototypes
-        candidates = identity_profiles.rank_candidates(
-            embedding, identities, prototypes,
-            compiled=self.compiled if excluded_source is None else None,
-        )
+        if prepared is not None and excluded_source is not None:
+            from types import SimpleNamespace
+            query = SimpleNamespace(embedding=embedding, src_str=str(excluded_source),
+                                    crop_jpeg=b"", pose_label="unknown")
+            candidates = prepared.rank(query, excluded_sources=excluded_sources, minimum_references=False)
+        else:
+            candidates = identity_profiles.rank_candidates(
+                embedding, identities, prototypes,
+                compiled=self.compiled if excluded_source is None else None,
+            )
         if not candidates:
             return SecondaryVerification(False, "", 1.0, 0.0)
         best = candidates[0]

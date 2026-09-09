@@ -255,12 +255,13 @@ class IntegrationTests(ReferenceFixtures, unittest.TestCase):
         matcher = SimpleNamespace(db=object())
         messages = []
         with patch.object(review, "automatic_review_gate_signature", return_value="unchanged"), \
+             patch.object(review.evaluation_runtime, "GateInputs", return_value=SimpleNamespace(fingerprint="inputs", validate=lambda: None)), \
              patch.object(review.identity_evaluation, "activation_gate", return_value=(True, {})) as primary, \
              patch.object(review, "evaluate_automatic_policy_benchmark", return_value=(True, {})) as policy, \
              patch.object(review.identity_hard_negatives, "vectors_by_person", return_value={}):
             for _ in range(2):
                 allowed, _, _ = review.prepare_automatic_review_gate(
-                    object(), object(), matcher, requested=True,
+                    object(), SimpleNamespace(faces=[]), matcher, requested=True,
                     output_dir=self.root, progress=messages.append)
                 self.assertTrue(allowed)
             self.assertEqual(primary.call_count, 1)
