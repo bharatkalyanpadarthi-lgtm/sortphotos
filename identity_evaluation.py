@@ -21,6 +21,7 @@ import pipeline_paths
 import sort_photos
 import content_identity
 import benchmark_detection
+import benchmark_inputs
 from pipeline_progress import StageProgress, terminal_progress
 
 
@@ -364,11 +365,23 @@ def activation_gate(
     progress=terminal_progress,
 ) -> tuple[bool, dict[str, object]]:
     """Block profile promotion when precision or known-person recall regresses."""
+    if require_protected is None:
+        require_protected = candidate is not incumbent
+    confirmed_validation = (evaluation_dataset.load_dataset(confirmed_set)
+                            if confirmed_set is not None and confirmed_set.is_file() else None)
+    protected_validation = (evaluation_dataset.load_dataset(protected_set)
+                            if protected_set.is_file() else None)
+    selected_overrides = {}
+    # Validate pinned faces before scoring thousands of ordinary cached faces.
+    # Promotion still needs fresh detection for every protected case later.
+    for validation, fresh in ((confirmed_validation, False),
+                              (protected_validation, bool(require_protected))):
+        if validation is not None and not validation.errors:
+            selected_overrides.update(benchmark_inputs.prepare_selected_faces(
+                validation.cases, cache, force_fresh=fresh, progress=progress))
     current = cache_metrics(candidate, cache, progress=progress)
     prior = current if candidate is incumbent else cache_metrics(incumbent, cache, progress=progress)
     failures: list[str] = []
-    if require_protected is None:
-        require_protected = candidate is not incumbent
     if int(current["incorrect"]) > int(prior["incorrect"]):
         failures.append("new incorrect strict identity accepts")
     if int(current["incorrect"]) > 0 or float(current["precision"]) < 0.999:
@@ -378,7 +391,7 @@ def activation_gate(
 
     confirmed_summary: dict[str, object] = {"available": False}
     if confirmed_set is not None and confirmed_set.is_file():
-        validation = evaluation_dataset.load_dataset(confirmed_set)
+        validation = confirmed_validation
         confirmed_summary = {
             "available": True,
             "cases": len(validation.cases),
@@ -394,6 +407,7 @@ def activation_gate(
                 lane="consensus",
                 exclude_profile_sources=True,
                 progress=progress,
+                selected_face_overrides=selected_overrides,
             )
             prior_metrics, prior_rows = evaluate_golden_set(
                 validation.cases,
@@ -402,6 +416,7 @@ def activation_gate(
                 lane="consensus",
                 exclude_profile_sources=True,
                 progress=progress,
+                selected_face_overrides=selected_overrides,
             )
             incorrect_rows = [
                 row for row in rows
@@ -431,7 +446,7 @@ def activation_gate(
     if protected_baseline.is_file() and not protected_set.is_file():
         failures.append("protected benchmark is missing while its baseline exists")
     if protected_set.is_file():
-        validation = evaluation_dataset.load_dataset(protected_set)
+        validation = protected_validation
         protected_summary = {
             "available": True,
             "cases": len(validation.cases),
@@ -444,7 +459,7 @@ def activation_gate(
         if (require_protected or protected_baseline.is_file()) and not validation.activation_ready:
             failures.append("protected benchmark is incomplete or invalid")
         if validation.activation_ready:
-            detected_faces = {}
+            detected_faces = dict(selected_overrides) if require_protected else {}
             metrics, rows = evaluate_golden_set(
                 validation.cases,
                 cache,
@@ -454,11 +469,12 @@ def activation_gate(
                 fresh_detection=bool(require_protected),
                 detected_faces=detected_faces,
                 progress=progress,
+                selected_face_overrides=selected_overrides,
             )
             pipeline_metrics, pipeline_rows = evaluate_golden_set(
                 validation.cases, cache, candidate, lane="pipeline",
                 fresh_detection=bool(require_protected), detected_faces=detected_faces,
-                progress=progress)
+                progress=progress, selected_face_overrides=selected_overrides)
             protected_summary["pipeline_metrics"] = asdict(pipeline_metrics)
             if any(row["identity_outcome"] in {"incorrect", "false_accept"} for row in pipeline_rows):
                 failures.append("protected daily filing planner has an incorrect accept")
@@ -522,6 +538,7 @@ def evaluate_golden_set(
     detected_faces: dict | None = None,
     excluded_profile_sources: frozenset[str] = frozenset(),
     progress=terminal_progress,
+    selected_face_overrides: dict | None = None,
 ) -> tuple[evaluation_dataset.EvaluationMetrics, list[dict[str, object]]]:
     faces_by_source: dict[str, list[sort_photos.CachedFace]] = defaultdict(list)
     if fresh_detection:
@@ -530,6 +547,20 @@ def evaluate_golden_set(
     else:
         for face in cache.faces:
             faces_by_source[os.path.realpath(face.src_str)].append(face)
+        for case in cases:
+            key = os.path.realpath(str(case.source))
+            if case.identity_face_id and key in (selected_face_overrides or {}):
+                faces = selected_face_overrides[key]
+                digest = content_identity.content_sha256(case.source)
+                if ((case.content_sha256 and digest != case.content_sha256)
+                        or any(os.path.realpath(face.src_str) != key
+                               or getattr(face, "content_sha256", "") != digest for face in faces)):
+                    raise benchmark_inputs.BenchmarkInputError(
+                        f"Refreshed benchmark image changed: {case.source}")
+                faces_by_source[key] = faces
+    for case in cases:
+        benchmark_inputs.selected_identity_faces(
+            case, faces_by_source.get(os.path.realpath(str(case.source)), []))
     groups: dict[str, set[str]] = defaultdict(set)
     for case in cases:
         groups[case.group_id or case.content_sha256 or str(case.source)].add(str(case.source))
@@ -564,13 +595,7 @@ def evaluate_golden_set(
     with sort_photos.analysis_index.AnalysisIndex(sort_photos.analysis_index_file()) as index:
         for case in status.items(cases):
             source_faces = faces_by_source.get(os.path.realpath(str(case.source)), [])
-            identity_faces = source_faces
-            if case.identity_face_id:
-                identity_faces = [face for face in source_faces
-                    if content_identity.face_identity(face) == case.identity_face_id]
-                if len(identity_faces) != 1:
-                    raise RuntimeError(f"Selected benchmark face is missing or ambiguous; "
-                                       f"reverify the face selection: {case.source}")
+            identity_faces = benchmark_inputs.selected_identity_faces(case, source_faces)
             predictions = [
                 prediction for face in identity_faces
                 if (
@@ -662,6 +687,8 @@ def evaluate_golden_set(
                 "observed_nudity": observed_nudity,
                 "evaluation_mode": "fresh_detection" if fresh_detection else "cached_matching_only",
                 "decision_lane": lane,
+                "selected_face_refreshed": (os.path.realpath(str(case.source))
+                                            in (selected_face_overrides or {})),
             })
 
     metrics = evaluation_dataset.EvaluationMetrics(

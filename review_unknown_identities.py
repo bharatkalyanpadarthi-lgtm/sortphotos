@@ -2278,7 +2278,7 @@ def automatic_review_gate_signature(
     digest.update(secondary_identity_matcher.primary_signature(identity_db).encode("ascii"))
     for module_name in ("recognition_policy.py", "identity_assignment.py", "identity_evaluation.py",
                         "identity_profiles.py", "secondary_identity_matcher.py", "review_unknown_identities.py",
-                        "identity_confirmations.py", "verified_references.py"):
+                        "identity_confirmations.py", "verified_references.py", "benchmark_inputs.py"):
         digest.update(sort_photos.content_identity.content_sha256(Path(__file__).with_name(module_name)).encode("ascii"))
     digest.update(secondary_identity_matcher.identity_signature(secondary_db).encode("ascii"))
     # Calibration and pose changes can alter decisions without changing the
@@ -2333,6 +2333,29 @@ def automatic_review_gate_signature(
 
 
 def prepare_automatic_review_gate(
+    identity_db: sort_photos.IdentityDB,
+    cache: sort_photos.CacheState,
+    secondary_matcher: secondary_identity_matcher.SecondaryMatcher | None,
+    *,
+    requested: bool,
+    output_dir: Path,
+    review_prototypes: dict[str, list[np.ndarray]] | None = None,
+    progress=terminal_progress,
+) -> tuple[bool, dict[str, object], str]:
+    """A failed safety evaluation disables auto-filing, not manual review."""
+    try:
+        return _prepare_automatic_review_gate(
+            identity_db, cache, secondary_matcher, requested=requested,
+            output_dir=output_dir, review_prototypes=review_prototypes, progress=progress)
+    except Exception as error:  # noqa: BLE001
+        message = f"Safe auto-match unavailable: {type(error).__name__}: {error}. Manual review remains available."
+        progress(message)
+        # Do not cache interrupted/invalid evaluations as a completed verdict.
+        return False, {"available": False, "requested": requested, "allowed": False,
+                       "evaluation_incomplete": True, "failures": [str(error)]}, message
+
+
+def _prepare_automatic_review_gate(
     identity_db: sort_photos.IdentityDB,
     cache: sort_photos.CacheState,
     secondary_matcher: secondary_identity_matcher.SecondaryMatcher | None,
@@ -2400,11 +2423,13 @@ def prepare_automatic_review_gate(
         report.setdefault("failures", []).append(
             "dual-model automatic policy did not pass the confirmed benchmark"
         )
-    signature = automatic_review_gate_signature(
+    final_signature = automatic_review_gate_signature(
         identity_db,
         secondary_db=secondary_matcher.db,
         review_prototypes=review_prototypes,
     )
+    if final_signature != signature:
+        raise RuntimeError("Safety benchmark inputs changed during evaluation; retry with the saved annotations")
     payload: dict[str, object] = {
         "version": AUTO_GATE_CACHE_VERSION,
         "signature": signature,

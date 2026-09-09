@@ -143,10 +143,22 @@ read/reused. Updates are throttled to avoid flooding the terminal. A cached
 safety-gate hit is explicit; changed inputs still require evaluation. These
 changes apply to newly started processes, not an already-running worker.
 
+Saved foreground-face selections are checked before bulk benchmark scoring.
+If the normal face cache has different crops, a read-only worker re-detects
+only the affected benchmark images and must reproduce the exact saved crop
+fingerprint. The user annotation, original image, and production face cache
+remain unchanged; background faces are still counted for detection metrics.
+The refreshed detections are reused by both protected scoring lanes. Missing,
+ambiguous, changed-content, or failed detection results block automatic filing
+without crashing the manual Quick Review dashboard. Interrupted evaluations
+and results whose inputs changed mid-run are not cached as completed verdicts.
+The complete safety benchmark can still take time; this preflight avoids a
+late selected-face failure, not the cost of evaluating the entire library.
+
 Run the isolated reference safety, reuse, progress, and recovery regressions:
 
 ```sh
-.venv/bin/python -m unittest test_reference_verification test_daily_identity_recovery
+.venv/bin/python -m unittest test_reference_verification test_daily_identity_recovery test_benchmark_inputs
 ```
 
 Confirmed exact-content replays are reused only while the matching organized
