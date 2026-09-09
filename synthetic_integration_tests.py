@@ -3628,20 +3628,22 @@ def test_face_main_menu_is_streamlined(tmp: Path) -> None:
     visible = [key for _heading, keys in face.MENU_GROUPS for key in keys]
     assert_true(
         visible == [
-            "daily", "dry-run", "status", "health",
-            "review-dashboard", "unknown-review", "benchmark-review", "cross-person-audit", "confirm-unknown",
-            "recover-unknown", "recover-no-face", "recover-videos", "nudity",
+            "daily", "dry-run", "status", "unknown-review",
+            "recover-no-face", "recover-videos", "nudity",
         ],
         f"unexpected main menu actions: {visible}",
     )
     for key in (
         "review", "finish", "duplicate-review", "nudity-audit",
         "scrap-smart-albums", "repair", "integration-audit",
+        "health", "recover-unknown", "benchmark-review", "cross-person-audit", "confirm-unknown",
     ):
         assert_true(key in face.ADVANCED_MENU_KEYS, f"{key} should remain advanced")
     for key in ("dry-run", "status", "health", "review-dashboard"):
         action = face.find_action_by_key(key)
         assert_true(bool(action and action.get("read_only")), f"{key} should use the fast read-only path")
+    assert_true(face.find_action_by_key("process") is face.find_action_by_key("daily"),
+                "process must use the same daily empty-inbox shortcut and guards")
     cross_person = face.find_action_by_key("cross-person-audit")
     assert_true(bool(cross_person and cross_person.get("allow_original_count_decrease")),
                 "cross-person review should allow explicit recoverable membership moves")

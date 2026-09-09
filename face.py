@@ -101,23 +101,17 @@ MENU_GROUPS = [
             "daily",
             "dry-run",
             "status",
-            "health",
         ],
     ),
     (
         "Review",
         [
-            "review-dashboard",
             "unknown-review",
-            "benchmark-review",
-            "cross-person-audit",
-            "confirm-unknown",
         ],
     ),
     (
         "Maintenance",
         [
-            "recover-unknown",
             "recover-no-face",
             "recover-videos",
             "nudity",
@@ -125,60 +119,20 @@ MENU_GROUPS = [
     ),
 ]
 
-ADVANCED_MENU_KEYS = {
-    "all-views",
-    "bad-images",
-    "cache-rehydrate",
-    "cache-relink",
-    "cache-status",
-    "cleanup-empty",
-    "clean-refs",
-    "fix",
-    "generated-artifacts",
-    "identity-audit",
-    "identity-eval",
-    "secondary-id",
-    "pose-refresh",
-    "people-cleanup",
-    "process",
-    "process-all",
-    "review",
-    "finish",
-    "duplicate-review",
-    "nudity-audit",
-    "scrap-smart-albums",
-    "repair",
-    "integration-audit",
-    "recover-bad-images",
-    "recover-old-cache",
-    "refs",
-    "rename",
-    "rebuild-id",
-    "structure",
-    "synthetic-tests",
-    "unknown-triage",
-    "uncertain-nudity",
-}
-
-
-def menu_action_is_relevant(action: dict) -> bool:
-    """Hide recovery actions when their queues contain no supported media."""
-    key = action["key"]
-    if key in {"recover-no-face", "recover-unknown", "unknown-review"}:
-        queue_name = "unknown_identity" if key == "recover-unknown" else "no_usable_face"
-        if key == "unknown-review":
-            queue_name = "unknown_identity"
-        queue_root = daily_runner.SOURCE_REVIEW / "unassigned_intake" / queue_name
-        return daily_runner.tree_contains_media(queue_root, daily_runner.IMAGE_EXTS)
-    if key == "recover-videos":
-        queue_root = daily_runner.SOURCE_REVIEW / "unassigned_intake" / "videos"
-        return daily_runner.tree_contains_media(queue_root, daily_runner.VIDEO_EXTS)
-    return True
+REVIEW_MENU_KEYS = [
+    "review-dashboard", "benchmark-review", "cross-person-audit",
+    "confirm-unknown", "duplicate-review", "uncertain-nudity",
+]
+DIAGNOSTIC_MENU_KEYS = [
+    "health", "repair", "integration-audit", "identity-audit",
+    "identity-eval", "cache-status", "synthetic-tests",
+]
+LEGACY_MENU_KEYS = {"process-all", "all-views", "review", "finish", "unknown-triage"}
 
 ACTIONS = [
     {
         "key": "daily",
-        "aliases": ["run", "go", "end-to-end"],
+        "aliases": ["run", "go", "end-to-end", "process", "process-new", "process-move", "sort"],
         "label": "Daily Ingest / Cache Run",
         "desc": "Memory-safe resumable daily ingest with cleanup, cache refresh, audit, and summary",
         "script": "daily_runner.py",
@@ -193,16 +147,9 @@ ACTIONS = [
         "read_only": True,
     },
     {
-        "key": "process",
-        "aliases": ["process-new", "process-move", "sort"],
-        "label": "Process New Photos",
-        "desc": "Alias for Daily Ingest / Cache Run so new-photo processing uses the safe workflow",
-        "script": "daily_runner.py",
-    },
-    {
         "key": "process-all",
         "aliases": ["scan-all-pictures"],
-        "label": "Process All Pictures",
+        "label": "Process All Pictures (Legacy ~/Pictures Scan)",
         "desc": "Full scan of ~/Pictures without automatic nudity moves. Slower; use only when old source folders must be swept again",
         "script": "sort_photos.py",
         "args": [
@@ -469,7 +416,7 @@ ACTIONS = [
         "key": "review-dashboard",
         "aliases": ["dashboard", "review-ui"],
         "label": "Review Dashboard",
-        "desc": "Create one local HTML dashboard linking unknowns, duplicates, references, nudity, and ready-to-delete",
+        "desc": "Open saved Quick Review and duplicate reports; --refresh explicitly regenerates report previews",
         "script": "review_dashboard.py",
         "args": ["--open"],
         "read_only": True,
@@ -585,8 +532,8 @@ ACTIONS = [
     {
         "key": "health",
         "aliases": ["validate", "dedupe", "optimize", "cleanup"],
-        "label": "Health Check",
-        "desc": "Preflight folders/cache/memory, synthetic tests, cache validation, and duplicate status",
+        "label": "Health Check (Thorough)",
+        "desc": "Run safety tests, cache validation and duplicate reports; slower than Status, no photo moves",
         "steps": [
             {"script": "preflight_check.py"},
             {"script": "integration_audit.py"},
@@ -600,35 +547,63 @@ ACTIONS = [
 ]
 
 
-def show_menu() -> dict | None:
-    print()
-    print("=" * 60)
-    print("  Photo Sorting Pipeline")
-    print("=" * 60)
-    print()
-    visible_actions: list[dict] = []
+MAIN_MENU_KEYS = {key for _heading, keys in MENU_GROUPS for key in keys}
+ADVANCED_MENU_KEYS = {a["key"] for a in ACTIONS} - MAIN_MENU_KEYS
+TOOL_MENUS = {
+    "r": [("Review Tools", REVIEW_MENU_KEYS)],
+    "d": [("Diagnostics", DIAGNOSTIC_MENU_KEYS)],
+    "a": [
+        ("Advanced / Recovery", [
+            a["key"] for a in ACTIONS
+            if a["key"] in ADVANCED_MENU_KEYS
+            and a["key"] not in REVIEW_MENU_KEYS + DIAGNOSTIC_MENU_KEYS
+            and a["key"] not in LEGACY_MENU_KEYS
+        ]),
+        ("Legacy / Compatibility", [a["key"] for a in ACTIONS if a["key"] in LEGACY_MENU_KEYS]),
+    ],
+}
+TOOL_MENU_NAMES = {"review-tools": "r", "diagnostics": "d", "advanced": "a"}
+
+
+def show_menu(section: str | None = None) -> dict | None:
+    # Menus use configuration only: queue contents must not change numbering
+    # or trigger SSD traversal just to choose a command.
     action_by_key = {a["key"]: a for a in ACTIONS}
-    for heading, keys in MENU_GROUPS:
-        print(f"  {heading}")
-        for key in keys:
-            action = action_by_key.get(key)
-            if action is None or not menu_action_is_relevant(action):
-                continue
-            visible_actions.append(action)
-            print(f"    [{len(visible_actions)}] {action['label']}")
-            print(f"        {action['desc']}")
-        print()
-    print("  Type a command name directly for advanced tools.")
-    print("  Type ? to list every command keyword.")
-    print(f"  [q] Quit")
-    print()
     while True:
+        print()
+        print("=" * 60)
+        print("  Photo Sorting Pipeline")
+        print("=" * 60)
+        print()
+        visible_actions: list[dict] = []
+        for heading, keys in TOOL_MENUS[section] if section else MENU_GROUPS:
+            print(f"  {heading}")
+            for key in keys:
+                action = action_by_key[key]
+                visible_actions.append(action)
+                print(f"    [{len(visible_actions)}] {action['label']}")
+                print(f"        {action['desc']}")
+            print()
+        if section:
+            print("  [b] Back to main menu")
+        else:
+            print("  [r] Review Tools   [d] Diagnostics   [a] Advanced")
+        print("  [?] All command keywords   [q] Quit")
+        print("  Command keywords work in every menu.")
+        print()
         try:
             ans = input("  Choose: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return None
         if ans in ("q", "quit", "exit"):
             return None
+        if ans in ("b", "back"):
+            section = None
+            continue
+        next_section = TOOL_MENU_NAMES.get(ans, ans)
+        if next_section in TOOL_MENUS:
+            section = next_section
+            continue
         if ans in ("?", "list", "commands"):
             print_all_commands()
             continue
@@ -647,16 +622,6 @@ def show_menu() -> dict | None:
 
 
 def print_all_commands() -> None:
-    visible = {key for _heading, keys in MENU_GROUPS for key in keys}
-    regular = [
-        a for a in ACTIONS
-        if not a.get("hidden") and a["key"] not in visible and a["key"] not in ADVANCED_MENU_KEYS
-    ]
-    advanced = [
-        a for a in ACTIONS
-        if a["key"] in ADVANCED_MENU_KEYS or a.get("hidden")
-    ]
-
     def line(action: dict) -> str:
         aliases = action.get("aliases") or []
         alias_text = f" ({', '.join(aliases)})" if aliases else ""
@@ -671,14 +636,11 @@ def print_all_commands() -> None:
             action = find_action_by_key(key)
             if action:
                 print(line(action))
-    if regular:
-        print("  Other:")
-        for action in regular:
-            print(line(action))
-    if advanced:
-        print("  Advanced / recovery:")
-        for action in advanced:
-            print(line(action))
+    for groups in TOOL_MENUS.values():
+        for heading, keys in groups:
+            print(f"  {heading}:")
+            for key in keys:
+                print(line(find_action_by_key(key)))
     print()
 
 
@@ -893,6 +855,12 @@ def main() -> int:
         if key in ("-h", "--help", "help"):
             print(__doc__)
             return 0
+        if key in ("?", "list", "commands"):
+            print_all_commands()
+            return 0
+        if key in TOOL_MENU_NAMES:
+            action = show_menu(TOOL_MENU_NAMES[key])
+            return run_action(action) if action else 0
         action = find_action_by_key(key)
         if action is None:
             print(f"Unknown action: {key}")

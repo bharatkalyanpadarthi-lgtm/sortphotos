@@ -3,6 +3,42 @@
 Recognition safety, performance changes, validation commands and remaining human
 benchmark work are documented in [Architecture Hardening](ARCHITECTURE_HARDENING.md).
 
+## Face Menu
+
+The seven main choices have stable numbers, even when a review queue is empty:
+
+1. Daily Ingest / Cache Run
+2. Preview Daily Run
+3. Status Dashboard
+4. Quick Review Unknown Faces
+5. Recover Missed Faces
+6. Recover Missed Videos
+7. Run High-Precision Nudity Check
+
+Use `r` for Review Tools (saved dashboard, protected benchmark, cross-person
+audit, manual confirmation, duplicates and uncertain-nudity review), `d` for
+Diagnostics, and `a` for Advanced recovery and legacy tools. `b` returns to the
+main menu. Opening a menu does not scan the SSD or run any processing.
+
+All previous command keywords and aliases still work. `face process`,
+`face process-new`, `face process-move` and `face sort` now resolve directly to
+`face daily`, including its empty-inbox shortcut. `face commands` lists every
+keyword. You can also open a submenu with `face review-tools`,
+`face diagnostics` or `face advanced`.
+
+`face review-dashboard` opens saved reports without rerunning recognition or
+scanning photo folders. Its Unknown Identity link is the current Quick Review
+**read-only report**; use `face unknown-review` for live decisions. Run
+`face review-dashboard --refresh` explicitly to regenerate the duplicate
+preview and count folders. The old `--no-refresh` flag remains accepted.
+
+Health Check is a thorough diagnostic run, not a quick status read or cleanup.
+Recover Known Faces remains an advanced tool with its own matching path; it
+is not automatically chained after Quick Review. Legacy `process-all` still
+scans `~/Pictures` by default, and `all-views` creates legacy hardlinked views.
+Neither is part of normal daily ingest. This menu cleanup does not change
+recognition thresholds, benchmark gates, photo routing or safety checks.
+
 ## Storage Layout
 
 The external SSD is the source of truth for photo data:
