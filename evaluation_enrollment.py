@@ -102,10 +102,11 @@ def backfill_confirmations(
         canonical = str(Path(face.src_str).expanduser().resolve(strict=False))
         faces_by_path.setdefault(canonical, []).append(face)
     enrolled = 0
+    reference_index = identity_confirmations.ReferenceIndex(faces_by_path)
     for item in confirmation_payload.get("examples", []):
         person = str(item.get("person", "")).strip()
         digest = str(item.get("content_sha256", "")).strip()
-        source = identity_confirmations.resolve_record(item, faces_by_path)
+        source = identity_confirmations.resolve_record(item, reference_index=reference_index)
         if not person or not digest or source is None:
             continue
         candidates = faces_by_path.get(str(source.resolve(strict=False)), [])

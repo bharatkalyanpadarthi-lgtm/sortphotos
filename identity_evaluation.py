@@ -21,6 +21,7 @@ import pipeline_paths
 import sort_photos
 import content_identity
 import benchmark_detection
+from pipeline_progress import StageProgress, terminal_progress
 
 
 DEFAULT_REPORT_DIR = pipeline_paths.SOURCE_REVIEW / "identity_evaluation"
@@ -278,13 +279,15 @@ def evaluate_face(
     )
 
 
-def select_faces(faces: list[sort_photos.CachedFace], max_per_person: int) -> list[sort_photos.CachedFace]:
+def select_faces(faces: list[sort_photos.CachedFace], max_per_person: int, *,
+                 progress=terminal_progress) -> list[sort_photos.CachedFace]:
     grouped: dict[str, list[sort_photos.CachedFace]] = defaultdict(list)
     for face in faces:
         if face.label:
             grouped[str(face.label)].append(face)
     selected: list[sort_photos.CachedFace] = []
-    for name in sorted(grouped, key=str.casefold):
+    status = StageProgress("Selecting benchmark samples by person", len(grouped), progress)
+    for name in status.items(sorted(grouped, key=str.casefold)):
         ordered_group = sorted(
             grouped[name],
             key=lambda face: (face.src_str, face.face_index),
@@ -326,12 +329,15 @@ def cache_metrics(
     cache: sort_photos.CacheState,
     *,
     max_per_person: int = 100,
+    progress=terminal_progress,
 ) -> dict[str, float | int]:
-    results = [
-        result
-        for face in select_faces(cache.faces, max_per_person)
-        if (result := evaluate_face(face, db, lane="strict")) is not None
-    ]
+    faces = select_faces(cache.faces, max_per_person, progress=progress)
+    status = StageProgress("Primary-match safety benchmark", len(faces), progress)
+    results = []
+    for face in status.items(faces):
+        result = evaluate_face(face, db, lane="strict")
+        if result is not None:
+            results.append(result)
     correct = sum(result.outcome == "correct" for result in results)
     incorrect = sum(result.outcome == "incorrect" for result in results)
     rejected = sum(result.outcome == "rejected" for result in results)
@@ -355,10 +361,11 @@ def activation_gate(
     protected_set: Path = DEFAULT_PROTECTED_SET,
     protected_baseline: Path = DEFAULT_PROTECTED_BASELINE,
     require_protected: bool | None = None,
+    progress=terminal_progress,
 ) -> tuple[bool, dict[str, object]]:
     """Block profile promotion when precision or known-person recall regresses."""
-    current = cache_metrics(candidate, cache)
-    prior = current if candidate is incumbent else cache_metrics(incumbent, cache)
+    current = cache_metrics(candidate, cache, progress=progress)
+    prior = current if candidate is incumbent else cache_metrics(incumbent, cache, progress=progress)
     failures: list[str] = []
     if require_protected is None:
         require_protected = candidate is not incumbent
@@ -386,6 +393,7 @@ def activation_gate(
                 candidate,
                 lane="consensus",
                 exclude_profile_sources=True,
+                progress=progress,
             )
             prior_metrics, prior_rows = evaluate_golden_set(
                 validation.cases,
@@ -393,6 +401,7 @@ def activation_gate(
                 incumbent,
                 lane="consensus",
                 exclude_profile_sources=True,
+                progress=progress,
             )
             incorrect_rows = [
                 row for row in rows
@@ -444,10 +453,12 @@ def activation_gate(
                 exclude_profile_sources=True,
                 fresh_detection=bool(require_protected),
                 detected_faces=detected_faces,
+                progress=progress,
             )
             pipeline_metrics, pipeline_rows = evaluate_golden_set(
                 validation.cases, cache, candidate, lane="pipeline",
-                fresh_detection=bool(require_protected), detected_faces=detected_faces)
+                fresh_detection=bool(require_protected), detected_faces=detected_faces,
+                progress=progress)
             protected_summary["pipeline_metrics"] = asdict(pipeline_metrics)
             if any(row["identity_outcome"] in {"incorrect", "false_accept"} for row in pipeline_rows):
                 failures.append("protected daily filing planner has an incorrect accept")
@@ -510,6 +521,7 @@ def evaluate_golden_set(
     fresh_detection: bool = False,
     detected_faces: dict | None = None,
     excluded_profile_sources: frozenset[str] = frozenset(),
+    progress=terminal_progress,
 ) -> tuple[evaluation_dataset.EvaluationMetrics, list[dict[str, object]]]:
     faces_by_source: dict[str, list[sort_photos.CachedFace]] = defaultdict(list)
     if fresh_detection:
@@ -523,6 +535,7 @@ def evaluate_golden_set(
         groups[case.group_id or case.content_sha256 or str(case.source)].add(str(case.source))
     shadow = None
     if lane == "pipeline":
+        progress("Protected benchmark: planning held-out filing decisions...")
         import shadow_evaluation
         excluded = frozenset(str(case.source) for case in cases) | excluded_profile_sources
         heldout = heldout_identity_db(db, next(iter(excluded), ""), excluded)
@@ -547,8 +560,9 @@ def evaluate_golden_set(
     nudity_false_positives = 0
     rows: list[dict[str, object]] = []
 
+    status = StageProgress(f"Protected benchmark ({lane})", len(cases), progress)
     with sort_photos.analysis_index.AnalysisIndex(sort_photos.analysis_index_file()) as index:
-        for case_number, case in enumerate(cases, start=1):
+        for case in status.items(cases):
             source_faces = faces_by_source.get(os.path.realpath(str(case.source)), [])
             identity_faces = source_faces
             if case.identity_face_id:
@@ -649,8 +663,6 @@ def evaluate_golden_set(
                 "evaluation_mode": "fresh_detection" if fresh_detection else "cached_matching_only",
                 "decision_lane": lane,
             })
-            if case_number % 100 == 0 or case_number == len(cases):
-                print(f"Protected scoring: completed {case_number}/{len(cases)}", flush=True)
 
     metrics = evaluation_dataset.EvaluationMetrics(
         identity_precision=identity_correct / max(1, identity_accepted),

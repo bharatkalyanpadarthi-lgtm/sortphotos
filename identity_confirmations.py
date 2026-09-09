@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 
 import content_identity
+from pipeline_progress import StageProgress, terminal_progress
+from verified_references import ReferenceIndex
 
 
 SCHEMA_VERSION = 2
@@ -100,33 +102,28 @@ def record(
     save(path, payload)
 
 
-def resolve_record(item: dict, candidates=()) -> Path | None:
-    digest = str(item.get("content_sha256", ""))
-    if len(digest) != 64:
-        return None
-    source = Path(str(item.get("organized_path", ""))).expanduser()
+def resolve_record(item: dict, candidates=(), *, reference_index=None) -> Path | None:
+    index = reference_index if reference_index is not None else ReferenceIndex(candidates, progress=None)
+    return index.resolve(item)
 
-    def matches(candidate):
-        try:
-            candidate = Path(candidate).resolve()
-            if item.get("byte_size") is not None and candidate.stat().st_size != int(item["byte_size"]):
-                return False
-            return content_identity.content_sha256(candidate) == digest
-        except (OSError, ValueError):
-            return False
 
-    if matches(source):
-        return source.resolve()
-    person = str(item.get("person", "")).casefold()
-    for candidate in candidates:
-        candidate = Path(candidate)
-        parts = candidate.parts
-        if not any(part.casefold() == person and i + 1 < len(parts) and parts[i + 1] == "photos"
-                   for i, part in enumerate(parts)):
+def verified_records(path, faces_by_source, canonical_names, *, reference_index=None,
+                     progress=terminal_progress):
+    index = reference_index if reference_index is not None else ReferenceIndex(faces_by_source, progress=progress)
+    index.refresh()
+    records = [item for item in load(path)["examples"]
+               if str(item.get("person", "")).strip().casefold() in canonical_names]
+    status = StageProgress("Verifying confirmed references", len(records), progress)
+    verified = 0
+    for record in status.items(records, lambda: f"{verified} usable; {index.summary()}"):
+        person = canonical_names[str(record["person"]).strip().casefold()]
+        source = index.resolve(record)
+        if source is None:
             continue
-        if matches(candidate):
-            return candidate.resolve()
-    return None
+        faces = selected_faces(record, faces_by_source.get(str(source), []))
+        if faces:
+            verified += 1
+            yield person, source, faces
 
 
 def selected_faces(item: dict, faces: list) -> list:
@@ -143,15 +140,17 @@ def examples_for_person(path: Path, person: str, people_root: Path) -> dict[Path
     root = people_root.expanduser().resolve()
     results: dict[Path, dict] = {}
     candidates = None
+    reference_index = ReferenceIndex(progress=None)
     for item in load(path)["examples"]:
         if str(item.get("person", "")).casefold() != person.casefold():
             continue
-        resolved = resolve_record(item)
+        resolved = resolve_record(item, reference_index=reference_index)
         if resolved is None:
             if candidates is None:
                 person_dir = root / person / "photos"
                 candidates = list(person_dir.rglob("*")) if person_dir.is_dir() else []
-            resolved = resolve_record(item, candidates)
+                reference_index = ReferenceIndex(candidates, progress=None)
+            resolved = resolve_record(item, reference_index=reference_index)
         if resolved is None:
             continue
         try:

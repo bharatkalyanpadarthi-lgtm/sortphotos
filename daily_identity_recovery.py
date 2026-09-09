@@ -165,8 +165,12 @@ def plan_recovery(
     matcher = None
     try:
         progress(f"Individual identity recovery: {len(pending)} images; checking independent verifier...")
+        progress("Preparing shared confirmed-reference index...")
+        reference_index = review.identity_confirmations.ReferenceIndex(
+            faces_by_source=review._faces_by_source(cache), progress=progress
+        )
         matcher, plan.verifier_status = review.prepare_secondary_verifier(
-            identity_db, cache, requested=True
+            identity_db, cache, requested=True, reference_index=reference_index, progress=progress
         )
         progress(f"Independent verifier: {plan.verifier_status}")
         if matcher is None:
@@ -174,12 +178,15 @@ def plan_recovery(
                 row["reason"] = "verifier_unavailable"
             return plan
         prototypes, _trusted_counts = review.build_trusted_review_prototypes(
-            identity_db, cache, confirmations_path=sort_photos.IDENTITY_CONFIRMATIONS_FILE
+            identity_db, cache, confirmations_path=sort_photos.IDENTITY_CONFIRMATIONS_FILE,
+            reference_index=reference_index, progress=progress,
         )
+        del reference_index
         progress("Individual identity recovery: checking safety benchmark (cached when unchanged)...")
         allowed, _gate, plan.gate_message = review.prepare_automatic_review_gate(
             identity_db, cache, matcher, requested=True, output_dir=gate_dir,
             review_prototypes=prototypes,
+            progress=progress,
         )
         progress(plan.gate_message)
         if not allowed:

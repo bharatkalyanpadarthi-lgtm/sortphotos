@@ -48,6 +48,7 @@ import pipeline_paths
 import recover_no_usable_faces
 import sort_photos
 import secondary_identity_matcher
+from pipeline_progress import StageProgress, terminal_progress
 
 
 DEFAULT_UNKNOWN_ROOT = (
@@ -149,6 +150,8 @@ def prepare_secondary_verifier(
     cache: sort_photos.CacheState,
     *,
     requested: bool,
+    reference_index=None,
+    progress=terminal_progress,
 ) -> tuple[secondary_identity_matcher.SecondaryMatcher | None, str]:
     """Load the verifier and refresh it when identity profiles have changed.
 
@@ -172,13 +175,15 @@ def prepare_secondary_verifier(
         return None, "not requested"
 
     reason = "missing" if secondary_db is None else "out of date"
-    print(
+    progress(
         f"Independent verifier is {reason}; refreshing it for the current "
-        f"{len(identity_db.identities)}-person identity library...",
-        flush=True,
+        f"{len(identity_db.identities)}-person identity library..."
     )
     try:
-        secondary_db = secondary_identity_matcher.build_database(identity_db, cache)
+        secondary_db = secondary_identity_matcher.build_database(
+            identity_db, cache, confirmations_path=sort_photos.IDENTITY_CONFIRMATIONS_FILE,
+            reference_index=reference_index, progress=progress,
+        )
     except Exception as error:  # noqa: BLE001
         return None, f"refresh failed: {error}"
     if (
@@ -295,6 +300,8 @@ def build_trusted_review_prototypes(
     *,
     confirmations_path: Path = sort_photos.IDENTITY_CONFIRMATIONS_FILE,
     limit_per_person: int = TRUSTED_REVIEW_PROTOTYPES_PER_PERSON,
+    reference_index=None,
+    progress=terminal_progress,
 ) -> tuple[dict[str, list[np.ndarray]], dict[str, int]]:
     """Extend Quick Review matching with bounded explicit confirmations.
 
@@ -305,23 +312,16 @@ def build_trusted_review_prototypes(
     canonical_names = {
         name.casefold(): name for name in identity_db.identities
     }
-    faces_by_source = _faces_by_source(cache)
+    faces_by_source = reference_index.faces_by_source if reference_index is not None else None
+    if faces_by_source is None:
+        faces_by_source = _faces_by_source(cache)
     grouped: dict[str, list[identity_profiles.ReferenceSample]] = {}
     seen: set[tuple[str, str, int]] = set()
-    payload = identity_confirmations.load(confirmations_path)
-    for record in payload.get("examples", []):
-        requested_name = str(record.get("person", "")).strip()
-        person = canonical_names.get(requested_name.casefold())
-        if person is None:
-            continue
-        source = identity_confirmations.resolve_record(record, faces_by_source)
-        if source is None:
-            continue
+    for person, source, candidates in identity_confirmations.verified_records(
+        confirmations_path, faces_by_source, canonical_names,
+        reference_index=reference_index, progress=progress,
+    ):
         source_key = os.path.realpath(str(source))
-        faces = faces_by_source.get(source_key, [])
-        candidates = identity_confirmations.selected_faces(record, faces)
-        if not candidates:
-            continue
         face = max(candidates, key=lambda value: float(value.quality))
         key = (person.casefold(), source_key, int(face.face_index))
         if key in seen:
@@ -337,7 +337,8 @@ def build_trusted_review_prototypes(
     profiles: dict[str, list[np.ndarray]] = {}
     selected_counts: dict[str, int] = {}
     bounded_limit = max(0, int(limit_per_person))
-    for person in identity_db.identities:
+    profile_progress = StageProgress("Building trusted recovery profiles", len(identity_db.identities), progress)
+    for person in profile_progress.items(identity_db.identities):
         trusted = identity_profiles.select_diverse_samples(
             grouped.get(person, []),
             limit=bounded_limit,
@@ -2189,6 +2190,7 @@ def evaluate_automatic_policy_benchmark(
     hard_negatives: dict[str, list[np.ndarray]],
     review_prototypes: dict[str, list[np.ndarray]] | None = None,
     evaluation_path: Path = evaluation_enrollment.DEFAULT_PATH,
+    progress=terminal_progress,
 ) -> tuple[bool, dict[str, object]]:
     """Prove the dual-model automatic lane against explicit confirmations."""
     validation = identity_evaluation.evaluation_dataset.load_dataset(evaluation_path)
@@ -2207,7 +2209,8 @@ def evaluate_automatic_policy_benchmark(
         return False, report
 
     faces_by_source = _faces_by_source(cache)
-    for case in validation.cases:
+    status = StageProgress("Independent-match safety benchmark", len(validation.cases), progress)
+    for case in status.items(validation.cases, lambda: f"{report['evaluated']} scored; {report['incorrect']} incorrect"):
         if not case.verified or case.expected_person not in identity_db.identities:
             continue
         source_faces = faces_by_source.get(os.path.realpath(str(case.source)), [])
@@ -2274,7 +2277,8 @@ def automatic_review_gate_signature(
     digest = hashlib.sha256()
     digest.update(secondary_identity_matcher.primary_signature(identity_db).encode("ascii"))
     for module_name in ("recognition_policy.py", "identity_assignment.py", "identity_evaluation.py",
-                        "identity_profiles.py", "secondary_identity_matcher.py", "review_unknown_identities.py"):
+                        "identity_profiles.py", "secondary_identity_matcher.py", "review_unknown_identities.py",
+                        "identity_confirmations.py", "verified_references.py"):
         digest.update(sort_photos.content_identity.content_sha256(Path(__file__).with_name(module_name)).encode("ascii"))
     digest.update(secondary_identity_matcher.identity_signature(secondary_db).encode("ascii"))
     # Calibration and pose changes can alter decisions without changing the
@@ -2336,6 +2340,7 @@ def prepare_automatic_review_gate(
     requested: bool,
     output_dir: Path,
     review_prototypes: dict[str, list[np.ndarray]] | None = None,
+    progress=terminal_progress,
 ) -> tuple[bool, dict[str, object], str]:
     """Use a cached full-library safety gate before allowing automatic moves."""
     if not requested:
@@ -2347,6 +2352,7 @@ def prepare_automatic_review_gate(
             "Safe auto-match is off because the independent verifier is unavailable.",
         )
 
+    progress("Safety benchmark: checking cached result and input versions...")
     signature = automatic_review_gate_signature(
         identity_db,
         secondary_db=secondary_matcher.db,
@@ -2363,17 +2369,20 @@ def prepare_automatic_review_gate(
         and isinstance(cached.get("allowed"), bool)
     ):
         allowed = bool(cached["allowed"])
+        progress("Safety benchmark: reusing unchanged cached result.")
         return allowed, cached, (
             "Safe auto-match passed the cached full-library safety gate."
             if allowed
             else "Safe auto-match is blocked by the cached safety gate."
         )
 
+    progress("Safety benchmark: inputs changed or no cached result; evaluating primary matcher...")
     primary_allowed, report = identity_evaluation.activation_gate(
         identity_db,
         identity_db,
         cache,
         confirmed_set=None,
+        progress=progress,
     )
     policy_allowed, policy_report = evaluate_automatic_policy_benchmark(
         identity_db,
@@ -2383,6 +2392,7 @@ def prepare_automatic_review_gate(
             sort_photos.IDENTITY_HARD_NEGATIVES_FILE
         ),
         review_prototypes=review_prototypes,
+        progress=progress,
     )
     allowed = bool(primary_allowed and policy_allowed)
     report["automatic_policy"] = policy_report
@@ -3636,16 +3646,21 @@ def main() -> int:
         args.auto_safe or args.auto_safe_preview or args.reprocess_pending
     )
     cache = sort_photos.load_cache()
+    print("Preparing shared confirmed-reference index...", flush=True)
+    reference_index = identity_confirmations.ReferenceIndex(faces_by_source=_faces_by_source(cache))
     secondary_matcher, secondary_status = prepare_secondary_verifier(
         identity_db,
         cache,
         requested=auto_requested,
+        reference_index=reference_index,
     )
     review_prototypes, trusted_review_counts = build_trusted_review_prototypes(
         identity_db,
         cache,
         confirmations_path=sort_photos.IDENTITY_CONFIRMATIONS_FILE,
+        reference_index=reference_index,
     )
+    del reference_index
     decisions_path = args.decisions.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -125,6 +125,30 @@ image gets its own assignment; the other members of a rejected cluster are not
 automatically carried into that person's folder. Multi-face images stay held.
 The existing distance, margin, and quality limits are unchanged.
 
+Daily recovery and Quick Review share a run-scoped confirmed-reference index
+between the independent verifier and trusted-profile builder. Renamed files
+are looked up by person, byte size (when recorded), and SHA-256 rather than
+searching the person's entire folder for every confirmation. Each unchanged
+candidate is hashed at most once within this shared verification run, even if
+the separate bounded hash cache evicts it. No image pixels are retained.
+The index checks size, modification/change timestamps, device, and inode before
+reusing a hash, revalidates lookup hits, and still requires the confirmed face.
+Lookup buckets refresh between stages; new candidate paths enter on the next
+run. This is an in-memory run index, not a permanent exemption from verification.
+
+Terminal progress now names reference indexing/verification, secondary and
+trusted profiles, sample selection, and primary/independent/protected benchmark
+scoring. It reports actual completed/total counts, elapsed time, and hashes
+read/reused. Updates are throttled to avoid flooding the terminal. A cached
+safety-gate hit is explicit; changed inputs still require evaluation. These
+changes apply to newly started processes, not an already-running worker.
+
+Run the isolated reference safety, reuse, progress, and recovery regressions:
+
+```sh
+.venv/bin/python -m unittest test_reference_verification test_daily_identity_recovery
+```
+
 Confirmed exact-content replays are reused only while the matching organized
 copy exists under that person's `photos` folder (including `photos/nude`).
 Missing/different copies, ignored/junk decisions, and explicitly rejected

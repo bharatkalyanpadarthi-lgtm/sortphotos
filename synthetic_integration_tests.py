@@ -1612,7 +1612,7 @@ def test_unknown_review_refreshes_stale_secondary_verifier(tmp: Path) -> None:
     original_build = secondary_identity_matcher.build_database
     builds: list[bool] = []
     secondary_identity_matcher.load = lambda: stale
-    secondary_identity_matcher.build_database = lambda _db, _cache: (
+    secondary_identity_matcher.build_database = lambda _db, _cache, **_kwargs: (
         builds.append(True) or refreshed
     )
     try:
@@ -1646,7 +1646,7 @@ def test_unknown_review_does_not_refresh_unrequested_verifier(tmp: Path) -> None
     original_load = secondary_identity_matcher.load
     original_build = secondary_identity_matcher.build_database
     secondary_identity_matcher.load = lambda: stale
-    secondary_identity_matcher.build_database = lambda _db, _cache: (_ for _ in ()).throw(
+    secondary_identity_matcher.build_database = lambda _db, _cache, **_kwargs: (_ for _ in ()).throw(
         AssertionError("unrequested verifier refresh ran")
     )
     try:

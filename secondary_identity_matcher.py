@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 
 import identity_confirmations
+from pipeline_progress import StageProgress, terminal_progress
 import identity_profiles
 import pipeline_paths
 
@@ -316,6 +317,8 @@ def build_database(
     maximum_core_per_person: int = 6,
     maximum_trusted_per_person: int = 12,
     confirmations_path: Path | None = None,
+    reference_index=None,
+    progress=terminal_progress,
 ) -> SecondaryIdentityDB:
     """Build independent profiles from core references plus trusted corrections.
 
@@ -348,10 +351,13 @@ def build_database(
     db.trusted_signature = trusted_signature
     db.trusted_example_count = trusted_example_count
     app = build_app()
-    faces_by_source: dict[str, list] = defaultdict(list)
+    faces_by_source = reference_index.faces_by_source if reference_index is not None else None
+    if faces_by_source is None:
+        faces_by_source = defaultdict(list)
+        for face in cache.faces:
+            faces_by_source[os.path.realpath(face.src_str)].append(face)
     faces_by_person: dict[str, list] = defaultdict(list)
     for face in cache.faces:
-        faces_by_source[os.path.realpath(face.src_str)].append(face)
         if face.label and face.crop_jpeg:
             faces_by_person[str(face.label).casefold()].append(face)
     canonical_names = {
@@ -359,18 +365,11 @@ def build_database(
     }
     trusted_faces: dict[str, list] = defaultdict(list)
     trusted_seen: set[tuple[str, str, int]] = set()
-    for record in identity_confirmations.load(confirmations_path).get("examples", []):
-        person = canonical_names.get(str(record.get("person", "")).strip().casefold())
-        if person is None:
-            continue
-        source = identity_confirmations.resolve_record(record, faces_by_source)
-        if source is None:
-            continue
+    for person, source, candidates in identity_confirmations.verified_records(
+        confirmations_path, faces_by_source, canonical_names,
+        reference_index=reference_index, progress=progress,
+    ):
         source_key = str(source)
-        candidates = faces_by_source.get(source_key, [])
-        candidates = identity_confirmations.selected_faces(record, candidates)
-        if not candidates:
-            continue
         face = max(candidates, key=lambda value: float(value.quality))
         key = (person.casefold(), source_key, int(face.face_index))
         if key in trusted_seen:
@@ -382,7 +381,9 @@ def build_database(
     prototype_sources: dict[str, list[str]] = {}
     thresholds: dict[str, float] = {}
     counts: dict[str, int] = {}
-    for person_index, person in enumerate(sorted(primary_db.identities, key=str.casefold), 1):
+    people = sorted(primary_db.identities, key=str.casefold)
+    profile_progress = StageProgress("Building secondary profiles", len(people), progress)
+    for person in profile_progress.items(people):
         primary_prototypes = primary_db.prototypes.get(person, [])
         sources = primary_db.prototype_sources.get(person, [])
         selected_faces: list = []
@@ -472,12 +473,11 @@ def build_database(
             prototype_sources[person] = [sample.source for sample in selected]
             thresholds[person] = min(0.30, strict + 0.03)
             counts[person] = len(samples)
-        if person_index % 10 == 0:
-            print(f"Secondary profiles {person_index}/{len(primary_db.identities)}", flush=True)
     db.identities = identities
     db.prototypes = prototypes
     db.prototype_sources = prototype_sources
-    for person in identities:
+    calibration_progress = StageProgress("Calibrating secondary profiles", len(identities), progress)
+    for person in calibration_progress.items(identities):
         _consensus, strict, _nearest = identity_profiles.impostor_aware_thresholds(
             person,
             identities,

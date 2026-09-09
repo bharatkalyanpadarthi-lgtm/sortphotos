@@ -40,8 +40,8 @@ class RecoveryTests(unittest.TestCase):
                                  return_value=(True, {}, "passed")).start()
         self.preparer = patch.object(review, "prepare_secondary_verifier",
                                      return_value=(self.matcher, "ready")).start()
-        patch.object(review, "build_trusted_review_prototypes",
-                     return_value=(self.db.prototypes, {})).start()
+        self.prototypes = patch.object(review, "build_trusted_review_prototypes",
+                                       return_value=(self.db.prototypes, {})).start()
         patch.object(recovery.identity_hard_negatives, "vectors_by_person", return_value={}).start()
         patch.object(review, "review_model_signature", return_value="model-v1").start()
         patch.object(review.appearance_profiles, "query_attributes",
@@ -101,6 +101,15 @@ class RecoveryTests(unittest.TestCase):
         self.preparer.return_value = None, "refresh failed"
         self.assertEqual(self.plan([face], names).counts, {"verifier_unavailable": 1})
         self.assertEqual(names, {4: "person_004"})
+
+    def test_verifier_and_recovery_share_run_index_and_progress(self):
+        face = self.face("alice.jpg", self.alice)
+        self.plan([face], {4: "person_004"})
+        verifier_args = self.preparer.call_args.kwargs
+        profile_args = self.prototypes.call_args.kwargs
+        self.assertIs(verifier_args["reference_index"], profile_args["reference_index"])
+        self.assertIs(verifier_args["progress"], profile_args["progress"])
+        self.assertIs(verifier_args["progress"], self.gate.call_args.kwargs["progress"])
 
     def test_verifier_error_discards_partial_automatic_results(self):
         faces = [self.face("a.jpg", self.alice), self.face("b.jpg", self.bob)]
