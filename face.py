@@ -702,7 +702,7 @@ def count_rows(counts: dict[str, int]) -> list[dict[str, int | str]]:
     ]
 
 
-def source_guard_start(action: dict) -> dict:
+def source_guard_start(action: dict, *, verbose: bool = True) -> dict:
     rid = source_guard_run_id(action)
     before = daily_runner.original_person_counts()
     prefix = daily_runner.SUMMARY_DIR / rid
@@ -712,25 +712,27 @@ def source_guard_start(action: dict) -> dict:
         "violations": prefix.with_name(prefix.name + "_source_count_violations.csv"),
     }
     write_guard_csv(paths["before"], count_rows(before))
-    print(
-        f"Source guard: {daily_runner.original_person_total(before)} original photos "
-        f"across {len(before)} person folders."
-    )
-    print(f"Source guard before CSV: {paths['before']}")
+    if verbose:
+        print(
+            f"Source guard: {daily_runner.original_person_total(before)} original photos "
+            f"across {len(before)} person folders."
+        )
+        print(f"Source guard before CSV: {paths['before']}")
     return {"run_id": rid, "before": before, "paths": paths}
 
 
-def source_guard_finish(guard: dict, *, allow_decrease: bool = False) -> int:
+def source_guard_finish(guard: dict, *, allow_decrease: bool = False, verbose: bool = True) -> int:
     before = {str(k): int(v) for k, v in guard["before"].items()}
     after = daily_runner.original_person_counts()
     paths = guard["paths"]
     violations = daily_runner.source_count_violations(before, after)
     write_guard_csv(paths["after"], count_rows(after))
     if not violations:
-        print(
-            f"Source guard OK: {daily_runner.original_person_total(before)} -> "
-            f"{daily_runner.original_person_total(after)} original photos."
-        )
+        if verbose:
+            print(
+                f"Source guard OK: {daily_runner.original_person_total(before)} -> "
+                f"{daily_runner.original_person_total(after)} original photos."
+            )
         return 0
     write_guard_csv(paths["violations"], violations)
     if allow_decrease:
@@ -769,7 +771,8 @@ def run_steps(action: dict, extra_args: list[str], *, run_id_value: str = "") ->
             if extra_args and len(steps) == 1:
                 cmd.extend(extra_args)
             prefix = f"[{i}/{len(steps)}] " if len(steps) > 1 else ""
-            print(f"\n→ {prefix}Running: {' '.join(cmd)}\n", flush=True)
+            if action["key"] != "daily" or "--verbose" in extra_args:
+                print(f"\n→ {prefix}Running: {' '.join(cmd)}\n", flush=True)
             env = os.environ.copy()
             if run_id_value:
                 env["PHOTO_PIPELINE_RUN_ID"] = run_id_value
@@ -801,6 +804,9 @@ def run_action(action: dict, extra_args: list[str] | None = None) -> int:
         return 0
     if action.get("read_only"):
         return run_steps(action, extra_args)
+    compact_daily = action["key"] == "daily" and "--verbose" not in extra_args
+    if compact_daily:
+        print("\nDaily photo sorting\nChecking library safety before starting...", flush=True)
     allow_original_count_decrease = bool(action.get("allow_original_count_decrease"))
     cache_rc = cache_guard_check(action)
     if cache_rc != 0:
@@ -810,16 +816,19 @@ def run_action(action: dict, extra_args: list[str] | None = None) -> int:
         label=f"face_{action['key']}_start",
         people_dir=daily_runner.PEOPLE,
     )
-    source_manifest.print_validation(manifest_check)
+    if not compact_daily or not manifest_check.ok:
+        source_manifest.print_validation(manifest_check)
     if not manifest_check.ok:
         print("ERROR: protected source manifest blocked this command.")
         print("Fix or recover missing originals before running commands that may refresh cache/indexes.")
         return SOURCE_GUARD_EXIT
 
-    guard = source_guard_start(action)
+    guard = source_guard_start(action, verbose=not compact_daily)
     command_rc = run_steps(action, extra_args, run_id_value=str(guard["run_id"]))
 
-    guard_rc = source_guard_finish(guard, allow_decrease=allow_original_count_decrease)
+    if compact_daily:
+        print("Checking final library protection...", flush=True)
+    guard_rc = source_guard_finish(guard, allow_decrease=allow_original_count_decrease, verbose=not compact_daily)
     if guard_rc != 0:
         return guard_rc
     if allow_original_count_decrease and command_rc in {130, -2}:
@@ -833,7 +842,8 @@ def run_action(action: dict, extra_args: list[str] | None = None) -> int:
         people_dir=daily_runner.PEOPLE,
     )
     if post_manifest_check.ok:
-        source_manifest.print_validation(post_manifest_check)
+        if not compact_daily:
+            source_manifest.print_validation(post_manifest_check)
     elif not allow_original_count_decrease:
         source_manifest.print_validation(post_manifest_check)
         return SOURCE_GUARD_EXIT
@@ -844,7 +854,10 @@ def run_action(action: dict, extra_args: list[str] | None = None) -> int:
         reason=f"successful face.py action: {action['key']}",
         people_dir=daily_runner.PEOPLE,
     )
-    print(f"Source manifest promoted: {manifest_path}")
+    if compact_daily:
+        print("Library protection verified.", flush=True)
+    else:
+        print(f"Source manifest promoted: {manifest_path}")
     return 0
 
 

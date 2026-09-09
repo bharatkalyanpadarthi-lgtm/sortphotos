@@ -18,10 +18,12 @@ from the launcher for now.
 from __future__ import annotations
 
 import argparse
+import codecs
 import csv
 import json
 import os
 import selectors
+import signal
 import subprocess
 import sys
 import time
@@ -29,6 +31,7 @@ from pathlib import Path
 
 import source_manifest
 import pipeline_paths
+from daily_progress import CommandProgress, OutputLines, STEP_LABELS, duration
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SORTED = pipeline_paths.SORTED_ROOT
@@ -224,12 +227,13 @@ def check_source_guard(state: dict, stage: str) -> tuple[bool, dict[str, int], l
     return len(violations) == 0, after, violations
 
 
-def check_source_manifest(state: dict, stage: str) -> source_manifest.ManifestValidation:
+def check_source_manifest(state: dict, stage: str, *, verbose: bool = True) -> source_manifest.ManifestValidation:
     result = source_manifest.validate_current(
         label=f"daily_run_{state['run_id']}_{stage}",
         people_dir=PEOPLE,
     )
-    source_manifest.print_validation(result)
+    if verbose or not result.ok:
+        source_manifest.print_validation(result)
     state["source_manifest"] = {
         "last_checked_stage": stage,
         "last_checked_at": int(time.time()),
@@ -531,60 +535,86 @@ def step_list(batch_size: int) -> list[dict]:
     ]
 
 
-def run_command(cmd: list[str], log_path: Path) -> int:
+def run_command(cmd: list[str], log_path: Path, *, verbose: bool = True, step_name: str = "") -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
     run_id_value = ""
     if "daily_run_" in log_path.stem:
         run_id_value = log_path.stem.replace("daily_run_", "", 1)
     if run_id_value:
         env["PHOTO_PIPELINE_RUN_ID"] = f"daily_run_{run_id_value}"
-    with log_path.open("a", encoding="utf-8") as log:
-        log.write(f"\n$ {' '.join(cmd)}\n")
+    with log_path.open("ab") as log:
+        log.write(f"\n$ {' '.join(cmd)}\n".encode("utf-8"))
         log.flush()
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, bufsize=1, env=env)
+                                bufsize=0, env=env)
         assert proc.stdout is not None
         selector = selectors.DefaultSelector()
         selector.register(proc.stdout, selectors.EVENT_READ)
         started_at = time.monotonic()
-        last_visible_output = started_at
+        last_flush = started_at
         command_name = Path(cmd[1] if len(cmd) > 1 else cmd[0]).name
+        progress = CommandProgress(STEP_LABELS.get(step_name, command_name))
+        lines = OutputLines(progress.consume)
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         try:
             while True:
                 events = selector.select(timeout=1.0)
                 if events:
-                    line = proc.stdout.readline()
-                    if line:
-                        print(line, end="", flush=True)
-                        log.write(line)
-                        log.flush()
-                        last_visible_output = time.monotonic()
-                        continue
-                    if proc.poll() is not None:
+                    chunk = os.read(proc.stdout.fileno(), 65536)
+                    if not chunk:
                         break
+                    log.write(chunk)
+                    text = decoder.decode(chunk)
+                    if verbose:
+                        print(text, end="", flush=True)
+                    else:
+                        lines.feed(text)
                 elif proc.poll() is not None:
                     break
-
                 now = time.monotonic()
-                if now - last_visible_output >= 30.0:
-                    elapsed_seconds = max(0, int(now - started_at))
-                    heartbeat = (
-                        f"[progress] {command_name} is still working "
-                        f"({elapsed_seconds // 60}m {elapsed_seconds % 60:02d}s elapsed).\n"
-                    )
-                    print(heartbeat, end="", flush=True)
-                    log.write(heartbeat)
+                if now - last_flush >= 1.0:
                     log.flush()
-                    last_visible_output = now
-
-            for line in proc.stdout:
-                print(line, end="", flush=True)
-                log.write(line)
+                    last_flush = now
+                if not verbose:
+                    progress.tick()
+            tail = decoder.decode(b"", final=True)
+            if verbose:
+                print(tail, end="", flush=True)
+            else:
+                lines.feed(tail)
+                lines.finish()
             log.flush()
-            return proc.wait()
+            returncode = proc.wait()
+            if not verbose:
+                progress.finish(returncode)
+            return returncode
+        except KeyboardInterrupt:
+            print("\nStopping this step safely; completed work remains saved.", flush=True)
+            # Keep workers in the terminal's existing process group so Ctrl+C
+            # continues to reach nested workers as well as the supervisor.
+            for sig, timeout in ((signal.SIGINT, 10), (signal.SIGTERM, 5), (signal.SIGKILL, 5)):
+                try:
+                    proc.send_signal(sig)
+                except ProcessLookupError:
+                    break
+                try:
+                    proc.wait(timeout=timeout)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            return 130
         finally:
             selector.close()
+            proc.stdout.close()
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
 
 
 def write_summary(path: Path, state: dict, before: dict, after: dict, status: str) -> None:
@@ -605,7 +635,34 @@ def write_summary(path: Path, state: dict, before: dict, after: dict, status: st
         json.dump(summary, f, indent=2, sort_keys=True)
 
 
-def print_summary(before: dict, after: dict, summary_path: Path) -> None:
+def print_summary(before: dict, after: dict, summary_path: Path, *, verbose: bool = True) -> None:
+    if not verbose:
+        print("\nDaily run complete - original-file safety checks passed.")
+        print(f"  Photo inbox: {before.get('to_process_images', 0):,} -> {after.get('to_process_images', 0):,} remaining")
+        video_before = int(before.get("to_process_videos", 0)) + int(before.get("legacy_videos", 0))
+        video_after = int(after.get("to_process_videos", 0)) + int(after.get("legacy_videos", 0))
+        if video_before or video_after:
+            print(f"  Video inbox: {video_before:,} -> {video_after:,} remaining")
+        print(f"  Library photo entries: {before.get('person_original_images', 0):,} -> {after.get('person_original_images', 0):,}")
+        unknown = int(after.get("unassigned_unknown_identity", 0))
+        review_keys = ("unassigned_no_face", "unassigned_face_quality", "unassigned_multi_face_review")
+        other_review = sum(int(after.get(key, 0)) for key in review_keys)
+        problems = sum(int(after.get(key, 0)) for key in (
+            "unassigned_copy_failed", "unassigned_processing_failed", "unassigned_unreadable"))
+        print(f"  Waiting for review (including earlier runs): {unknown:,} unknown identity; {other_review:,} other image reviews")
+        if problems:
+            print(f"  Files needing technical attention: {problems:,} (copy, read or processing problems)")
+        video_review = sum(int(after.get(key, 0)) for key in (
+            "video_review_multiple_people", "video_review_unknown_identity", "video_review_no_usable_face"))
+        if video_review:
+            print(f"  Videos waiting for review (including earlier runs): {video_review:,}")
+        if unknown:
+            print("  Review unknown faces when ready: face unknown-review")
+        if after.get("to_process_images", 0) or video_after:
+            print("  Files remain in the inbox; check the log before starting another run.")
+        print(f"  Full log: {summary_path.with_suffix('.log')}")
+        print(f"  Saved summary: {summary_path}")
+        return
     print()
     print("Daily Run Summary")
     print("=" * 60)
@@ -702,6 +759,8 @@ def main() -> int:
                         help="Run maintenance steps even when To Process has no images.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print what daily would do without running any step.")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Show full worker diagnostics instead of compact progress; full logs are always saved.")
     args = parser.parse_args()
 
     if args.dry_run:
@@ -734,6 +793,7 @@ def main() -> int:
             print("Close other apps, then re-run. Override with --ignore-low-memory.")
             return 2
         rid = run_id()
+        print("Preparing library counts and checking existing originals...", flush=True)
         before_snapshot = snapshot()
         state = {
             "run_id": rid,
@@ -756,14 +816,17 @@ def main() -> int:
     before = state["before"]
     profile = state.get("memory") or memory_profile()
     batch_size = int(profile.get("batch_size") or 50)
-    if profile.get("available_mb") is not None:
-        print(f"Memory mode: {profile['message']} ({profile['available_mb']} MB available), batch size {batch_size}.")
-    else:
-        print(f"Memory mode: {profile['message']}, batch size {batch_size}.")
+    if args.verbose:
+        print(f"Memory mode: {profile['message']} ({profile.get('available_mb', 'unknown')} MB available), batch size {batch_size}.")
+    elif batch_size < 50:
+        print("Using smaller batches because available memory is low.", flush=True)
     guard = state.get("source_guard", {})
-    print(f"Source guard baseline: {guard.get('before_total', original_person_total(guard.get('before', {})))} original photos "
-          f"across {len(guard.get('before', {}))} person folders.")
-    if guard.get("before_csv"):
+    print(f"Inbox at run start: {before.get('to_process_images', 0):,} photos, "
+          f"{int(before.get('to_process_videos', 0)) + int(before.get('legacy_videos', 0)):,} videos.", flush=True)
+    if args.verbose:
+        print(f"Source guard baseline: {guard.get('before_total', original_person_total(guard.get('before', {})))} original photos "
+              f"across {len(guard.get('before', {}))} person folders.")
+    if args.verbose and guard.get("before_csv"):
         print(f"Source guard before CSV: {guard['before_csv']}")
 
     ok, _, violations = check_source_guard(state, "start")
@@ -776,7 +839,7 @@ def main() -> int:
             print(f"  {row['person']}: {row['before']} -> {row['after']} ({row['delta']})")
         return SOURCE_GUARD_EXIT
 
-    manifest_result = check_source_manifest(state, "start")
+    manifest_result = check_source_manifest(state, "start", verbose=args.verbose)
     save_state(state)
     if not manifest_result.ok:
         print("ERROR: protected source manifest failed before running steps.")
@@ -785,6 +848,7 @@ def main() -> int:
 
     log_path = SUMMARY_DIR / f"daily_run_{state['run_id']}.log"
     summary_path = SUMMARY_DIR / f"daily_run_{state['run_id']}.json"
+    print(f"Full diagnostics are saved to: {log_path}", flush=True)
     steps = step_list(batch_size)
     empty_inbox = (
         int(before.get("to_process_images", 0)) == 0
@@ -793,11 +857,12 @@ def main() -> int:
     )
     skip_when_empty = empty_inbox_skippable_step_names()
     for index, step in enumerate(steps, start=1):
+        label = step["desc"] if args.verbose else STEP_LABELS[step["name"]]
         if state["steps"].get(step["name"], {}).get("status") == "completed":
-            print(f"[{index}/{len(steps)}] Skipping completed step: {step['desc']}")
+            print(f"[{index}/{len(steps)}] {label} - already completed", flush=True)
             continue
         if empty_inbox and step["name"] in skip_when_empty:
-            print(f"[{index}/{len(steps)}] Skipping empty-inbox step: {step['desc']}")
+            print(f"[{index}/{len(steps)}] {label} - skipped (empty inbox)", flush=True)
             state["steps"][step["name"]] = {
                 "status": "skipped_empty_inbox",
                 "finished_at": int(time.time()),
@@ -817,14 +882,15 @@ def main() -> int:
                 print("Close other apps, then run: python face.py daily --resume")
                 return 2
         print()
-        print(f"[{index}/{len(steps)}] {step['desc']}")
+        print(f"[{index}/{len(steps)}] {label}", flush=True)
         state["steps"][step["name"]] = {"status": "running", "started_at": int(time.time())}
         save_state(state)
         step_started = time.perf_counter()
-        rc = run_command(step["cmd"], log_path)
+        rc = run_command(step["cmd"], log_path, verbose=args.verbose, step_name=step["name"])
         elapsed = time.perf_counter() - step_started
         state.setdefault("timings_seconds", {})[step["name"]] = round(elapsed, 3)
-        print(f"Step timing: {step['name']} {elapsed:.1f}s (exit {rc})", flush=True)
+        if args.verbose:
+            print(f"Step timing: {step['name']} {elapsed:.1f}s (exit {rc})", flush=True)
         if rc != 0:
             state["steps"][step["name"]] = {
                 "status": "failed",
@@ -834,9 +900,12 @@ def main() -> int:
             save_state(state)
             after = snapshot()
             write_summary(summary_path, state, before, after, "failed")
-            print(f"ERROR: step failed: {step['name']} (exit {rc})")
-            print(f"Resume with: python face.py daily --resume")
+            print(f"Stopped: {label} (exit {rc}). Completed steps remain saved.")
+            print("Resume with: face daily --resume")
+            print(f"Full error details: {log_path}")
             return rc
+        if not args.verbose:
+            print("  Checking that originals are preserved...", flush=True)
         ok, guarded_after, violations = check_source_guard(state, step["name"])
         if not ok:
             state["steps"][step["name"]] = {
@@ -860,7 +929,7 @@ def main() -> int:
                 print(f"  ... {len(violations) - 10} more")
             print(f"Resume after fixing counts with: python face.py daily --resume")
             return SOURCE_GUARD_EXIT
-        manifest_result = check_source_manifest(state, step["name"])
+        manifest_result = check_source_manifest(state, step["name"], verbose=args.verbose)
         save_state(state)
         if not manifest_result.ok:
             state["steps"][step["name"]] = {
@@ -880,7 +949,10 @@ def main() -> int:
             return SOURCE_GUARD_EXIT
         state["steps"][step["name"]] = {"status": "completed", "finished_at": int(time.time())}
         save_state(state)
+        if not args.verbose:
+            print(f"  Done ({duration(time.perf_counter() - step_started)}, including safety checks).", flush=True)
 
+    print("Finalizing library counts and safety checks...", flush=True)
     after = snapshot()
     ok, _, violations = check_source_guard(state, "completed")
     if not ok:
@@ -892,7 +964,7 @@ def main() -> int:
         for row in violations[:10]:
             print(f"  {row['person']}: {row['before']} -> {row['after']} ({row['delta']})")
         return SOURCE_GUARD_EXIT
-    manifest_result = check_source_manifest(state, "completed_before_promote")
+    manifest_result = check_source_manifest(state, "completed_before_promote", verbose=args.verbose)
     save_state(state)
     if not manifest_result.ok:
         write_summary(summary_path, state, before, after, "failed_source_manifest_guard")
@@ -908,7 +980,7 @@ def main() -> int:
     state.setdefault("source_manifest", {})["promoted_manifest_path"] = str(manifest_path)
     save_state(state)
     write_summary(summary_path, state, before, after, "completed")
-    print_summary(before, after, summary_path)
+    print_summary(before, after, summary_path, verbose=args.verbose)
     clear_state()
     return 0
 

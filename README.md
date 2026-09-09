@@ -39,6 +39,24 @@ scans `~/Pictures` by default, and `all-views` creates legacy hardlinked views.
 Neither is part of normal daily ingest. This menu cleanup does not change
 recognition thresholds, benchmark gates, photo routing or safety checks.
 
+### Daily Progress
+
+Option 1 shows compact progress by default: the current step, actual batch or
+file counts where available, cache reuse, warnings and failures. Internal
+model/provider setup, per-person reference lookups and repeated report paths
+stay in the full worker log. Updates are throttled; percentages describe the
+named substage, not a guessed completion percentage for the whole run.
+
+The terminal prints the log location and a short final summary. Review totals
+are explicitly labelled as including earlier runs. Safety checks, processing
+order and recognition policies are unchanged. No extra library scans are
+performed for progress reporting.
+
+For troubleshooting, use `face daily --verbose` (or
+`face daily --resume --verbose`). Full worker diagnostics are saved regardless
+of display mode. Resume remains `face daily --resume`; interrupted steps do
+not get marked completed.
+
 ## Storage Layout
 
 The external SSD is the source of truth for photo data:
