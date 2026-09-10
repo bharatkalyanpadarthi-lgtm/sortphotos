@@ -319,12 +319,15 @@ def build_trusted_review_prototypes(
         faces_by_source = _faces_by_source(cache)
     grouped: dict[str, list[identity_profiles.ReferenceSample]] = {}
     seen: set[tuple[str, str, int]] = set()
+    rejected_references = identity_hard_negatives.ReferenceRejections(sort_photos.IDENTITY_HARD_NEGATIVES_FILE)
     for person, source, candidates in identity_confirmations.verified_records(
         confirmations_path, faces_by_source, canonical_names,
         reference_index=reference_index, progress=progress,
     ):
         source_key = os.path.realpath(str(source))
         face = max(candidates, key=lambda value: float(value.quality))
+        if rejected_references.rejects(person, face.embedding):
+            continue
         key = (person.casefold(), source_key, int(face.face_index))
         if key in seen:
             continue

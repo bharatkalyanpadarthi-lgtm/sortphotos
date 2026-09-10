@@ -3,8 +3,8 @@
 Rebuild face cache and identity DB by relinking old cached embeddings to
 current photos_by_person files.
 
-This avoids slow re-detection after a restore/rename. It only uses exact
-(mtime, size) file-signature matches and never modifies image files.
+This avoids slow re-detection after a restore/rename. File signatures narrow
+candidates, but face transfers require content hashes. Image files never change.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ import numpy as np
 
 import operation_ledger
 import sort_photos
+import content_identity
 
 for _name in ("CacheState", "CachedFace", "FaceRecord", "LabelingState", "IdentityDB"):
     if hasattr(sort_photos, _name):
@@ -95,6 +96,31 @@ def file_sig(path: Path) -> tuple[int, int] | None:
 def signatures_equal(left: tuple[float, int] | tuple[int, int],
                      right: tuple[float, int] | tuple[int, int]) -> bool:
     return abs(float(left[0]) - float(right[0])) < 0.000001 and int(left[1]) == int(right[1])
+
+
+def content_verified_faces(path: Path, faces: list) -> list:
+    candidates = [face for face in faces if getattr(face, "content_sha256", "")]
+    if not candidates:
+        return []
+    try:
+        digest = content_identity.content_sha256(path)
+    except OSError:
+        return []
+    return [face for face in candidates if face.content_sha256 == digest]
+
+
+def validate_relocated_faces(cache, relocated: set[str]) -> None:
+    grouped = defaultdict(list)
+    for face in cache.faces:
+        if face.src_str in relocated:
+            grouped[face.src_str].append(face)
+    invalid = {path for path, faces in grouped.items()
+               if len(content_verified_faces(Path(path), faces)) != len(faces)}
+    for path in invalid:
+        cache.file_signatures.pop(path, None)
+    cache.faces = [face for face in cache.faces if face.src_str not in invalid]
+    if invalid:
+        print(f"  Deferred for fresh detection (unverified content): {len(invalid):,}")
 
 
 def backup(path: Path, suffix: str) -> Path | None:
@@ -181,6 +207,7 @@ def relink_from_rename_plan(old_cache: sort_photos.CacheState,
             counts["unmapped_faces"] += 1
 
     print()
+    validate_relocated_faces(new_cache, set(mapping.values()))
     print("Cache relink from rename plan")
     print(f"  Rename plan:          {rename_plan}")
     print(f"  Plan mappings:        {len(mapping):,}")
@@ -276,6 +303,7 @@ def relink_from_move_mapping(old_cache: sort_photos.CacheState,
             counts["mapped_faces"] += 1
 
     print()
+    validate_relocated_faces(new_cache, {destination for source, destination in mapping.items() if source != destination})
     print(f"Cache relink from {label}")
     print(f"  Move mappings:        {len(mapping):,}")
     print(f"  Kept cache files:     {counts['kept_files']:,}")
@@ -322,11 +350,9 @@ def main() -> int:
                         help="Sorted root for operation ledgers.")
     parser.add_argument("--identity-max-faces", type=int, default=80)
     parser.add_argument("--include-unmatched-signatures", action="store_true",
-                        help="Also cache current files that only match by file "
-                             "signature but have no usable face in the old cache. "
-                             "Default is false so unmatched images remain pending "
-                             "for cache_tools rehydrate instead of being treated "
-                             "as no-face.")
+                        help="Deprecated compatibility option; unmatched files "
+                             "always remain pending for fresh detection. File "
+                             "signatures alone cannot prove a no-face result.")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
@@ -390,14 +416,11 @@ def main() -> int:
         if sig is None:
             counts["stat_error"] += 1
             continue
-        matches = faces_by_sig.get(sig, [])
+        matches = content_verified_faces(path, faces_by_sig.get(sig, []))
         if not matches:
             counts["no_old_match"] += 1
-            if args.include_unmatched_signatures:
-                new_cache.file_signatures[str(path)] = sig
-                counts["matched_no_face_files"] += 1
-            else:
-                counts["skipped_unmatched"] += 1
+            # A signature cannot prove that a different file has no face.
+            counts["skipped_unmatched"] += 1
             continue
         added_for_file = 0
         for old_face in matches:

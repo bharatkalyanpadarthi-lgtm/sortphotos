@@ -1302,6 +1302,7 @@ def build_identity_db_from_person_folders(people_dir: Path,
             log.warning("Ignoring unreadable identity build checkpoint: %s", exc)
     db = IdentityDB(config_fingerprint=config_fingerprint())
     work: list[tuple[Path, list[Path], str, list[Path]]] = []
+    rejected_references = identity_hard_negatives.ReferenceRejections(IDENTITY_HARD_NEGATIVES_FILE)
     for person_dir in person_dirs:
         name = person_dir.name
         if name.startswith(("_", ".")) or not is_real_person_label(name):
@@ -1321,6 +1322,11 @@ def build_identity_db_from_person_folders(people_dir: Path,
             if confirmed_paths
             else source_signature
         )
+        rejection_signature = rejected_references.signature(name)
+        if rejection_signature:
+            signature = hashlib.sha256(
+                f"{signature}:reference-rejections-v1:{rejection_signature}".encode("ascii")
+            ).hexdigest()
         if (
             partial is not None
             and name in partial.identities
@@ -1409,6 +1415,8 @@ def build_identity_db_from_person_folders(people_dir: Path,
                     app = _build_app()
                 usable_faces = _detect_one_image(image, app)
             for face in usable_faces:
+                if rejected_references.rejects(name, face.embedding):
+                    continue
                 sample = identity_profiles.ReferenceSample(
                     source=image_key,
                     embedding=np.asarray(face.embedding, dtype=np.float32),
@@ -1442,7 +1450,8 @@ def build_identity_db_from_person_folders(people_dir: Path,
         )
         if not selected:
             log.warning("No usable identity references for %s; keeping it out of auto-match.", name)
-            if existing is not None and name in existing.identities:
+            if (existing is not None and name in existing.identities
+                    and not rejected_references.signature(name)):
                 copy_identity_profile(existing, db, name)
             continue
         # Keep the centroid tied to the dominant, repeatedly observed identity.

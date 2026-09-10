@@ -134,3 +134,28 @@ def vectors_by_person(path: Path) -> dict[str, list[np.ndarray]]:
     except OSError:
         signature = (0, 0)
     return _cached_vectors(str(path.resolve(strict=False)), *signature)
+
+
+class ReferenceRejections:
+    """Exclude exact rejected face evidence from positive reference training."""
+
+    def __init__(self, path: Path):
+        self.vectors: dict[str, list[np.ndarray]] = {}
+        self.digests: dict[str, list[str]] = {}
+        for item in load(path)["examples"]:
+            name = str(item.get("person", "")).strip().casefold()
+            value = decode_embedding(item)
+            if not name or value is None or not np.isfinite(value).all():
+                continue
+            self.vectors.setdefault(name, []).append(value)
+            self.digests.setdefault(name, []).append(hashlib.sha256(value.tobytes()).hexdigest())
+
+    def signature(self, person: str) -> str:
+        values = self.digests.get(person.casefold(), [])
+        return hashlib.sha256("\n".join(sorted(set(values))).encode()).hexdigest() if values else ""
+
+    def rejects(self, person: str, embedding: np.ndarray) -> bool:
+        query = np.asarray(embedding, dtype=np.float32).reshape(-1)
+        query = query / max(float(np.linalg.norm(query)), 1e-9)
+        return any(value.shape == query.shape and np.allclose(value, query, atol=1e-6, rtol=0)
+                   for value in self.vectors.get(person.casefold(), []))
