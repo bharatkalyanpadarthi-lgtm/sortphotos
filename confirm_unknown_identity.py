@@ -15,6 +15,7 @@ from pathlib import Path
 import identity_confirmations
 import evaluation_enrollment
 import pipeline_paths
+import person_aliases
 import recover_no_usable_faces
 import sort_photos
 
@@ -24,8 +25,10 @@ UNKNOWN_ROOT = (
 )
 
 
-def canonical_person(value: str, identity_db: sort_photos.IdentityDB) -> str | None:
-    wanted = value.strip().casefold()
+def canonical_person(value: str, identity_db: sort_photos.IdentityDB,
+                     *, people_root: Path | None = None) -> str | None:
+    root = people_root or pipeline_paths.PEOPLE_ROOT
+    wanted = person_aliases.canonical_folder(value.strip(), root).casefold()
     return next(
         (name for name in identity_db.identities if name.casefold() == wanted),
         None,

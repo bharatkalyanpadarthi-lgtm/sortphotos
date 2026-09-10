@@ -3869,6 +3869,11 @@ def organize_originals(records: list[FaceRecord],
                        input_dir: Path | None = None,
                        output_dir: Path | None = None) -> set[Path]:
     from tqdm import tqdm
+    from person_aliases import canonical_folder
+
+    # A retained recognition profile may still use a completed merge's old name.
+    name_map.update({cid: canonical_folder(name, originals_dir)
+                     for cid, name in name_map.items()})
 
     best_per_pair: dict[tuple[str, Path], FaceRecord] = {}
     for r in records:

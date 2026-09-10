@@ -1674,7 +1674,8 @@ def canonical_person(
     allow_new: bool = False,
     people_root: Path | None = None,
 ) -> str:
-    person = confirm_unknown_identity.canonical_person(value, identity_db)
+    person = confirm_unknown_identity.canonical_person(
+        value, identity_db, people_root=people_root)
     if person is not None:
         return person
     if not allow_new:

@@ -283,6 +283,8 @@ def copy_to_person(source: Path,
                    *,
                    dry_run: bool,
                    ) -> tuple[Path | None, bool]:
+    from person_aliases import canonical_folder
+    person = canonical_folder(person, DEFAULT_PEOPLE)
     person_dir = DEFAULT_PEOPLE / person
     if source_hash in existing_hashes[person]:
         return None, True
@@ -319,6 +321,8 @@ def merge_recovered_faces_into_cache(
     cache: sort_photos.CacheState,
     entries: list[tuple[Path, sort_photos.CachedFace, str]],
 ) -> list[sort_photos.CachedFace]:
+    from person_aliases import canonical_folder
+
     merged: list[sort_photos.CachedFace] = []
     destination_paths = {os.path.realpath(str(path)) for path, _face, _person in entries}
     cache.file_signatures = {
@@ -331,6 +335,7 @@ def merge_recovered_faces_into_cache(
     ]
     merged_keys: set[tuple[str, int]] = set()
     for destination, face, person in entries:
+        person = canonical_folder(person, DEFAULT_PEOPLE)
         if not destination.is_file():
             continue
         destination_text = str(destination.resolve())
