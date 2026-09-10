@@ -497,10 +497,9 @@ ACTIONS = [
     {
         "key": "refs",
         "aliases": ["references", "build-refs"],
-        "label": "Build Face References",
-        "desc": "Maintenance: build optional AI/reference matching DB from the configured Face References folder",
-        "script": "build_celeb_centroids.py",
-        "args": ["--max-per-person", "20"],
+        "label": "Refresh Face References",
+        "desc": "Incrementally verify changed Face References and activate supplements only after safety checks pass",
+        "script": "face_reference_library.py",
         "hidden": True,
     },
     {

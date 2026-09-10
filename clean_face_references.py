@@ -286,15 +286,8 @@ def rename_kept(person_dir: Path, keep_paths: list[Path], apply: bool) -> int:
 
 
 def rebuild_refs(max_per_person: int) -> int:
-    script = Path(__file__).resolve().parent / "build_celeb_centroids.py"
-    cmd = [
-        sys.executable,
-        str(script),
-        str(DEFAULT_REF_DIR),
-        str(Path.home() / ".face_sort_cache" / "reference_centroids.pkl"),
-        "--max-per-person",
-        str(max_per_person),
-    ]
+    script = Path(__file__).resolve().parent / "face_reference_library.py"
+    cmd = [sys.executable, str(script)]
     return subprocess.run(cmd, check=False).returncode
 
 
@@ -334,7 +327,7 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true",
                         help="Move/rename files. Default is dry-run.")
     parser.add_argument("--rebuild", action="store_true",
-                        help="Rebuild reference centroids after cleaning.")
+                        help="Refresh verified reference profiles through the safety gate after cleaning.")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -394,7 +387,7 @@ def main() -> int:
 
     if args.rebuild:
         print()
-        print("Rebuilding Face References DB...")
+        print("Refreshing verified Face References...")
         return rebuild_refs(max(1, int(args.max_keep)))
     return 0
 

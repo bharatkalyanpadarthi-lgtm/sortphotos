@@ -3938,6 +3938,9 @@ def main() -> int:
         return 2
     identity_db = sort_photos.normalize_identity_db(identity_db)
     hard_negatives_path = sort_photos.IDENTITY_HARD_NEGATIVES_FILE
+    if not (args.validate_auto_only or args.reconcile_preview or args.reconcile_only or args.auto_safe_preview):
+        import face_reference_library
+        identity_db = face_reference_library.refresh(identity_db, pipeline_paths.PEOPLE_ROOT)
     hard_negatives = identity_hard_negatives.vectors_by_person(hard_negatives_path)
     auto_requested = bool(
         args.auto_safe or args.auto_safe_preview or args.reprocess_pending or args.validate_auto_only

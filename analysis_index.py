@@ -309,6 +309,21 @@ class AnalysisIndex:
         ).fetchone()
         if row is None or row[3] is None:
             return None
+        return self._detection_set(canonical, detector_config, row)
+
+    def reusable_detections(self, path: Path, detector_config: str) -> CachedDetectionSet | None:
+        """Reuse verified analysis for byte-identical copies or renamed files."""
+        digest = self.content_sha256(path)
+        if not digest:
+            return None
+        row = self.connection.execute(
+            "SELECT width, height, orientation, detection_status, path FROM asset_analysis "
+            "WHERE detection_sha256=? AND detection_config=? AND detection_status IS NOT NULL LIMIT 1",
+            (digest, detector_config),
+        ).fetchone()
+        return self._detection_set(str(row[4]), detector_config, row[:4]) if row else None
+
+    def _detection_set(self, canonical: str, detector_config: str, row) -> CachedDetectionSet:
         records = self.connection.execute(
             "SELECT face_index, det_score, bbox_size, sharpness, yaw_proxy, quality, "
             "embedding, embedding_dimension, image_phash, image_phash_bits, crop_jpeg, label, "

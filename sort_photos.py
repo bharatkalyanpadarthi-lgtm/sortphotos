@@ -45,6 +45,7 @@ import pickle
 import re
 import shutil
 import subprocess
+import sqlite3
 import sys
 import tempfile
 import time
@@ -431,6 +432,8 @@ class IdentityDB:
     nearest_impostor_distances: dict[str, float] = field(default_factory=dict)
     source_signatures: dict[str, str] = field(default_factory=dict)
     prototype_sources: dict[str, list[str]] = field(default_factory=dict)
+    reference_sources: dict[str, list[str]] = field(default_factory=dict)
+    reference_signatures: dict[str, str] = field(default_factory=dict)
     pose_prototypes: dict[str, dict[str, list[np.ndarray]]] = field(default_factory=dict)
     pose_prototype_sources: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     appearance_prototypes: dict[str, dict[str, list[np.ndarray]]] = field(default_factory=dict)
@@ -990,6 +993,10 @@ def normalize_identity_db(db: IdentityDB) -> IdentityDB:
         db.source_signatures = {}
     if not hasattr(db, "prototype_sources"):
         db.prototype_sources = {}
+    if not hasattr(db, "reference_sources"):
+        db.reference_sources = {}
+    if not hasattr(db, "reference_signatures"):
+        db.reference_signatures = {}
     if not hasattr(db, "pose_prototypes"):
         db.pose_prototypes = {}
     if not hasattr(db, "pose_prototype_sources"):
@@ -1235,6 +1242,10 @@ def copy_identity_profile(source: IdentityDB, destination: IdentityDB, name: str
         destination.source_signatures[name] = source.source_signatures[name]
     if name in source.prototype_sources:
         destination.prototype_sources[name] = list(source.prototype_sources[name])
+    if name in source.reference_sources:
+        destination.reference_sources[name] = list(source.reference_sources[name])
+    if name in source.reference_signatures:
+        destination.reference_signatures[name] = source.reference_signatures[name]
     if name in source.pose_prototypes:
         destination.pose_prototypes[name] = {
             pose: list(values)
@@ -1279,7 +1290,8 @@ def calibrate_identity_db_against_impostors(db: IdentityDB) -> IdentityDB:
 
 
 def build_identity_db_from_person_folders(people_dir: Path,
-                                          force_rebuild: bool = False) -> IdentityDB:
+                                          force_rebuild: bool = False,
+                                          reference_snapshot=None) -> IdentityDB:
     from tqdm import tqdm
 
     people_dir = people_dir.expanduser().resolve()
@@ -1290,6 +1302,17 @@ def build_identity_db_from_person_folders(people_dir: Path,
     person_dirs = sorted([p for p in people_dir.iterdir() if p.is_dir()],
                          key=lambda p: p.name.lower())
     existing = None if force_rebuild else load_identity_db()
+    if (reference_snapshot is None and existing is not None
+            and people_dir == pipeline_paths.PEOPLE_ROOT.resolve()):
+        import face_reference_library
+        try:
+            reference_snapshot = face_reference_library.prepare(
+                pipeline_paths.FACE_REFERENCES, people_dir, existing)
+        except (OSError, ValueError, RuntimeError, sqlite3.Error, subprocess.TimeoutExpired) as error:
+            log.warning("Reference refresh unavailable; keeping active profiles: %s", error)
+            return existing
+    reference_changed = (reference_snapshot is not None and reference_snapshot.signatures
+                         != getattr(existing, 'reference_signatures', {}))
     partial: IdentityDB | None = None
     if not force_rebuild and IDENTITY_DB_BUILD_FILE.is_file():
         try:
@@ -1348,7 +1371,7 @@ def build_identity_db_from_person_folders(people_dir: Path,
             continue
         work.append((person_dir, images, signature, confirmed_paths))
 
-    if not work:
+    if not work and not reference_changed:
         if len(db.nearest_impostor_distances) != len(db.identities):
             calibrate_identity_db_against_impostors(db)
             save_identity_db(db)
@@ -1532,7 +1555,15 @@ def build_identity_db_from_person_folders(people_dir: Path,
             # database rather than a partially rebuilt one.
             write_identity_db(db, IDENTITY_DB_BUILD_FILE)
 
+    if reference_snapshot is not None:
+        import face_reference_library
+        reference_snapshot.validate()
+        db = face_reference_library.augment(db, reference_snapshot)
     calibrate_identity_db_against_impostors(db)
+    if reference_changed and existing is not None:
+        for name in db.identities.keys() & existing.identities.keys():
+            db.match_thresholds[name] = min(db.match_thresholds[name], existing.match_thresholds[name])
+            db.strict_thresholds[name] = min(db.strict_thresholds[name], existing.strict_thresholds[name])
     if existing is not None and existing.identities:
         import evaluation_enrollment
         import identity_evaluation
@@ -1564,6 +1595,8 @@ def build_identity_db_from_person_folders(people_dir: Path,
             )
             return existing
         log.info("Identity activation gate passed: %s", gate_path)
+    if reference_snapshot is not None:
+        reference_snapshot.validate()
     save_identity_db(db)
     IDENTITY_DB_BUILD_FILE.unlink(missing_ok=True)
     log.info(
@@ -4563,10 +4596,10 @@ def main() -> int:
     parser.add_argument("--no-person-match", action="store_true",
                         help="Do not auto-label new clusters from the existing person identity DB.")
     parser.add_argument("--no-reference-match", action="store_true",
-                        help="Do not auto-label from the optional Face References DB.")
+                        help="Skip refreshing Face References; use the currently validated identity DB.")
     parser.add_argument("--external-centroids", type=Path,
-                        default=REFERENCE_CENTROIDS_FILE,
-                        help="Optional reference centroid DB built by build_celeb_centroids.py.")
+                        default=None,
+                        help="Deprecated legacy DB option; use face refs for verified reference profiles.")
     parser.add_argument("--rebuild-identity-db", action="store_true",
                         help="Rebuild known-person identity DB from output/photos_by_person before running.")
     parser.add_argument("--identity-db-only", action="store_true",
@@ -4619,6 +4652,8 @@ def main() -> int:
     parser.add_argument("--detect-batch", type=str, default=None,
                         help="Internal: run detection worker.")
     args = parser.parse_args()
+    if args.external_centroids is not None:
+        parser.error('--external-centroids is no longer used for filing; run face refs to validate Face References first')
 
     if args.detect_batch:
         return run_detection_worker(Path(args.detect_batch))
@@ -4987,14 +5022,10 @@ def main() -> int:
         if identity_db is None and (output_dir / "photos_by_person").exists():
             log.info("No usable identity DB found; building it from existing person folders.")
             identity_db = build_identity_db_from_person_folders(output_dir / "photos_by_person")
-        # Quick Review and its independent verifier use the canonical database,
-        # not the optional legacy-reference merge used by cluster matching.
+        if not args.no_reference_match and identity_db is not None:
+            import face_reference_library
+            identity_db = face_reference_library.refresh(identity_db, output_dir / 'photos_by_person')
         recovery_identity_db = identity_db
-        if not args.no_reference_match:
-            reference_db = load_reference_centroids(args.external_centroids)
-            identity_db = merge_identity_dbs(identity_db, reference_db)
-        if identity_db is not None:
-            identity_db = calibrate_identity_db_against_impostors(identity_db)
         with analysis_index.AnalysisIndex(analysis_index_file()) as identity_index:
             def record_identity_decision(
                 record: FaceRecord,

@@ -31,7 +31,6 @@ ADV_REPORT = SOURCE_REVIEW / "duplicate_reports" / "advanced_duplicates.csv"
 FINGERPRINT_CACHE = Path.home() / ".face_sort_cache" / "advanced_duplicate_fingerprints.json"
 SMART_STATE = Path.home() / ".face_sort_cache" / "smart_album_person_state.json"
 IDENTITY_DB = Path.home() / ".face_sort_cache" / "person_identity_db.pkl"
-REFERENCE_DB = Path.home() / ".face_sort_cache" / "reference_centroids.pkl"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
               ".tif", ".tiff", ".heic", ".heif"}
 VIDEO_EXTS = {
@@ -134,15 +133,13 @@ def identity_names() -> set[str]:
         return set()
 
 
-def reference_count() -> int:
-    if not REFERENCE_DB.exists():
-        return 0
+def reference_summary() -> tuple[int, int]:
     try:
-        with REFERENCE_DB.open("rb") as f:
-            payload = pickle.load(f)
-        return len(payload.get("names", []))
+        db = sort_photos.load_identity_db()
+        sources = getattr(db, 'reference_sources', {})
+        return sum(bool(values) for values in sources.values()), sum(map(len, sources.values()))
     except Exception:
-        return 0
+        return 0, 0
 
 
 def face_cache_summary() -> dict[str, int]:
@@ -285,7 +282,8 @@ def main() -> int:
     print(f"People data size:       {human_size(original_size)}")
     print(f"Known identities DB:    {identity_count()} people")
     print(f"Identity drift:         {align['stale']} stale / {align['missing']} missing")
-    print(f"Reference identities:   {reference_count()} people")
+    reference_people, reference_examples = reference_summary()
+    print(f"Verified references:    {reference_examples} active examples / {reference_people} people")
     if manifest["exists"]:
         print(
             "Source manifest:        "
