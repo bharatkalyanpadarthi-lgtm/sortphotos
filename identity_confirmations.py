@@ -157,7 +157,12 @@ def examples_for_person(path: Path, person: str, people_root: Path) -> dict[Path
             relative = resolved.relative_to(root)
         except (OSError, ValueError):
             continue
-        if relative.parts and relative.parts[0].casefold() == person.casefold() and resolved.is_file():
+        own_folder = bool(relative.parts and relative.parts[0].casefold() == person.casefold())
+        # A user correction may precede a physical folder move. Only accept
+        # explicitly selected faces from another person's normal photo tree.
+        pinned_correction = (len(relative.parts) >= 3 and relative.parts[1] == "photos"
+                             and bool(item.get("face_id")))
+        if (own_folder or pinned_correction) and resolved.is_file():
             results[resolved] = item
     return results
 
@@ -167,7 +172,7 @@ def paths_for_person(path: Path, person: str, people_root: Path) -> list[Path]:
 
 
 def signature_for_person(path: Path, person: str, people_root: Path) -> str:
-    digest = hashlib.sha256()
+    digest = hashlib.sha256(b"selected-reference-v2\0")
     for candidate, example in sorted(examples_for_person(path, person, people_root).items()):
         try:
             stat = candidate.stat()

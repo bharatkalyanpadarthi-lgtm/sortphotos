@@ -46,6 +46,18 @@ class ReviewExplanationTests(unittest.TestCase):
         self.assertFalse(recognition_policy.strict_lane_allowed({'allowed': True}))
         self.assertFalse(recognition_policy.strict_lane_allowed({'allowed': False, 'strict_single_allowed': True}))
 
+    def test_independent_benchmark_respects_explicit_group_photo_face_selection(self):
+        import content_identity
+        import benchmark_inputs
+        first = SimpleNamespace(crop_jpeg=b'other-person')
+        selected = SimpleNamespace(crop_jpeg=b'confirmed-person')
+        case = SimpleNamespace(identity_face_id=content_identity.face_identity(selected), source=self.path)
+        self.assertIs(review._confirmed_case_face(case, [first, selected], self.db), selected)
+        with self.assertRaises(benchmark_inputs.BenchmarkInputError):
+            review._confirmed_case_face(case, [first], self.db)
+        case.identity_face_id = ''
+        self.assertIsNone(review._confirmed_case_face(case, [first, selected], self.db))
+
     def test_confident_matcher_disagreement_still_blocks_strict_single(self):
         item = self.item(verifier=secondary.SecondaryVerification(True, 'Bob', .1, .4))
         cluster = review.UnknownCluster('cluster', (item,), item.candidates, 0.)

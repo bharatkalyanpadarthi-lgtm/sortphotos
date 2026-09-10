@@ -172,6 +172,35 @@ face secondary-id
 
 ## Unknown Identity Learning
 
+Quick Review stops automatic batch loading when the queue is exhausted and
+after Finish Review. Reopening a finished page restores its read-only state.
+Queued decisions finish before final persistence; slow requests cannot add
+actions after finalization starts. Network errors pause loading rather than
+repeatedly submitting work. Before finishing, Load Next Batch remains an
+explicit way to check for newly available items.
+
+The terminal lifecycle has isolated HTTP tests and real-browser regressions:
+
+```sh
+.venv/bin/python -m unittest test_review_lifecycle
+# Requires Node, Playwright, and Chrome. Set NODE_BINARY and PLAYWRIGHT_MODULE
+# if they are installed outside PATH/the local node_modules directory.
+FACE_REVIEW_BROWSER_TEST=1 .venv/bin/python -m unittest test_review_lifecycle
+```
+
+Browser tests use synthetic fixtures with intercepted requests, never the live
+photo library. They cover finish/reload, empty queues, queued actions, failures,
+late responses, filters, manual retries, and desktop/mobile layout.
+
+Explicit reference corrections can precede a folder move: verified content and
+a pinned face are required before a photo in another person's folder can train
+the confirmed identity. Group-photo references contribute only the selected
+face, not every face or an old cached label. Benchmark re-enrollment preserves
+manual face selections/counts rather than resetting them on profile refresh.
+Both benchmark matchers honor those selections; unselected group photos remain
+ineligible for single-image automatic recovery. A protected test annotation
+alone never silently becomes a trusted training example.
+
 Daily ingest now uses the same independent-verifier preparation and safety
 benchmark as Quick Review for images left unresolved by normal clustering.
 It reuses detected faces instead of decoding every source again. Each recovered

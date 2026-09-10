@@ -2081,6 +2081,10 @@ def _confirmed_case_face(
     faces: list[sort_photos.CachedFace],
     identity_db: sort_photos.IdentityDB,
 ) -> sort_photos.CachedFace | None:
+    if getattr(case, "identity_face_id", ""):
+        import benchmark_inputs
+        selected = benchmark_inputs.selected_identity_faces(case, faces)
+        return selected[0] if len(selected) == 1 else None
     # Whole-image confirmation cannot select which face belongs to a name.
     return faces[0] if len(faces) == 1 else None
 
@@ -2840,12 +2844,15 @@ class BatchLoadJob:
     def start(self) -> tuple[dict, str | None]:
         state = self.state
         with state["lifecycle_lock"]:
-            if state.get("finishing") or state.get("review_finished"):
-                return self.snapshot(), "Finish Review is active or already complete."
+            if state.get("review_finished"):
+                return {**self.snapshot(), "status": "completed", "complete": True,
+                        "reason": "review_finished", "step": "Review Finished"}, None
+            if state.get("finishing"):
+                return {**self.snapshot(), "reason": "finishing"}, "Finish Review is active."
             if state.get("batch_loading"):
                 return self.snapshot(), None
             if not state["action_queue"].is_idle():
-                return self.snapshot(), "Wait for queued actions before loading the next batch."
+                return {**self.snapshot(), "reason": "actions_pending"}, "Wait for queued actions before loading the next batch."
             state["batch_loading"] = True
             self._set(
                 status="queued",
@@ -3298,6 +3305,8 @@ const useSuggestion=document.getElementById('useSuggestion');
 const activeJobIds=new Set(JSON.parse(sessionStorage.getItem('unknownJobs')||'[]'));
 const temporarilySkipped=new Set();
 let activeIndex=0,lastChecked=null,polling=false,loadingBatch=false;
+let lifecycleReady=false,finishing=false,reviewFinished=false,queueComplete=false;
+let autoLoadPaused=false,waitingForActions=false,batchTimer=null,finishTimer=null,batchGeneration=0;
 const allClusters=()=>[...document.querySelectorAll('.cluster')];
 const cards=()=>[...document.querySelectorAll('.item')];
 const checks=()=>[...document.querySelectorAll('.row-select')];
@@ -3305,6 +3314,29 @@ const selected=()=>checks().filter(input=>input.checked);
 const availableClusters=()=>allClusters().filter(cluster=>
   cluster.dataset.pending==='1'&&!cluster.classList.contains('hidden')&&!temporarilySkipped.has(cluster.dataset.cluster)
 );
+const unresolvedClusters=()=>allClusters().filter(cluster=>
+  cluster.dataset.pending==='1'&&!temporarilySkipped.has(cluster.dataset.cluster)
+);
+function updateLifecycleControls(){{
+  document.getElementById('loadNextBatch').disabled=!lifecycleReady||finishing||reviewFinished||loadingBatch;
+  document.getElementById('finishReview').disabled=!lifecycleReady||finishing||reviewFinished||loadingBatch;
+  if(finishing||reviewFinished)document.querySelectorAll('.cluster button,.cluster input,#batchPanel button,#batchPanel input,#skipCluster').forEach(control=>control.disabled=true);
+}}
+function pauseBatchLoading(){{
+  clearTimeout(batchTimer);batchTimer=null;batchGeneration++;loadingBatch=false;
+}}
+function finishState(result){{
+  const button=document.getElementById('finishReview');
+  if(result.status==='completed'){{
+    reviewFinished=true;finishing=false;queueComplete=true;pauseBatchLoading();clearTimeout(finishTimer);
+    button.textContent='Review Finished';document.getElementById('clusterPosition').textContent='Review Finished';
+    updateLifecycleControls();return true;
+  }}
+  if(result.status==='queued'||result.status==='running'){{
+    finishing=true;pauseBatchLoading();button.textContent=result.step||'Finishing...';updateLifecycleControls();return false;
+  }}
+  return false;
+}}
 
 function notify(message,error=false){{
   toast.textContent=message;toast.style.display='block';toast.style.borderColor=error?'var(--red)':'var(--line)';
@@ -3319,7 +3351,7 @@ function persistJobs(){{sessionStorage.setItem('unknownJobs',JSON.stringify([...
 function activeCluster(){{return document.querySelector('.cluster.quick-active');}}
 function showCluster(index=activeIndex){{
   const available=availableClusters();allClusters().forEach(cluster=>cluster.classList.remove('quick-active'));
-  if(!available.length){{document.getElementById('clusterPosition').textContent='No pending cluster';maybeLoadNextBatch();return;}}
+  if(!available.length){{if(!finishing&&!reviewFinished)document.getElementById('clusterPosition').textContent=queueComplete?'Queue complete':unresolvedClusters().length?'No clusters match these filters':'No pending cluster';maybeLoadNextBatch();return;}}
   activeIndex=((index%available.length)+available.length)%available.length;
   available[activeIndex].classList.add('quick-active');
   document.getElementById('clusterPosition').textContent=`Cluster ${{activeIndex+1}} of ${{available.length}}`;
@@ -3365,9 +3397,10 @@ function applyResolvedItems(keys){{
   updateSelection();
 }}
 async function pollJobs(){{
-  if(polling)return;polling=true;let repeat=false,failed=false;
+  if(polling||finishing||reviewFinished)return;polling=true;let repeat=false,failed=false;
   try{{
     const ids=[...activeJobIds];const jobsURL=ids.length?'/jobs?'+new URLSearchParams({{ids:ids.join(',')}}):'/jobs';const response=await fetch(jobsURL);const result=await response.json();
+    if(finishing||reviewFinished)return;
     if(!response.ok)throw new Error(result.error||'Could not read action queue');
     queueCount.textContent=(result.summary.queued||0)+(result.summary.running||0);
     applyResolvedItems(result.resolved_item_keys||[]);
@@ -3376,12 +3409,13 @@ async function pollJobs(){{
     result.jobs.forEach(job=>{{if(job.status==='queued'||job.status==='running'){{activeJobIds.add(job.id);markJobCards(job);}}else{{activeJobIds.delete(job.id);if(job.status==='failed'){{failed=true;notify(job.error||'Review action failed',true);}}else if(job.message)notify(job.message);}}}});
     persistJobs();repeat=activeJobIds.size>0||(result.summary.queued||0)+(result.summary.running||0)>0;
     if(failed){{setTimeout(()=>location.reload(),900);return;}}
-    if(!repeat){{await refreshProgress();maybeLoadNextBatch();}}
+    if(!repeat){{waitingForActions=false;await refreshProgress();maybeLoadNextBatch();}}
   }}catch(error){{notify(error.message,true);repeat=true;}}
-  finally{{polling=false;if(repeat)setTimeout(pollJobs,700);}}
+  finally{{polling=false;if(repeat&&!finishing&&!reviewFinished)setTimeout(pollJobs,700);}}
 }}
 async function decide(action,keys,person=''){{
   if(!interactive){{notify('Launch with face unknown-review to use actions.',true);return;}}
+  if(!lifecycleReady||finishing||reviewFinished||loadingBatch)return;
   const values=Array.isArray(keys)?keys:keys.split(',').filter(Boolean);
   if(!values.length){{notify('This cluster has no pending images.',true);return;}}
   if(values.length>{MAX_CLUSTER_ACTION_ITEMS}){{notify('Select no more than {MAX_CLUSTER_ACTION_ITEMS} images.',true);return;}}
@@ -3394,26 +3428,93 @@ async function decide(action,keys,person=''){{
   }}catch(error){{notify(error.message,true);}}
 }}
 async function skipCurrent(){{
+  if(!interactive||!lifecycleReady||finishing||reviewFinished||loadingBatch)return;
   const cluster=activeCluster();if(!cluster)return;const keys=cluster.dataset.items.split(',').filter(Boolean);
   try{{const response=await fetch('/skip',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:new URLSearchParams({{item_keys:keys.join(',')}})}});const result=await response.json();if(!response.ok)throw new Error(result.error||'Could not skip cluster');temporarilySkipped.add(cluster.dataset.cluster);notify('Skipped for this session.');showCluster(activeIndex);}}catch(error){{notify(error.message,true);}}
 }}
 async function maybeLoadNextBatch(manual=false){{
-  if(!interactive||loadingBatch)return;
-  if(availableClusters().length){{if(manual)notify('Finish or skip the current pending clusters first.');return;}}
-  loadingBatch=true;document.getElementById('loadNextBatch').disabled=true;document.getElementById('finishReview').disabled=true;document.getElementById('clusterPosition').textContent='Loading next batch...';
-  try{{const response=await fetch('/next-batch',{{method:'POST'}});const result=await response.json();if(response.status===409){{document.getElementById('clusterPosition').textContent=result.error||'Waiting for current operation...';loadingBatch=false;setTimeout(()=>maybeLoadNextBatch(),700);return;}}if(!response.ok)throw new Error(result.error||'Could not load next batch');pollBatchStatus();}}catch(error){{loadingBatch=false;document.getElementById('loadNextBatch').disabled=false;document.getElementById('finishReview').disabled=false;notify(error.message,true);document.getElementById('clusterPosition').textContent='Load failed';}}
+  if(!interactive||!lifecycleReady||loadingBatch||finishing||reviewFinished||waitingForActions)return;
+  if(!manual&&(queueComplete||autoLoadPaused))return;
+  if(unresolvedClusters().length){{if(manual)notify('Finish or skip the current pending clusters first.');return;}}
+  autoLoadPaused=false;queueComplete=false;loadingBatch=true;const generation=++batchGeneration;
+  updateLifecycleControls();document.getElementById('clusterPosition').textContent='Loading next batch...';
+  try{{
+    const response=await fetch('/next-batch',{{method:'POST'}});const result=await response.json();
+    if(generation!==batchGeneration||finishing||reviewFinished)return;
+    if(result.reason==='review_finished'){{finishState({{status:'completed'}});refreshProgress();return;}}
+    if(response.status===409){{
+      loadingBatch=false;updateLifecycleControls();document.getElementById('clusterPosition').textContent=result.error||'Waiting for current operation...';
+      if(result.reason==='finishing'){{finishState({{status:'running'}});pollFinish();}}
+      else if(result.reason==='actions_pending'){{waitingForActions=true;pollJobs();}}
+      else{{autoLoadPaused=true;notify(result.error||'Loading paused. Please retry when ready.',true);}}
+      return;
+    }}
+    if(!response.ok)throw new Error(result.error||'Could not load next batch');
+    pollBatchStatus(generation);
+  }}catch(error){{
+    if(generation!==batchGeneration||finishing||reviewFinished)return;
+    loadingBatch=false;autoLoadPaused=true;updateLifecycleControls();notify(error.message,true);document.getElementById('clusterPosition').textContent='Load failed';
+  }}
 }}
-async function pollBatchStatus(){{
-  try{{const response=await fetch('/batch-status');const result=await response.json();if(!response.ok)throw new Error(result.error||'Could not read batch progress');document.getElementById('clusterPosition').textContent=result.step||'Loading next batch...';if(result.status==='completed'){{loadingBatch=false;if(result.complete){{document.getElementById('clusterPosition').textContent='Queue complete';document.getElementById('loadNextBatch').disabled=false;document.getElementById('finishReview').disabled=false;notify('All pending unknown files are handled. Finish Review when ready.');}}else{{location.reload();}}return;}}if(result.status==='failed'){{loadingBatch=false;document.getElementById('loadNextBatch').disabled=false;document.getElementById('finishReview').disabled=false;document.getElementById('clusterPosition').textContent='Load failed';notify(result.message||'Could not load next batch',true);return;}}setTimeout(pollBatchStatus,500);}}catch(error){{document.getElementById('clusterPosition').textContent='Reconnecting to batch loader...';setTimeout(pollBatchStatus,1000);}}
+async function pollBatchStatus(generation=batchGeneration){{
+  if(generation!==batchGeneration||finishing||reviewFinished)return;
+  try{{
+    const response=await fetch('/batch-status');const result=await response.json();
+    if(generation!==batchGeneration||finishing||reviewFinished)return;
+    if(!response.ok)throw new Error(result.error||'Could not read batch progress');
+    document.getElementById('clusterPosition').textContent=result.step||'Loading next batch...';
+    if(result.status==='completed'){{
+      loadingBatch=false;queueComplete=Boolean(result.complete);updateLifecycleControls();
+      if(queueComplete){{document.getElementById('clusterPosition').textContent='Queue complete';notify('All pending unknown files are handled. Finish Review when ready.');}}
+      else{{location.reload();}}return;
+    }}
+    if(result.status==='failed'){{loadingBatch=false;autoLoadPaused=true;updateLifecycleControls();notify(result.message||'Could not load next batch',true);return;}}
+    batchTimer=setTimeout(()=>pollBatchStatus(generation),500);
+  }}catch(error){{
+    if(generation!==batchGeneration||finishing||reviewFinished)return;
+    document.getElementById('clusterPosition').textContent='Reconnecting to batch loader...';batchTimer=setTimeout(()=>pollBatchStatus(generation),1500);
+  }}
 }}
 async function pollFinish(){{
-  try{{const response=await fetch('/finish-status');const result=await response.json();if(!response.ok)throw new Error(result.error||'Could not read finish status');const button=document.getElementById('finishReview');button.textContent=result.step||'Finishing...';if(result.status==='completed'){{button.textContent='Review Finished';notify(`${{result.message}} Report: ${{result.report}}`);await refreshProgress();return;}}if(result.status==='failed'){{button.disabled=false;button.textContent='Finish Review';notify(result.message||'Finish failed safely',true);return;}}setTimeout(pollFinish,1000);}}catch(error){{notify(error.message,true);setTimeout(pollFinish,1500);}}
+  if(reviewFinished)return;clearTimeout(finishTimer);
+  try{{
+    const response=await fetch('/finish-status');const result=await response.json();if(reviewFinished)return;
+    if(!response.ok)throw new Error(result.error||'Could not read finish status');
+    if(finishState(result)){{notify(`${{result.message||'Review saved.'}} Report: ${{result.report||''}}`);await refreshProgress();return;}}
+    if(result.status==='failed'||result.status==='idle'){{
+      finishing=false;autoLoadPaused=true;document.getElementById('finishReview').textContent='Retry Finish Review';updateLifecycleControls();
+      notify(result.message||'Finish was not started. Retry when ready.',true);return;
+    }}
+    finishTimer=setTimeout(pollFinish,1000);
+  }}catch(error){{if(!reviewFinished){{notify(error.message,true);finishTimer=setTimeout(pollFinish,1500);}}}}
 }}
 async function finishReview(){{
+  if(!interactive||!lifecycleReady||finishing||reviewFinished)return;
   if(loadingBatch){{notify('Wait for the next batch to finish loading.',true);return;}}
-  if(!await askConfirmation('Finish Review will wait for queued actions, save the cache, refresh identity profiles once, and run the safety benchmark. Continue?'))return;
-  const button=document.getElementById('finishReview');button.disabled=true;button.textContent='Finishing...';
-  try{{const response=await fetch('/finish',{{method:'POST'}});const result=await response.json();if(!response.ok)throw new Error(result.error||'Could not start Finish Review');pollFinish();}}catch(error){{button.disabled=false;button.textContent='Finish Review';notify(error.message,true);}}
+  const wasPaused=autoLoadPaused;autoLoadPaused=true;
+  if(!await askConfirmation('Finish Review will wait for queued actions, save the cache, refresh identity profiles once, and run the safety benchmark. Continue?')){{autoLoadPaused=wasPaused;maybeLoadNextBatch();return;}}
+  finishState({{status:'running'}});
+  try{{
+    const response=await fetch('/finish',{{method:'POST'}});const result=await response.json();
+    if(!response.ok)notify(result.error||'Could not start Finish Review',true);
+    if(!finishState(result))pollFinish();else refreshProgress();
+  }}catch(error){{notify(error.message,true);pollFinish();}}
+}}
+async function initializeLifecycle(){{
+  updateLifecycleControls();if(!interactive)return;
+  try{{
+    const response=await fetch('/finish-status');const result=await response.json();
+    if(!response.ok)throw new Error(result.error||'Could not read review status');
+    if(finishState(result)){{lifecycleReady=true;updateLifecycleControls();return;}}
+    if(finishing){{lifecycleReady=true;pollFinish();return;}}
+    if(result.status==='failed')autoLoadPaused=true;
+    const batchResponse=await fetch('/batch-status');const batch=await batchResponse.json();
+    if(!batchResponse.ok)throw new Error(batch.error||'Could not read batch status');
+    queueComplete=batch.status==='completed'&&Boolean(batch.complete);
+    if(batch.status==='failed')autoLoadPaused=true;
+    lifecycleReady=true;loadingBatch=['queued','running'].includes(batch.status);updateLifecycleControls();
+    if(loadingBatch)pollBatchStatus();else{{showCluster();pollJobs();}}
+  }}catch(error){{lifecycleReady=false;updateLifecycleControls();notify(error.message+' Reload this page to reconnect.',true);}}
 }}
 
 checks().forEach(input=>input.addEventListener('click',event=>{{if(event.shiftKey&&lastChecked){{const visible=checks().filter(item=>!item.disabled&&item.closest('.cluster')===activeCluster());const a=visible.indexOf(lastChecked),b=visible.indexOf(input);if(a>=0&&b>=0)visible.slice(Math.min(a,b),Math.max(a,b)+1).forEach(item=>item.checked=input.checked);}}lastChecked=input;updateSelection();}}));
@@ -3436,7 +3537,7 @@ document.addEventListener('keydown',event=>{{
   else if(event.key==='ArrowRight'){{event.preventDefault();moveCluster(1);}}
   else if(event.key==='ArrowLeft'){{event.preventDefault();moveCluster(-1);}}
 }});
-search.value=localStorage.getItem('unknownSearch')||'';statusFilter.value=localStorage.getItem('unknownStatus')||'pending';clusterFilter.value=localStorage.getItem('unknownCluster')||'all';document.querySelector(`[data-density="${{localStorage.getItem('unknownDensity')||'compact'}}"]`)?.click();applyFilters();updateSelection();pollJobs();
+search.value=localStorage.getItem('unknownSearch')||'';statusFilter.value=localStorage.getItem('unknownStatus')||'pending';clusterFilter.value=localStorage.getItem('unknownCluster')||'all';document.querySelector(`[data-density="${{localStorage.getItem('unknownDensity')||'compact'}}"]`)?.click();applyFilters();updateSelection();initializeLifecycle();
 </script></body></html>"""
 
 
@@ -3563,7 +3664,7 @@ def make_handler(state: dict):
                     self.send_json(state["finish_job"].start(), HTTPStatus.ACCEPTED)
                 return
             if route == "/skip":
-                if state.get("batch_loading") or state.get("finishing"):
+                if state.get("batch_loading") or state.get("finishing") or state.get("review_finished"):
                     self.send_json(
                         {"error": "Wait for the current review operation to finish."},
                         HTTPStatus.CONFLICT,
@@ -3578,8 +3679,13 @@ def make_handler(state: dict):
                     }
                     if not keys:
                         raise ValueError("no available cluster items to skip")
-                    state.setdefault("temporarily_skipped", set()).update(keys)
+                    with state["lifecycle_lock"]:
+                        if state.get("batch_loading") or state.get("finishing") or state.get("review_finished"):
+                            raise ReviewActionConflict("Review is being finalized; no new actions are accepted.")
+                        state.setdefault("temporarily_skipped", set()).update(keys)
                     self.send_json({"skipped": len(keys)})
+                except ReviewActionConflict as error:
+                    self.send_json({"error": str(error)}, HTTPStatus.CONFLICT)
                 except Exception as error:  # noqa: BLE001
                     self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
                 return
@@ -3601,14 +3707,21 @@ def make_handler(state: dict):
             try:
                 length = min(int(self.headers.get("Content-Length", "0")), 64 * 1024)
                 params = parse_qs(self.rfile.read(length).decode("utf-8"))
-                jobs = state["action_queue"].submit_many(
-                    item_keys=[
-                        value for value in params.get("item_keys", [""])[0].split(",")
-                        if value
-                    ],
-                    action=params.get("action", [""])[0],
-                    person_value=params.get("person", [""])[0],
-                )
+                # Finish must see every accepted action before it waits on the
+                # queue. A slow request body must not enqueue work after that wait.
+                with state["lifecycle_lock"]:
+                    if state.get("finishing") or state.get("review_finished"):
+                        raise ReviewActionConflict("Review is being finalized; no new actions are accepted.")
+                    if state.get("batch_loading"):
+                        raise ReviewActionConflict("Wait for the next batch to finish loading.")
+                    jobs = state["action_queue"].submit_many(
+                        item_keys=[
+                            value for value in params.get("item_keys", [""])[0].split(",")
+                            if value
+                        ],
+                        action=params.get("action", [""])[0],
+                        person_value=params.get("person", [""])[0],
+                    )
             except ReviewActionConflict as error:
                 self.send_json({"error": str(error)}, HTTPStatus.CONFLICT)
                 return

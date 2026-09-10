@@ -63,8 +63,23 @@ def enroll(
     if float(quality) < 0.45:
         case_types.add("blurry_small")
     canonical = str(source.expanduser().resolve(strict=False))
+    existing = _read(path)
+    matching = [row for row in existing
+                if str(row.get("content_sha256", "")) == content_sha256
+                and str(row.get("expected_person", "")).casefold() == person.casefold()]
+    if matching:
+        # Backfilling profiles is not a new annotation. Retain manual face
+        # selections, counts, review state, and categories without a rewrite.
+        moved = False
+        for row in matching:
+            if not Path(row.get("source", "")).is_file() and row.get("source") != canonical:
+                row["source"] = canonical
+                moved = True
+        if moved:
+            _write(path, existing)
+        return
     rows = [
-        row for row in _read(path)
+        row for row in existing
         if not (
             str(row.get("content_sha256", "")) == content_sha256
             and str(row.get("expected_person", "")).casefold() == person.casefold()

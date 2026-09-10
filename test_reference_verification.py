@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import content_identity
 import identity_confirmations
+import numpy as np
 from pipeline_progress import StageProgress
 from verified_references import ReferenceIndex
 
@@ -35,6 +36,79 @@ class ReferenceFixtures:
 
 
 class ReferenceIndexTests(ReferenceFixtures, unittest.TestCase):
+    def test_reenrollment_retains_manual_face_scope_and_does_not_rewrite(self):
+        import evaluation_enrollment as enrollment
+        source = self.file('group.jpg')
+        dataset = self.root / 'confirmed.csv'
+        row = {'source': str(source), 'expected_person': 'Alice', 'expected_people': 'Alice',
+               'content_sha256': content_identity.content_sha256(source),
+               'identity_face_id': 'crop:' + 'a' * 64, 'expected_face_count': '3',
+               'case_types': 'known|lookalike', 'verified': 'true', 'notes': 'right-hand face'}
+        enrollment._write(dataset, [row])
+        before = dataset.read_bytes()
+        with patch.object(enrollment, '_write', side_effect=AssertionError('rewrote annotation')):
+            enrollment.enroll(source=source, person='Alice', content_sha256=row['content_sha256'], path=dataset)
+        self.assertEqual(dataset.read_bytes(), before)
+        moved = source.with_name('renamed.jpg')
+        source.rename(moved)
+        enrollment.enroll(source=moved, person='Alice', content_sha256=row['content_sha256'], path=dataset)
+        saved = enrollment._read(dataset)[0]
+        for key, value in row.items():
+            self.assertEqual(saved[key], str(moved) if key == 'source' else value)
+
+    def test_profile_builder_uses_only_pinned_face_even_with_stale_cache_label(self):
+        import sort_photos as sorter
+        source = self.file('group.jpg', person='Bob')
+        (self.root / 'Alice').mkdir()
+        registry = self.root / 'confirmations.json'
+        selected = sorter.CachedFace(str(source), 1, 1., 100., 100., 0., .95,
+                                     np.array([1., 0.]), np.array([]), b'selected', label=None)
+        other = sorter.CachedFace(str(source), 0, 1., 100., 100., 0., .95,
+                                  np.array([0., 1.]), np.array([]), b'other', label='Alice')
+        identity_confirmations.record(registry, person='Alice', organized_path=source,
+                                      content_sha256=content_identity.content_sha256(source),
+                                      original_name=source.name, face=selected)
+        cache = sorter.CacheState(file_signatures={str(source): sorter.file_signature(source)},
+                                  faces=[other, selected])
+        with patch.object(sorter, 'IDENTITY_CONFIRMATIONS_FILE', registry), \
+             patch.object(sorter, 'IDENTITY_HARD_NEGATIVES_FILE', self.root / 'negatives.json'), \
+             patch.object(sorter, 'IDENTITY_DB_BUILD_FILE', self.root / 'build.pkl'), \
+             patch.object(sorter, 'load_cache', return_value=cache), \
+             patch.object(sorter, 'save_identity_db'), \
+             patch.object(sorter, 'write_identity_db'), \
+             patch.object(sorter, '_build_app', side_effect=AssertionError('unneeded detector')):
+            db = sorter.build_identity_db_from_person_folders(self.root, force_rebuild=True)
+        self.assertTrue(db.prototypes.get('Alice'))
+        for vector in db.prototypes['Alice']:
+            np.testing.assert_allclose(vector, selected.embedding)
+
+    def test_pinned_correction_is_usable_before_physical_folder_move(self):
+        path = self.file('wrong-folder.jpg', person='Bob')
+        registry = self.root / 'confirmations.json'
+        face = SimpleNamespace(crop_jpeg=b'confirmed-face', face_index=1)
+        identity_confirmations.record(registry, person='Alice', organized_path=path,
+                                      content_sha256=content_identity.content_sha256(path),
+                                      original_name=path.name, face=face)
+        examples = identity_confirmations.examples_for_person(registry, 'Alice', self.root)
+        self.assertEqual(set(examples), {path})
+        other = SimpleNamespace(crop_jpeg=b'other-face', face_index=0)
+        self.assertEqual(identity_confirmations.selected_faces(examples[path], [other, face]), [face])
+        path.write_bytes(b'replaced')
+        self.assertEqual(identity_confirmations.examples_for_person(registry, 'Alice', self.root), {})
+
+    def test_unpinned_cross_folder_or_external_confirmation_is_not_a_training_source(self):
+        registry = self.root / 'confirmations.json'
+        wrong = self.file('wrong-folder.jpg', person='Bob')
+        outside = self.root.parent / (self.root.name + '-outside.jpg')
+        outside.write_bytes(b'outside')
+        self.addCleanup(outside.unlink)
+        face = SimpleNamespace(crop_jpeg=b'confirmed-face', face_index=0)
+        for path, selected in ((wrong, None), (outside, face)):
+            identity_confirmations.record(registry, person='Alice', organized_path=path,
+                                          content_sha256=content_identity.content_sha256(path),
+                                          original_name=path.name, face=selected)
+        self.assertEqual(identity_confirmations.examples_for_person(registry, 'Alice', self.root), {})
+
     def test_many_renamed_legacy_records_hash_each_candidate_only_once(self):
         paths = [self.file(f"new-{n}.jpg", str(n).encode()) for n in range(180)]
         records = [self.record(path, original=path.with_name(f"old-{n}.jpg"), size=False)

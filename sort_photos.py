@@ -1414,6 +1414,12 @@ def build_identity_db_from_person_folders(people_dir: Path,
                 if app is None:
                     app = _build_app()
                 usable_faces = _detect_one_image(image, app)
+            example = confirmed_examples.get(Path(canonical_image_key))
+            if example is not None:
+                # An explicit selection overrides old folder/cache labels, but
+                # never authorizes the other faces in a confirmed group photo.
+                usable_faces = identity_confirmations.selected_faces(
+                    example, cached_candidates if cache_is_current else usable_faces)
             for face in usable_faces:
                 if rejected_references.rejects(name, face.embedding):
                     continue
@@ -1428,7 +1434,6 @@ def build_identity_db_from_person_folders(people_dir: Path,
                     capture_timestamp=appearance_profiles.capture_timestamp(image),
                 )
                 samples.append(sample)
-                example = confirmed_examples.get(Path(canonical_image_key))
                 if example is not None and any(
                     selected is face for selected in identity_confirmations.selected_faces(example, usable_faces)
                 ):
