@@ -152,6 +152,25 @@ class BenchmarkInputTests(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("protected daily filing planner accepted no known identities", report["failures"])
 
+    def test_rejected_activation_reports_exact_cases_without_weakening_gate(self):
+        dataset = self.root / "benchmark.csv"
+        dataset.touch()
+        case = replace(self.case, identity_face_id="")
+        validation = evaluation_dataset.DatasetValidation((case,), (), evaluation_dataset.REQUIRED_CASE_TYPES)
+        metrics = evaluation_dataset.EvaluationMetrics(0.5, 1, 1, 0, 1, 1, 0, 1)
+        incorrect = {"source": str(self.source), "identity_outcome": "incorrect",
+                     "expected_people": "Alice", "accepted_names": "Bob"}
+        with patch.object(evaluation.evaluation_dataset, "load_dataset", return_value=validation), \
+             patch.object(evaluation, "cache_metrics", return_value={"incorrect": 0, "precision": 1, "recall": 1}), \
+             patch.object(evaluation, "evaluate_golden_set", return_value=(metrics, [incorrect])):
+            db = sorter.IdentityDB()
+            allowed, report = evaluation.activation_gate(db, db, sorter.CacheState(),
+                protected_set=dataset, protected_baseline=self.root / "missing.json",
+                progress=self.messages.append, fail_fast=True)
+        self.assertFalse(allowed)
+        self.assertEqual(report["protected"]["incorrect_samples"], [incorrect])
+        self.assertIn("protected benchmark has an incorrect identity accept", report["failures"])
+
     def test_refreshed_scope_counts_background_face_but_does_not_score_it(self):
         refreshed = {str(self.source): [self.main, self.other]}
         with patch.object(evaluation, "predict_face", return_value=evaluation.FacePrediction("Alice", 0, 1, True)) as scoring, \

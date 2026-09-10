@@ -520,6 +520,9 @@ def activation_gate(
                 prepared=prepared,
             )
             incorrect_count = sum(row["identity_outcome"] in {"incorrect", "false_accept"} for row in rows)
+            protected_summary["incorrect_samples"] = [
+                row for row in rows if row["identity_outcome"] in {"incorrect", "false_accept"}
+            ][:20]
             if incorrect_count and fail_fast:
                 protected_summary.update(metrics=asdict(metrics), incorrect_rows=incorrect_count,
                     pipeline_metrics={"skipped": True})
