@@ -62,7 +62,7 @@ DEFAULT_OUTPUT_DIR = pipeline_paths.SOURCE_REVIEW / "identity_audits" / "unknown
 DEFAULT_DECISIONS = DEFAULT_OUTPUT_DIR / "unknown_identity_review_decisions.json"
 DEFAULT_SESSION = DEFAULT_OUTPUT_DIR / "unknown_identity_review_session.json"
 DECISIONS_VERSION = 3
-REVIEW_POLICY_VERSION = 8
+REVIEW_POLICY_VERSION = 9
 MAX_CLUSTER_ACTION_ITEMS = 500
 MAX_BATCH_ACTION_ITEMS = 50
 AUTO_CLUSTER_MIN_MARGIN = 0.08
@@ -79,7 +79,7 @@ AUTO_RESCUE_MAX_SECONDARY_DISTANCE = 0.24
 AUTO_RESCUE_MIN_SECONDARY_MARGIN = 0.14
 AUTO_RESCUE_MIN_QUALITY = 0.45
 AUTO_GATE_MIN_CONFIRMED_CASES = 100
-AUTO_GATE_CACHE_VERSION = 8
+AUTO_GATE_CACHE_VERSION = 9
 AUTO_SWEEP_STATE_VERSION = 3
 TRUSTED_REVIEW_PROTOTYPES_PER_PERSON = 24
 AUTO_SWEEP_BATCH_SIZE = 500
@@ -261,8 +261,8 @@ def automatic_review_item(
             and margin >= recover_no_usable_faces.MATCH_EXCEPTIONAL_MARGIN
         )
         joint_candidate = (
-            best.distance <= min(AUTO_JOINT_MAX_PRIMARY_DISTANCE, threshold + 0.08)
-            and margin >= AUTO_JOINT_MIN_PRIMARY_MARGIN
+            best.distance <= min(AUTO_JOINT_MAX_PRIMARY_DISTANCE, threshold)
+            and margin >= max(AUTO_JOINT_MIN_PRIMARY_MARGIN, sort_photos.AUTO_PERSON_SINGLE_MATCH_MARGIN)
             and quality >= AUTO_JOINT_MIN_QUALITY
         )
         consensus_candidate = (
@@ -271,8 +271,8 @@ def automatic_review_item(
             and (quality >= recover_no_usable_faces.MATCH_MIN_QUALITY or exceptional)
         )
         rescue_candidate = (
-            best.distance <= AUTO_RESCUE_MAX_PRIMARY_DISTANCE
-            and margin >= AUTO_RESCUE_MIN_PRIMARY_MARGIN
+            best.distance <= min(AUTO_RESCUE_MAX_PRIMARY_DISTANCE, threshold)
+            and margin >= max(AUTO_RESCUE_MIN_PRIMARY_MARGIN, sort_photos.AUTO_PERSON_SINGLE_MATCH_MARGIN)
             and quality >= AUTO_RESCUE_MIN_QUALITY
         )
         if face.crop_jpeg and (joint_candidate or consensus_candidate or rescue_candidate):

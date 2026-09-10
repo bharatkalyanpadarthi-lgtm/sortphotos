@@ -63,6 +63,47 @@ class ReviewExplanationTests(unittest.TestCase):
         self.assertEqual(self.codes(item), {'safety_gate'})
         self.assertEqual(self.codes(item, enabled=True), {'ready'})
 
+    def test_same_name_verifier_rejection_cannot_authorize_dual_or_cluster(self):
+        item = self.item(distance=.29, verifier=secondary.SecondaryVerification(False, 'Alice', .25, .5))
+        evidence = review._automatic_item_evidence(item, self.db)
+        self.assertFalse(evidence['secondary'])
+        self.assertFalse(evidence['secondary_rescue'])
+        self.assertIn('independent_rejected', self.codes(item))
+        cluster = review.UnknownCluster('c', (item,), item.candidates, 0.)
+        self.assertEqual(review.automatic_matches([cluster], self.db, require_secondary=True), [])
+        second = self.root / 'second.jpg'
+        second.write_bytes(b'independent fixture')
+        other = review.UnknownItem('other', second, item.face, item.candidates, item.secondary)
+        cluster = review.UnknownCluster('pair', (item, other), item.candidates, 0.)
+        self.assertEqual(review.automatic_matches([cluster], self.db, require_secondary=True), [])
+
+    def test_strong_verifier_does_not_bypass_person_calibration(self):
+        self.db.match_thresholds['Alice'] = .12
+        self.db.strict_thresholds['Alice'] = .10
+        item = self.item(distance=.15, verifier=secondary.SecondaryVerification(True, 'Alice', .05, .6))
+        evidence = review._automatic_item_evidence(item, self.db)
+        self.assertFalse(evidence['secondary'])
+        self.assertFalse(evidence['secondary_rescue'])
+        self.assertIn('weak_confidence', self.codes(item))
+
+    def test_dual_agreement_requires_single_image_separation(self):
+        item = self.item(distance=.15, margin=.17,
+                         verifier=secondary.SecondaryVerification(True, 'Alice', .10, .5))
+        evidence = review._automatic_item_evidence(item, self.db)
+        self.assertFalse(evidence['secondary'])
+        self.assertFalse(evidence['secondary_rescue'])
+        self.assertIn('similar_alternative', self.codes(item))
+
+    def test_calibrated_dual_match_still_accepts_outside_strict_distance(self):
+        item = self.item(distance=.29, margin=.5,
+                         verifier=secondary.SecondaryVerification(True, 'Alice', .10, .5))
+        evidence = review._automatic_item_evidence(item, self.db)
+        self.assertFalse(evidence['strict'])
+        self.assertTrue(evidence['secondary'])
+        cluster = review.UnknownCluster('c', (item,), item.candidates, 0.)
+        matches = review.automatic_matches([cluster], self.db, require_secondary=True)
+        self.assertEqual([match.lane for match in matches], ['secondary_agreement'])
+
     def test_strict_and_missing_verifier_have_clear_reasons(self):
         self.assertIn('strict_safety_gate', self.codes(self.item()))
         self.assertIn('independent_not_evaluated', self.codes(self.item(distance=.29)))

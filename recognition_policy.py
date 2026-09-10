@@ -57,6 +57,9 @@ def _automatic_item_evidence(
         ),
     )
     quality = float(item.face.quality)
+    # Two models of one crop are not independent source-image consensus.
+    # Neither agreement nor rescue may bypass calibration or verifier rejection.
+    single_margin = settings.sort_photos.AUTO_PERSON_SINGLE_MATCH_MARGIN
     strict = (
         best.distance <= strict_threshold
         and margin >= settings.sort_photos.AUTO_PERSON_SINGLE_MATCH_MARGIN
@@ -64,21 +67,23 @@ def _automatic_item_evidence(
     )
     secondary = bool(
         item.secondary is not None
+        and item.secondary.accepted
         and str(item.secondary.predicted or "").casefold() == best.name.casefold()
         and (
             best.distance
-            <= min(settings.AUTO_JOINT_MAX_PRIMARY_DISTANCE, consensus_threshold + 0.08)
+            <= min(settings.AUTO_JOINT_MAX_PRIMARY_DISTANCE, consensus_threshold)
         )
-        and (margin >= settings.AUTO_JOINT_MIN_PRIMARY_MARGIN)
+        and (margin >= max(settings.AUTO_JOINT_MIN_PRIMARY_MARGIN, single_margin))
         and (quality >= settings.AUTO_JOINT_MIN_QUALITY)
         and (item.secondary.distance <= settings.AUTO_JOINT_MAX_SECONDARY_DISTANCE)
         and (item.secondary.margin >= settings.AUTO_JOINT_MIN_SECONDARY_MARGIN)
     )
     secondary_rescue = bool(
         item.secondary is not None
+        and item.secondary.accepted
         and str(item.secondary.predicted or "").casefold() == best.name.casefold()
-        and (best.distance <= settings.AUTO_RESCUE_MAX_PRIMARY_DISTANCE)
-        and (margin >= settings.AUTO_RESCUE_MIN_PRIMARY_MARGIN)
+        and (best.distance <= min(settings.AUTO_RESCUE_MAX_PRIMARY_DISTANCE, consensus_threshold))
+        and (margin >= max(settings.AUTO_RESCUE_MIN_PRIMARY_MARGIN, single_margin))
         and (quality >= settings.AUTO_RESCUE_MIN_QUALITY)
         and (item.secondary.distance <= settings.AUTO_RESCUE_MAX_SECONDARY_DISTANCE)
         and (item.secondary.margin >= settings.AUTO_RESCUE_MIN_SECONDARY_MARGIN)

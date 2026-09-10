@@ -35,16 +35,20 @@ def explain(item, identity_db, *, settings, gate=None, enabled=False):
                           settings.AUTO_JOINT_MIN_QUALITY, settings.AUTO_RESCUE_MIN_QUALITY)
     if quality < minimum_quality:
         reasons.append(reason("poor_face_quality", "Face quality is too low for safe automatic filing."))
-    if len(item.candidates) > 1 and margin < settings.AUTO_JOINT_MIN_PRIMARY_MARGIN:
+    if len(item.candidates) > 1 and margin < max(
+            settings.AUTO_JOINT_MIN_PRIMARY_MARGIN, settings.sort_photos.AUTO_PERSON_SINGLE_MATCH_MARGIN):
         reasons.append(reason("similar_alternative",
                               f"Similar-looking alternative: {item.candidates[1].name}; the separation is too small."))
-    primary_limit = min(settings.AUTO_JOINT_MAX_PRIMARY_DISTANCE, float(evidence["threshold"]) + 0.08)
+    primary_limit = min(settings.AUTO_JOINT_MAX_PRIMARY_DISTANCE, float(evidence["threshold"]))
     if best.distance > primary_limit and not evidence["secondary_rescue"]:
         reasons.append(reason("weak_confidence", f"The match to {best.name} is not strong enough for automatic filing."))
     if evidence["strict"] and not strict_allowed:
         reasons.append(reason("strict_safety_gate", "Strong single-photo match; that filing path has not passed safety validation."))
     elif secondary is None:
         reasons.append(reason("independent_not_evaluated", "Independent confirmation is not available for this candidate."))
+    elif not secondary.accepted and secondary.predicted.casefold() == best.name.casefold():
+        reasons.append(reason("independent_rejected",
+                              "The independent verifier ranked the same person first but rejected the match at its calibrated limit."))
     elif not reasons:
         reasons.append(reason("weak_independent_confidence",
                               "The independent match is not strong or distinct enough for automatic filing."))

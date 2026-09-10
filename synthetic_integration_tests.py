@@ -1542,8 +1542,8 @@ def test_unknown_review_auto_match_requires_independent_verifier(tmp: Path) -> N
         require_secondary=True,
     )
     assert_true(
-        len(matches) == 1 and matches[0].lane == "secondary_agreement",
-        f"strong dual-model agreement was blocked by a legacy absolute cutoff: {matches}",
+        not matches,
+        f"same-name ranking bypassed the verifier's rejected verdict: {matches}",
     )
 
     weak_secondary = review_unknown_identities.UnknownItem(
@@ -1581,8 +1581,8 @@ def test_unknown_review_auto_match_requires_independent_verifier(tmp: Path) -> N
         require_secondary=True,
     )
     assert_true(
-        len(matches) == 1 and matches[0].lane == "trusted_verifier_rescue",
-        f"strict independent-verifier rescue did not recover a difficult face: {matches}",
+        not matches,
+        f"independent-verifier rescue bypassed primary calibration: {matches}",
     )
 
 
@@ -2051,11 +2051,11 @@ def test_confirmed_review_learning_excludes_its_own_prototype(tmp: Path) -> None
     query = np.zeros(512, dtype=np.float32)
     query[0] = 1.0
     alice = np.zeros(512, dtype=np.float32)
-    alice[0] = 0.5
-    alice[1] = np.sqrt(0.75)
+    alice[0] = 0.30
+    alice[1] = np.sqrt(1.0 - 0.30 ** 2)
     bob = np.zeros(512, dtype=np.float32)
-    bob[0] = 0.8
-    bob[2] = 0.6
+    bob[0] = 0.75
+    bob[2] = np.sqrt(1.0 - 0.75 ** 2)
     source = tmp / "explicit-alice.jpg"
     make_image(source)
     face = sort_photos.CachedFace(
@@ -2147,7 +2147,7 @@ def test_unknown_review_joint_policy_is_benchmark_gated(tmp: Path) -> None:
         def verify(self, _crop, expected_person, *, excluded_source=None,
                    excluded_sources=frozenset(), prepared=None):
             return secondary_identity_matcher.SecondaryVerification(
-                False, expected_person, 0.30, 0.15
+                True, expected_person, 0.20, 0.50
             )
 
         def flush(self):

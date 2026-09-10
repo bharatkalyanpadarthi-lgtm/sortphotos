@@ -272,7 +272,10 @@ leave new automatic matches in review; thresholds are not relaxed to pass.
 page appears, a cached full-library safety gate is checked. Faces are filed
 automatically through independently agreeing matchers or a separately validated
 strong single-photo lane. Cluster consensus still requires independent support.
-Per-person thresholds and second-place margins are unchanged. Both matchers are
+Recovery respects per-person thresholds, the independent verifier's accepted
+verdict, and the existing strict single-image separation margin. Two models of
+the same image do not substitute for independent source-image consensus; the
+rescue lane cannot override either model's calibration. Both matchers are
 validated with source-group holdouts; verified unknown cases must also be
 rejected. The strong single-photo lane stays off unless its own evaluation has
 zero incorrect accepts and the complete gate passes. Global
@@ -285,7 +288,8 @@ loads successive 500-file batches without restarting the command. Every
 single-face item shows the top three people with distance, second-place margin,
 quality, pose and, for borderline matches, the independent `buffalo_l` result.
 Each remaining item also shows why it needs review: weak confidence, a similar
-alternative, poor face quality, matcher disagreement, or a blocked safety gate.
+alternative, poor face quality, matcher disagreement, independent-verifier
+rejection, or a blocked safety gate.
 These explanations reuse computed evidence and do not rerun either detector.
 
 To validate without reconciling, moving, or filing photos:
