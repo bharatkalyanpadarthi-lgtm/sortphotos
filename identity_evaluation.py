@@ -36,6 +36,15 @@ CONFIRMED_IDENTITY_ALIASES = {
     "varalakshmi": "Varalakshmi Sarathkumar",
     "priya bhavani": "Priya Bhavani Sankar",
     "raashi khanna": "Raasi Khanna",
+    "yami gautham": "Yami Gautam",
+    "kruthi shetty": "Kriti Shetty",
+    "sridivya": "Sri Divya",
+    "sundarya": "Soundarya",
+    "rakul": "Rakul Preeth Singh",
+    "priety": "Preity",
+    "kriti": "Kriti Kharbhandha",
+    "kiara": "Kiara Advani",
+    "ashika": "Ashika Renganath",
 }
 
 

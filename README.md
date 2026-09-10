@@ -270,10 +270,12 @@ leave new automatic matches in review; thresholds are not relaxed to pass.
 
 `face unknown-review` opens the continuous Quick Review dashboard. Before the
 page appears, a cached full-library safety gate is checked. Faces are filed
-automatically only when the primary matcher, an independent second matcher,
-per-person thresholds, second-place margin checks, and cluster-consensus rules
-all agree. The combined automatic lane must also produce zero incorrect accepts
-on the explicit-confirmation benchmark before it can move a file. Global
+automatically through independently agreeing matchers or a separately validated
+strong single-photo lane. Cluster consensus still requires independent support.
+Per-person thresholds and second-place margins are unchanged. Both matchers are
+validated with source-group holdouts; verified unknown cases must also be
+rejected. The strong single-photo lane stays off unless its own evaluation has
+zero incorrect accepts and the complete gate passes. Global
 thresholds are never lowered, and automatically filed faces do not become
 trusted confirmation examples. When a manual confirmation corrects option 1,
 that face is retained as a hard-negative lookalike guard so the same mistake is
@@ -282,6 +284,16 @@ visual cluster at a time, automatically advances after a decision, and
 loads successive 500-file batches without restarting the command. Every
 single-face item shows the top three people with distance, second-place margin,
 quality, pose and, for borderline matches, the independent `buffalo_l` result.
+Each remaining item also shows why it needs review: weak confidence, a similar
+alternative, poor face quality, matcher disagreement, or a blocked safety gate.
+These explanations reuse computed evidence and do not rerun either detector.
+
+To validate without reconciling, moving, or filing photos:
+```bash
+python review_unknown_identities.py --validate-auto-only
+```
+This diagnostic checks the independent matcher even when the primary check
+fails. A diagnostic success alone never overrides a failed primary check.
 
 - `1`, `2`, or `3` confirms the entire cluster as that suggested person.
 - Enter confirms an existing or new person name for the entire cluster.

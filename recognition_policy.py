@@ -21,6 +21,18 @@ class AutomaticMatch:
     margin: float
 
 
+class RecoveryProfiles(dict):
+    """Bounded recovery vectors with source provenance for held-out validation."""
+
+    def __init__(self):
+        super().__init__()
+        self.sources = {}
+
+
+def strict_lane_allowed(gate) -> bool:
+    return bool(gate.get("allowed") is True and gate.get("strict_single_allowed") is True)
+
+
 def _automatic_item_evidence(
     item: UnknownItem, identity_db: IdentityDB, *, settings
 ) -> dict[str, object] | None:
@@ -107,6 +119,7 @@ def automatic_matches(
     identity_db: IdentityDB,
     *,
     require_secondary: bool = False,
+    allow_strict_single: bool = False,
     settings,
 ) -> list[AutomaticMatch]:
     """Return only automatic matches supported by conservative evidence lanes."""
@@ -217,7 +230,7 @@ def automatic_matches(
                 else "trusted_verifier_rescue"
                 if bool(value["secondary_rescue"])
                 else "strict_single"
-                if bool(value["strict"]) and (not require_secondary)
+                if bool(value["strict"]) and (not require_secondary or allow_strict_single)
                 else ""
             )
             if not lane:

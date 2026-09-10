@@ -223,9 +223,11 @@ def plan_recovery(
                   < sort_photos.AUTO_PERSON_MATCH_MIN_REFERENCE_FACES):
                 row["reason"] = "insufficient_identity_references"
             else:
+                from recognition_policy import strict_lane_allowed
                 matches = review.automatic_matches(
                     [review.UnknownCluster(item.key, (item,), item.candidates, 0.0)],
                     identity_db, require_secondary=True,
+                    allow_strict_single=strict_lane_allowed(_gate),
                 )
                 if matches:
                     match = matches[0]

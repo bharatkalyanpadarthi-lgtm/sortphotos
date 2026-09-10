@@ -29,6 +29,7 @@ import webbrowser
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
+from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -50,6 +51,7 @@ import pipeline_paths
 import recover_no_usable_faces
 import sort_photos
 import secondary_identity_matcher
+import review_reasons
 from pipeline_progress import StageProgress, terminal_progress
 
 
@@ -60,7 +62,7 @@ DEFAULT_OUTPUT_DIR = pipeline_paths.SOURCE_REVIEW / "identity_audits" / "unknown
 DEFAULT_DECISIONS = DEFAULT_OUTPUT_DIR / "unknown_identity_review_decisions.json"
 DEFAULT_SESSION = DEFAULT_OUTPUT_DIR / "unknown_identity_review_session.json"
 DECISIONS_VERSION = 3
-REVIEW_POLICY_VERSION = 7
+REVIEW_POLICY_VERSION = 8
 MAX_CLUSTER_ACTION_ITEMS = 500
 MAX_BATCH_ACTION_ITEMS = 50
 AUTO_CLUSTER_MIN_MARGIN = 0.08
@@ -77,7 +79,7 @@ AUTO_RESCUE_MAX_SECONDARY_DISTANCE = 0.24
 AUTO_RESCUE_MIN_SECONDARY_MARGIN = 0.14
 AUTO_RESCUE_MIN_QUALITY = 0.45
 AUTO_GATE_MIN_CONFIRMED_CASES = 100
-AUTO_GATE_CACHE_VERSION = 7
+AUTO_GATE_CACHE_VERSION = 8
 AUTO_SWEEP_STATE_VERSION = 3
 TRUSTED_REVIEW_PROTOTYPES_PER_PERSON = 24
 AUTO_SWEEP_BATCH_SIZE = 500
@@ -339,7 +341,8 @@ def build_trusted_review_prototypes(
             pose_label=str(getattr(face, "pose_label", "unknown") or "unknown"),
         ))
 
-    profiles: dict[str, list[np.ndarray]] = {}
+    from recognition_policy import RecoveryProfiles
+    profiles = RecoveryProfiles()
     selected_counts: dict[str, int] = {}
     bounded_limit = max(0, int(limit_per_person))
     profile_progress = StageProgress("Building trusted recovery profiles", len(identity_db.identities), progress)
@@ -353,15 +356,20 @@ def build_trusted_review_prototypes(
             *(identity_profiles.normalize_vector(sample.embedding) for sample in trusted),
         ]
         profiles[person] = values
+        profiles.sources[person] = [
+            *identity_db.prototype_sources.get(person, []),
+            *(sample.source for sample in trusted),
+        ]
         if trusted:
             selected_counts[person] = len(trusted)
     return profiles, selected_counts
 
 
-def automatic_matches(clusters, identity_db, *, require_secondary=False):
+def automatic_matches(clusters, identity_db, *, require_secondary=False, allow_strict_single=False):
     import recognition_policy
     return recognition_policy.automatic_matches(
-        clusters, identity_db, require_secondary=require_secondary, settings=sys.modules[__name__])
+        clusters, identity_db, require_secondary=require_secondary,
+        allow_strict_single=allow_strict_single, settings=sys.modules[__name__])
 
 
 def legacy_item_key(path: Path) -> str:
@@ -1104,6 +1112,12 @@ def write_review_reports(state: dict) -> None:
     decisions = load_decisions(state["decisions_path"])
     summary = dict(state.get("summary", {}))
     summary["progress"] = review_progress(state, decisions)
+    summary["review_reasons"] = {
+        item.key: review_reasons.explain(
+            item, state["identity_db"], settings=sys.modules[__name__],
+            gate=state.get("auto_review_gate", {}), enabled=bool(state.get("auto_review_allowed")),
+        ) for item in state.get("items_by_key", {}).values()
+    }
     state["summary"] = summary
     (output_dir / "latest_unknown_identity_review.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n",
@@ -1978,10 +1992,12 @@ def apply_automatic_review(
     *,
     preview: bool = False,
 ) -> dict[str, object]:
+    from recognition_policy import strict_lane_allowed
     matches = automatic_matches(
         clusters,
         state["identity_db"],
         require_secondary=True,
+        allow_strict_single=strict_lane_allowed(state.get("auto_review_gate", {})),
     )
     result: dict[str, object] = {
         "eligible": sum(len(match.item_keys) for match in matches),
@@ -2195,44 +2211,71 @@ def evaluate_automatic_policy_benchmark(
     hard_negatives: dict[str, list[np.ndarray]],
     review_prototypes: dict[str, list[np.ndarray]] | None = None,
     evaluation_path: Path = evaluation_enrollment.DEFAULT_PATH,
+    protected_path: Path | None = None,
     progress=terminal_progress,
     checkpoints=None,
 ) -> tuple[bool, dict[str, object]]:
-    """Prove the dual-model automatic lane against explicit confirmations."""
+    """Evaluate the actual recovery lanes with source holdouts and unknowns."""
     validation = identity_evaluation.evaluation_dataset.load_dataset(evaluation_path)
+    cases = list(validation.cases)
+    errors = list(validation.errors)
+    if protected_path is not None:
+        protected = identity_evaluation.evaluation_dataset.load_dataset(protected_path)
+        cases.extend(protected.cases)
+        errors.extend(protected.errors)
     report: dict[str, object] = {
         "available": evaluation_path.expanduser().is_file(),
-        "cases": len(validation.cases),
+        "cases": len(cases),
         "evaluated": 0,
         "accepted": 0,
         "correct": 0,
         "incorrect": 0,
-        "errors": list(validation.errors),
+        "errors": errors,
         "incorrect_rows": [],
         "leave_one_source_out": True,
+        "strict_single": {"evaluated": 0, "accepted": 0, "correct": 0, "incorrect": 0},
+        "unknown_evaluated": 0,
+        "strict_single_allowed": False,
     }
-    if validation.errors:
+    if errors:
         return False, report
 
     from evaluation_profiles import EvaluationProfiles
-    prepared = EvaluationProfiles(identity_db)
+    scoring_db = identity_db
+    if review_prototypes is not None:
+        sources = getattr(review_prototypes, "sources", None)
+        if sources is None or any(len(values) != len(sources.get(person, []))
+                                  for person, values in review_prototypes.items()):
+            report["errors"].append("Recovery prototypes lack complete source provenance")
+            return False, report
+        scoring_db = replace(identity_db, prototypes=review_prototypes, prototype_sources=sources)
+    prepared = EvaluationProfiles(scoring_db)
     verifier_profiles = EvaluationProfiles(sort_photos.IdentityDB(
         identities=secondary_matcher.db.identities,
         prototypes=secondary_matcher.db.prototypes,
         prototype_sources=secondary_matcher.db.prototype_sources), negative_examples=[])
     faces_by_source = _faces_by_source(cache)
     groups = {}
-    for case in validation.cases:
+    for case in cases:
         groups.setdefault(case.group_id or case.content_sha256 or str(case.source), set()).add(str(case.source))
     def evaluate(case):
-        result = {"evaluated": 0, "accepted": 0, "correct": 0, "incorrect": 0, "incorrect_rows": []}
-        if not case.verified or case.expected_person not in identity_db.identities:
+        result = {"evaluated": 0, "accepted": 0, "correct": 0, "incorrect": 0,
+                  "incorrect_rows": [], "unknown_evaluated": 0,
+                  "strict_single": {"evaluated": 0, "accepted": 0, "correct": 0, "incorrect": 0}}
+        if not case.verified:
+            return result
+        expected = set(case.expected_people or ((case.expected_person,) if case.expected_person else ()))
+        is_unknown = not case.expected_face or "unknown" in case.case_types
+        # Production routes multi-face images separately; do not guess a selected face.
+        if "group" in case.case_types or (not is_unknown and len(expected) != 1):
             return result
         source_faces = faces_by_source.get(os.path.realpath(str(case.source)), [])
         face = _confirmed_case_face(case, source_faces, identity_db)
         if face is None:
             return result
         result["evaluated"] = 1
+        result["strict_single"]["evaluated"] = 1
+        result["unknown_evaluated"] = int(is_unknown)
         excluded = frozenset(groups[case.group_id or case.content_sha256 or str(case.source)])
         candidates = prepared.rank(face, excluded_sources=excluded, minimum_references=False)[:3]
         if not candidates:
@@ -2242,32 +2285,43 @@ def evaluate_automatic_policy_benchmark(
             excluded_sources=excluded, prepared=verifier_profiles)
         item = UnknownItem("benchmark", case.source, face, candidates, secondary)
         evidence = _automatic_item_evidence(item, identity_db)
-        if evidence is None or not bool(
-            evidence["secondary"] or evidence["secondary_rescue"]
-        ):
+        if evidence is None:
             return result
-        result["accepted"] = 1
-        if candidates[0].name.casefold() == case.expected_person.casefold():
-            result["correct"] = 1
-            return result
-        result["incorrect"] = 1
-        result["incorrect_rows"].append({
+        outcome = ("correct" if not is_unknown
+                   and identity_evaluation.evaluation_identity_key(candidates[0].name)
+                   in {identity_evaluation.evaluation_identity_key(name) for name in expected}
+                   else "incorrect")
+        dual = bool((evidence["secondary"] or evidence["secondary_rescue"])
+                    and not evidence["secondary_dissent"])
+        strict = bool(evidence["strict"] and not evidence["secondary_dissent"])
+        if strict:
+            result["strict_single"]["accepted"] = 1
+            result["strict_single"][outcome] = 1
+        if dual:
+            result["accepted"] = 1
+            result[outcome] = 1
+        if (strict or dual) and outcome == "incorrect":
+            result["incorrect_rows"].append({
                 "source": str(case.source),
                 "expected": case.expected_person,
                 "predicted": candidates[0].name,
+                "strict_single": strict,
+                "dual_matcher": dual,
                 "primary_distance": round(float(candidates[0].distance), 6),
                 "primary_margin": round(
                     identity_profiles.candidate_margin(candidates), 6
                 ),
                 "secondary_distance": round(float(secondary.distance), 6),
                 "secondary_margin": round(float(secondary.margin), 6),
-        })
+            })
         return result
-    results = evaluation_runtime.evaluate_blocks(validation.cases, evaluate, checkpoints=checkpoints,
+    results = evaluation_runtime.evaluate_blocks(cases, evaluate, checkpoints=checkpoints,
         stage="Independent-match safety benchmark", progress=progress)
     for result in results:
-        for key in ("evaluated", "accepted", "correct", "incorrect"):
+        for key in ("evaluated", "accepted", "correct", "incorrect", "unknown_evaluated"):
             report[key] += result[key]
+        for key in ("evaluated", "accepted", "correct", "incorrect"):
+            report["strict_single"][key] += result["strict_single"][key]
         report["incorrect_rows"].extend(result["incorrect_rows"][:max(0, 20 - len(report["incorrect_rows"]))])
     prepared.validate()
     verifier_profiles.validate()
@@ -2276,10 +2330,17 @@ def evaluate_automatic_policy_benchmark(
     accepted = int(report["accepted"])
     incorrect = int(report["incorrect"])
     report["precision"] = (accepted - incorrect) / max(1, accepted)
+    strict = report["strict_single"]
+    report["strict_single_allowed"] = bool(
+        strict["evaluated"] >= AUTO_GATE_MIN_CONFIRMED_CASES
+        and strict["accepted"] > 0 and strict["incorrect"] == 0
+        and report["unknown_evaluated"] > 0
+    )
     allowed = bool(
         evaluated >= AUTO_GATE_MIN_CONFIRMED_CASES
         and accepted > 0
         and incorrect == 0
+        and (protected_path is None or report["unknown_evaluated"] > 0)
     )
     return allowed, report
 
@@ -2373,6 +2434,7 @@ def prepare_automatic_review_gate(
     output_dir: Path,
     review_prototypes: dict[str, list[np.ndarray]] | None = None,
     progress=terminal_progress,
+    diagnose_independent: bool = False,
 ) -> tuple[bool, dict[str, object], str]:
     """A failed safety evaluation disables auto-filing, not manual review."""
     try:
@@ -2383,7 +2445,8 @@ def prepare_automatic_review_gate(
         with evaluation_runtime.exclusive_evaluation(output_dir):
             return _prepare_automatic_review_gate(
                 identity_db, cache, secondary_matcher, requested=requested,
-                output_dir=output_dir, review_prototypes=review_prototypes, progress=progress)
+                output_dir=output_dir, review_prototypes=review_prototypes, progress=progress,
+                diagnose_independent=diagnose_independent)
     except Exception as error:  # noqa: BLE001
         message = f"Safe auto-match unavailable: {type(error).__name__}: {error}. Manual review remains available."
         progress(message)
@@ -2401,6 +2464,7 @@ def _prepare_automatic_review_gate(
     output_dir: Path,
     review_prototypes: dict[str, list[np.ndarray]] | None = None,
     progress=terminal_progress,
+    diagnose_independent: bool = False,
 ) -> tuple[bool, dict[str, object], str]:
     """Use a cached full-library safety gate before allowing automatic moves."""
     if not requested:
@@ -2442,6 +2506,8 @@ def _prepare_automatic_review_gate(
         cached.get("version") == AUTO_GATE_CACHE_VERSION
         and cached.get("signature") == signature
         and isinstance(cached.get("allowed"), bool)
+        and not (diagnose_independent
+                 and cached.get("report", {}).get("automatic_policy", {}).get("skipped"))
     ):
         allowed = bool(cached["allowed"])
         validate_inputs()
@@ -2462,12 +2528,15 @@ def _prepare_automatic_review_gate(
                 identity_db, identity_db, cache, confirmed_set=None, progress=progress,
                 checkpoints=checkpoints, selected_faces=primary_faces, fail_fast=True)
             checkpoints.check()
-            if primary_allowed:
+            if primary_allowed or diagnose_independent:
+                if not primary_allowed:
+                    progress("Primary safety check failed; evaluating independent matcher for diagnosis only.")
                 policy_allowed, policy_report = evaluate_automatic_policy_benchmark(
                     identity_db, cache, secondary_matcher,
                     hard_negatives=identity_hard_negatives.vectors_by_person(
                         sort_photos.IDENTITY_HARD_NEGATIVES_FILE),
                     review_prototypes=review_prototypes, progress=progress,
+                    protected_path=identity_evaluation.DEFAULT_PROTECTED_SET,
                     checkpoints=checkpoints)
             else:
                 progress("Safety benchmark blocked; skipping independent matcher. Manual review remains available.")
@@ -2492,6 +2561,7 @@ def _prepare_automatic_review_gate(
         "signature": signature,
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "allowed": bool(allowed),
+        "strict_single_allowed": bool(allowed and policy_report.get("strict_single_allowed")),
         "report": report,
     }
     gate_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2939,8 +3009,8 @@ class FinishReviewJob:
                         "automatic_confirmations": automatic_confirmations,
                         "thresholds_lowered": False,
                         "note": (
-                            "Automatic confirmations required the safety gate, independent "
-                            "matcher agreement, and strict cluster evidence. Only explicit "
+                            "Automatic confirmations required the safety gate and a validated "
+                            "single-photo, dual-matcher, or supported cluster lane. Only explicit "
                             "user confirmations were enrolled as trusted training examples."
                         ),
                     },
@@ -3086,6 +3156,14 @@ def render_html(
                 status,
             )).casefold()
             item_status = "reviewed" if decided_action or not exists else "pending"
+            reasons = summary.get("review_reasons", {}).get(item.key, [])
+            if item_best.casefold() in {name.casefold() for name in rejected_people}:
+                reasons = [{"code": "user_rejected_candidate", "message": f"You rejected {item_best} for this image."}]
+            reason_html = "".join(
+                f"<p class='review-reason' data-reason='{html.escape(reason['code'], quote=True)}'>"
+                f"{html.escape(reason['message'])}</p>"
+                for reason in reasons
+            ) if not decided_action else ""
             item_cards.append(
                 f"<article class='item {item_status}' data-item='{item.key}' "
                 f"data-status='{item_status}' data-best='{html.escape(item_best, quote=True)}' "
@@ -3099,6 +3177,7 @@ def render_html(
                 f"<span class='status-badge'>{html.escape(status)}</span></div>"
                 f"<div class='item-body'><strong class='filename' title='{html.escape(str(item.path), quote=True)}'>{html.escape(item.path.name)}</strong>"
                 f"<div class='candidate-chips'>{candidate_chips}</div>"
+                f"{reason_html}"
                 f"<p class='evidence'>margin={item_margin:.3f} &middot; quality={item.face.quality:.3f} &middot; pose={html.escape(item.face.pose_label)}{html.escape(secondary_text)}</p>"
                 f"</div><details class='item-review'><summary>Review actions</summary><div class='review-body'>"
                 f"<label>Confirmed person<input class='person' list='people' value='{html.escape(item_best, quote=True)}' aria-label='Confirmed person'{disabled}></label>"
@@ -3173,6 +3252,7 @@ def render_html(
 :root{{color-scheme:dark;--bg:#0b0c0e;--panel:#17191d;--panel2:#22252b;--line:#343840;--text:#f5f5f7;--muted:#a8adb5;--blue:#0a84ff;--green:#30d158;--amber:#ffd60a;--red:#ff6961}}
 *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:14px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;letter-spacing:0}}
 button,input,select{{font:inherit}}button{{cursor:pointer}}button:disabled,input:disabled{{opacity:.35;cursor:not-allowed}}
+.review-reason{{color:var(--amber);font-size:13px;line-height:1.4;overflow-wrap:anywhere;margin:6px 0}}
 kbd{{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 5px;border:1px solid #5b606a;border-radius:4px;background:#2c3036;color:#fff;font:600 11px -apple-system,BlinkMacSystemFont,"SF Mono",monospace}}
 header{{position:sticky;top:0;z-index:20;padding:15px 20px 12px;background:rgba(11,12,14,.95);border-bottom:1px solid var(--line);backdrop-filter:blur(18px)}}
 .inner{{max-width:1800px;margin:auto}}h1{{font-size:25px;margin:0}}h2{{font-size:17px;margin:0 0 4px}}p{{margin:4px 0;color:var(--muted)}}
@@ -3569,6 +3649,13 @@ def run_automatic_sweep_worker(task_path: Path) -> int:
             cache,
             confirmations_path=sort_photos.IDENTITY_CONFIRMATIONS_FILE,
         )
+        matcher = secondary_identity_matcher.SecondaryMatcher(secondary_db)
+        allowed, gate, gate_message = prepare_automatic_review_gate(
+            identity_db, cache, matcher, requested=True,
+            output_dir=Path(task["output_dir"]), review_prototypes=review_prototypes,
+        )
+        if not allowed:
+            raise RuntimeError(gate_message)
         people_root = Path(task["people_root"])
         existing_hashes = recover_no_usable_faces.load_existing_hashes(people_root)
         known_destinations: dict[tuple[str, str], Path] = {}
@@ -3604,7 +3691,7 @@ def run_automatic_sweep_worker(task_path: Path) -> int:
                 identity_db, sort_photos.IDENTITY_HARD_NEGATIVES_FILE
             ),
             "review_prototypes": review_prototypes,
-            "secondary_matcher": secondary_identity_matcher.SecondaryMatcher(secondary_db),
+            "secondary_matcher": matcher,
             "analysis_index": Path(task["analysis_index"]),
             "existing_hashes": existing_hashes,
             "destinations_by_hash": known_destinations,
@@ -3617,7 +3704,9 @@ def run_automatic_sweep_worker(task_path: Path) -> int:
             "fallback_det_size": int(task["fallback_det_size"]),
             "cluster_eps": float(task["cluster_eps"]),
             "route_unsupported": bool(task.get("route_unsupported", True)),
-            "auto_review_allowed": True,
+            "auto_review_allowed": allowed,
+            "auto_review_gate": gate,
+            "auto_review_gate_message": gate_message,
             "auto_review_requested": True,
             "auto_review_preview": False,
             "capture_cache_delta": True,
@@ -3702,6 +3791,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run benchmark-gated recovery across every pending file without serving the UI.",
     )
+    parser.add_argument("--validate-auto-only", action="store_true",
+                        help="Validate both matchers without reconciling, filing, or moving photos.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8772)
     parser.add_argument("--quiet", action="store_true")
@@ -3725,7 +3816,7 @@ def main() -> int:
     hard_negatives_path = sort_photos.IDENTITY_HARD_NEGATIVES_FILE
     hard_negatives = identity_hard_negatives.vectors_by_person(hard_negatives_path)
     auto_requested = bool(
-        args.auto_safe or args.auto_safe_preview or args.reprocess_pending
+        args.auto_safe or args.auto_safe_preview or args.reprocess_pending or args.validate_auto_only
     )
     cache = sort_photos.load_cache()
     print("Preparing shared confirmed-reference index...", flush=True)
@@ -3746,6 +3837,27 @@ def main() -> int:
     decisions_path = args.decisions.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    if args.validate_auto_only:
+        allowed, gate, message = prepare_automatic_review_gate(
+            identity_db, cache, secondary_matcher, requested=True, output_dir=output_dir,
+            review_prototypes=review_prototypes, diagnose_independent=True,
+        )
+        print(message, flush=True)
+        print("Strict single-photo lane: " + (
+            "validated" if gate.get("strict_single_allowed") else "held behind safety check"), flush=True)
+        report = gate.get("report", {})
+        policy = report.get("automatic_policy", {})
+        for label, result in (("Primary", report.get("candidate", {})),
+                              ("Independent", policy), ("Strict single-photo", policy.get("strict_single", {}))):
+            if "evaluated" not in result:
+                print(f"{label}: evaluation did not complete", flush=True)
+            else:
+                print(f"{label}: {result['evaluated']} evaluated; "
+                      f"{result.get('incorrect', 0)} incorrect accepts", flush=True)
+        for failure in (*report.get("failures", []), *policy.get("errors", [])):
+            print(f"Held: {failure}", flush=True)
+        print("Validation only: no photos filed, moved, or deleted.", flush=True)
+        return 0 if allowed else 1
     analysis_index_path = sort_photos.analysis_index_file()
     relink_stats = evaluation_enrollment.relink_missing_sources(
         analysis_index_path=analysis_index_path,
