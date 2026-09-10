@@ -39,10 +39,15 @@ async function main() {
         state.batch = 'completed'; state.complete = true;
         return json({ status: 'completed', complete: true }, 202);
       }
-      if (endpoint === '/jobs') return json({ jobs: [], resolved_item_keys: state.resolved ? ['fixture'] : [], summary: { queued: state.busy ? 1 : 0, running: 0, failed: 0 } });
+      if (endpoint === '/jobs') {
+        const snapshot = { jobs: state.jobs || [], resolved_item_keys: state.resolved ? ['fixture'] : [], summary: { queued: state.queued ?? (state.busy ? 1 : 0), running: 0, failed: state.failed || 0 } };
+        if (state.delayJobs) await new Promise(resolve => setTimeout(resolve, state.delayJobs));
+        if (state.failJobsRead) { state.failJobsRead = false; return route.abort(); }
+        return json(snapshot);
+      }
       if (endpoint === '/progress') return json({ progress: { reviewed: 5, total: 5 } });
       if (endpoint === '/finish') {
-        state.finish = state.finishFailure ? 'failed' : 'completed';
+        state.finish = state.finishFailure ? 'failed' : state.finishRunning ? 'running' : 'completed';
         if (state.lostFinishResponse) { state.lostFinishResponse = false; return route.abort(); }
         return json({ status: state.finish, message: 'saved', report: 'test' }, 202);
       }
@@ -98,6 +103,63 @@ async function main() {
     await scenario('finish while waiting for actions cancels retry', { conflict: 'actions_pending', busy: true }, async (page, state, counts, finish) => {
       await finish(); await finished(page); state.busy = false;
       await quiet(page); assert.equal(batchPosts(counts), 1);
+    });
+    await scenario('finish drains thirteen actions without resuming batches', { batch: 'completed', complete: true, queued: 13, finishRunning: true }, async (page, state, counts, finish) => {
+      await page.waitForFunction(() => document.querySelector('#queueCount').textContent === '13');
+      await page.evaluate(() => { activeJobIds.add('last-action'); persistJobs(); });
+      await finish();
+      state.queued = 0;
+      state.jobs = [{ id: 'last-action', status: 'completed', item_keys: [], message: 'Saved' }];
+      await page.waitForFunction(() => document.querySelector('#queueCount').textContent === '0');
+      assert.equal(await page.evaluate(() => sessionStorage.getItem('unknownJobs')), '[]');
+      assert.equal(counts['GET /progress'] || 0, 0);
+      assert.equal(batchPosts(counts), 0);
+      assert.equal(counts['GET /'], 1);
+      state.finish = 'completed'; await finished(page); await quiet(page);
+      const reads = counts['GET /jobs'];
+      await quiet(page); assert.equal(counts['GET /jobs'], reads);
+      assert.equal(counts['POST /finish'], 1); assert.equal(batchPosts(counts), 0);
+    });
+    await scenario('late action response reconciles after finish starts', { batch: 'completed', complete: true, queued: 13, finishRunning: true }, async (page, state, counts, finish) => {
+      await page.waitForFunction(() => document.querySelector('#queueCount').textContent === '13');
+      state.delayJobs = 400;
+      await page.evaluate(() => { pollJobs(); });
+      await finish(); state.queued = 0;
+      await page.waitForFunction(() => document.querySelector('#queueCount').textContent === '0');
+      assert.equal(counts['GET /progress'] || 0, 0); assert.equal(batchPosts(counts), 0);
+    });
+    await scenario('terminal finish rereads queue after an older in-flight snapshot', { batch: 'completed', complete: true, queued: 13 }, async (page, state, counts, finish) => {
+      await page.waitForFunction(() => document.querySelector('#queueCount').textContent === '13' && !polling);
+      state.delayJobs = 800;
+      const reads = counts['GET /jobs'];
+      await page.evaluate(() => { pollJobs(); });
+      while (counts['GET /jobs'] === reads) await page.waitForTimeout(10);
+      state.queued = 0; state.delayJobs = 0;
+      await finish(); await finished(page);
+      await page.waitForFunction(() => document.querySelector('#queueCount').textContent === '0' && !polling);
+      await quiet(page); assert.equal(batchPosts(counts), 0);
+      const finalReads = counts['GET /jobs']; await quiet(page);
+      assert.equal(counts['GET /jobs'], finalReads);
+    });
+    await scenario('finishing reload recovers queue and transient read failure', { finish: 'running', queued: 13 }, async (page, state, counts) => {
+      await page.waitForFunction(() => document.querySelector('#queueCount').textContent === '13');
+      await page.reload();
+      await page.waitForFunction(() => document.querySelector('#queueCount').textContent === '13');
+      state.failJobsRead = true;
+      await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('fetch'));
+      assert.equal(await page.locator('#queueCount').textContent(), '13');
+      state.queued = 0;
+      await page.waitForFunction(() => document.querySelector('#queueCount').textContent === '0');
+      assert.equal(batchPosts(counts), 0);
+    });
+    await scenario('failed action during finish is reported without reload', { batch: 'completed', complete: true, queued: 1, finishRunning: true }, async (page, state, counts, finish) => {
+      await page.waitForFunction(() => document.querySelector('#queueCount').textContent === '1');
+      await finish(); state.queued = 0; state.failed = 1;
+      state.jobs = [{ id: 'failure', status: 'failed', item_keys: [], error: 'Test action failed safely' }];
+      await page.waitForFunction(() => document.querySelector('#toast').textContent === 'Test action failed safely');
+      await quiet(page);
+      assert.equal(await page.locator('#queueCount').textContent(), '0');
+      assert.equal(counts['GET /'], 1); assert.equal(batchPosts(counts), 0);
     });
     await scenario('unknown conflict pauses instead of retry storm', { conflict: 'unexpected' }, async (page, state, counts) => {
       await quiet(page); assert.equal(batchPosts(counts), 1);

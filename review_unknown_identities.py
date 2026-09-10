@@ -3309,7 +3309,7 @@ const batchPerson=document.getElementById('batchPerson');
 const useSuggestion=document.getElementById('useSuggestion');
 const activeJobIds=new Set(JSON.parse(sessionStorage.getItem('unknownJobs')||'[]'));
 const temporarilySkipped=new Set();
-let activeIndex=0,lastChecked=null,polling=false,loadingBatch=false;
+let activeIndex=0,lastChecked=null,polling=false,queueRefreshPending=false,loadingBatch=false;
 let lifecycleReady=false,finishing=false,reviewFinished=false,queueComplete=false;
 let autoLoadPaused=false,waitingForActions=false,batchTimer=null,finishTimer=null,batchGeneration=0;
 const allClusters=()=>[...document.querySelectorAll('.cluster')];
@@ -3335,10 +3335,10 @@ function finishState(result){{
   if(result.status==='completed'){{
     reviewFinished=true;finishing=false;queueComplete=true;pauseBatchLoading();clearTimeout(finishTimer);
     button.textContent='Review Finished';document.getElementById('clusterPosition').textContent='Review Finished';
-    updateLifecycleControls();return true;
+    updateLifecycleControls();pollJobs(true);return true;
   }}
   if(result.status==='queued'||result.status==='running'){{
-    finishing=true;pauseBatchLoading();button.textContent=result.step||'Finishing...';updateLifecycleControls();return false;
+    finishing=true;pauseBatchLoading();button.textContent=result.step||'Finishing...';updateLifecycleControls();pollJobs(true);return false;
   }}
   return false;
 }}
@@ -3401,11 +3401,11 @@ function applyResolvedItems(keys){{
   allClusters().forEach(cluster=>{{if(!cluster.querySelector('.row-select:not(:disabled)'))cluster.dataset.pending='0';}});
   updateSelection();
 }}
-async function pollJobs(){{
-  if(polling||finishing||reviewFinished)return;polling=true;let repeat=false,failed=false;
+async function pollJobs(statusOnly=false){{
+  if(polling){{if(statusOnly)queueRefreshPending=true;return;}}
+  if((finishing||reviewFinished)&&!statusOnly)return;polling=true;let repeat=false,failed=false;
   try{{
     const ids=[...activeJobIds];const jobsURL=ids.length?'/jobs?'+new URLSearchParams({{ids:ids.join(',')}}):'/jobs';const response=await fetch(jobsURL);const result=await response.json();
-    if(finishing||reviewFinished)return;
     if(!response.ok)throw new Error(result.error||'Could not read action queue');
     queueCount.textContent=(result.summary.queued||0)+(result.summary.running||0);
     applyResolvedItems(result.resolved_item_keys||[]);
@@ -3413,10 +3413,16 @@ async function pollJobs(){{
     ids.filter(id=>!returnedJobIds.has(id)).forEach(id=>activeJobIds.delete(id));
     result.jobs.forEach(job=>{{if(job.status==='queued'||job.status==='running'){{activeJobIds.add(job.id);markJobCards(job);}}else{{activeJobIds.delete(job.id);if(job.status==='failed'){{failed=true;notify(job.error||'Review action failed',true);}}else if(job.message)notify(job.message);}}}});
     persistJobs();repeat=activeJobIds.size>0||(result.summary.queued||0)+(result.summary.running||0)>0;
+    // Finish still drains the queue, but must never resume batches or reload the page.
+    if(statusOnly||finishing||reviewFinished)return;
     if(failed){{setTimeout(()=>location.reload(),900);return;}}
     if(!repeat){{waitingForActions=false;await refreshProgress();maybeLoadNextBatch();}}
   }}catch(error){{notify(error.message,true);repeat=true;}}
-  finally{{polling=false;if(repeat&&!finishing&&!reviewFinished)setTimeout(pollJobs,700);}}
+  finally{{
+    polling=false;
+    if(queueRefreshPending){{queueRefreshPending=false;pollJobs(true);}}
+    else if(repeat&&!statusOnly&&!finishing&&!reviewFinished)setTimeout(pollJobs,700);
+  }}
 }}
 async function decide(action,keys,person=''){{
   if(!interactive){{notify('Launch with face unknown-review to use actions.',true);return;}}
