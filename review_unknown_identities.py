@@ -2143,6 +2143,8 @@ def learn_hard_negatives_from_confirmed_reviews(
         return report
 
     faces_by_source = _faces_by_source(cache)
+    import benchmark_inputs
+    faces_by_source.update(benchmark_inputs.prepare_selected_faces(validation.cases, cache))
     hard_negatives = identity_hard_negatives.vectors_by_person(hard_negatives_path)
     learned = 0
     usable = 0
@@ -2260,6 +2262,8 @@ def evaluate_automatic_policy_benchmark(
         prototypes=secondary_matcher.db.prototypes,
         prototype_sources=secondary_matcher.db.prototype_sources), negative_examples=[])
     faces_by_source = _faces_by_source(cache)
+    import benchmark_inputs
+    faces_by_source.update(benchmark_inputs.prepare_selected_faces(cases, cache, progress=progress))
     groups = {}
     for case in cases:
         groups.setdefault(case.group_id or case.content_sha256 or str(case.source), set()).add(str(case.source))

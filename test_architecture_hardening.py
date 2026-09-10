@@ -142,6 +142,103 @@ class ArchitectureTests(unittest.TestCase):
         self.assertNotIn(record.src, organized)
         self.assertTrue(record.src.is_file())
 
+    def test_low_quality_cluster_votes_cannot_file_repeated_tiny_faces(self):
+        records = [self.face(f"low-{i}.jpg", self.alice) for i in range(5)]
+        for face in records:
+            face.quality = 0.12
+        db = sorter.IdentityDB(identities={"Alice": self.alice, "Bob": self.bob},
+                               source_counts={"Alice": 10, "Bob": 10})
+        names = {1: "person_001"}
+        with patch.object(sorter.identity_hard_negatives, "vectors_by_person", return_value={}):
+            sorter.apply_identity_db_labels(records, names, db, use_secondary_verifier=False)
+        self.assertFalse(any(sorter.is_real_person_label(names.get(f.cluster_id)) for f in records))
+
+    def test_low_quality_member_cannot_inherit_good_cluster_votes(self):
+        records = [self.face(f"mix-{i}.jpg", self.alice) for i in range(5)]
+        records[-1].quality = 0.12
+        db = sorter.IdentityDB(identities={"Alice": self.alice, "Bob": self.bob},
+                               source_counts={"Alice": 10, "Bob": 10})
+        names = {1: "person_001"}
+        with patch.object(sorter.identity_hard_negatives, "vectors_by_person", return_value={}):
+            sorter.apply_identity_db_labels(records, names, db, use_secondary_verifier=False)
+        self.assertTrue(all(names[f.cluster_id] == "Alice" for f in records[:-1]))
+        self.assertFalse(sorter.is_real_person_label(names.get(records[-1].cluster_id)))
+
+    def test_weaker_cluster_members_need_independent_verification(self):
+        vector = np.zeros(512, dtype=np.float32)
+        vector[:2] = [0.76, np.sqrt(1 - 0.76**2)]
+        competitor = np.eye(512, dtype=np.float32)[2]
+        records = [self.face(f"weak-{i}.jpg", vector) for i in range(5)]
+        db = sorter.IdentityDB(identities={"Alice": self.alice, "Bob": competitor},
+                               source_counts={"Alice": 10, "Bob": 10})
+        names = {1: "person_001"}
+        with patch.object(sorter.identity_hard_negatives, "vectors_by_person", return_value={}):
+            sorter.apply_identity_db_labels(records, names, db, use_secondary_verifier=False)
+        self.assertFalse(any(sorter.is_real_person_label(names.get(f.cluster_id)) for f in records))
+
+    def test_filing_benchmark_counts_one_destination_per_person_source(self):
+        face = self.face("collage.jpg", self.alice)
+        case = evaluation_dataset.EvaluationCase(face.src, "Alice", frozenset({"known"}),
+                                                 True, "unknown", True)
+        cached = sorter.record_to_cached(face, label=None)
+        decisions = {str(face.src): [dict(person="Alice", face_index=0),
+                                     dict(person="Alice", face_index=1)]}
+        with patch.object(shadow_evaluation, "daily_plan", return_value=decisions), \
+             patch.object(sorter, "analysis_index_file", return_value=self.root / "index.sqlite"):
+            metrics, rows = identity_evaluation.evaluate_golden_set((case,),
+                sorter.CacheState(faces=[cached]), sorter.IdentityDB(), lane="pipeline")
+        self.assertEqual(rows[0]["identity_outcome"], "correct")
+        self.assertEqual(metrics.identity_precision, 1.0)
+        self.assertEqual(metrics.known_case_recall, 1.0)
+        decisions[str(face.src)].append(dict(person="Bob", face_index=2))
+        with patch.object(shadow_evaluation, "daily_plan", return_value=decisions), \
+             patch.object(sorter, "analysis_index_file", return_value=self.root / "index.sqlite"):
+            metrics, rows = identity_evaluation.evaluate_golden_set((case,),
+                sorter.CacheState(faces=[cached]), sorter.IdentityDB(), lane="pipeline")
+        self.assertEqual(rows[0]["identity_outcome"], "incorrect")
+        self.assertEqual(metrics.identity_precision, 0.5)
+
+    def test_weaker_cluster_verifies_each_member_independently(self):
+        vector = np.zeros(512, dtype=np.float32)
+        vector[:2] = [0.76, np.sqrt(1 - 0.76**2)]
+        records = [self.face(f"verified-{i}.jpg", vector) for i in range(5)]
+        for record in records:
+            record.crop_jpeg = b"agree"
+        records[-1].crop_jpeg = b"disagree"
+        db = sorter.IdentityDB(identities={"Alice": self.alice, "Bob": np.eye(512)[2]},
+                               source_counts={"Alice": 10, "Bob": 10})
+        verified = []
+
+        def verify(crop, expected):
+            verified.append((crop, expected))
+            return SimpleNamespace(accepted=crop == b"agree")
+
+        matcher = SimpleNamespace(verify=verify, flush=lambda: None)
+        names = {1: "person_001"}
+        with patch.object(sorter.identity_hard_negatives, "vectors_by_person", return_value={}), \
+             patch.object(secondary_identity_matcher, "load", return_value=SimpleNamespace(primary_signature="test")), \
+             patch.object(secondary_identity_matcher, "primary_signature", return_value="test"), \
+             patch.object(secondary_identity_matcher, "trusted_snapshot_is_current", return_value=True), \
+             patch.object(secondary_identity_matcher, "SecondaryMatcher", return_value=matcher):
+            sorter.apply_identity_db_labels(records, names, db)
+        self.assertTrue(all(names[f.cluster_id] == "Alice" for f in records[:-1]))
+        self.assertFalse(sorter.is_real_person_label(names.get(records[-1].cluster_id)))
+        self.assertIn((b"disagree", "Alice"), verified)
+
+    def test_collage_destination_dedup_preserves_expected_face_count(self):
+        face = self.face("one-detected-face.jpg", self.alice)
+        case = evaluation_dataset.EvaluationCase(face.src, "Alice", frozenset({"group"}),
+                                                 True, "unknown", True,
+                                                 expected_people=("Alice", "Alice"))
+        with patch.object(shadow_evaluation, "daily_plan",
+                          return_value={str(face.src): [dict(person="Alice", face_index=0)]}), \
+             patch.object(sorter, "analysis_index_file", return_value=self.root / "index.sqlite"):
+            metrics, rows = identity_evaluation.evaluate_golden_set((case,),
+                sorter.CacheState(faces=[sorter.record_to_cached(face, label=None)]),
+                sorter.IdentityDB(), lane="pipeline")
+        self.assertEqual(rows[0]["identity_outcome"], "correct")
+        self.assertEqual(metrics.missed_face_rate, 0.5)
+
     def test_large_recovery_contains_rotations(self):
         image = np.zeros((800, 800, 3), dtype=np.uint8)
         with patch.object(

@@ -135,6 +135,23 @@ class BenchmarkInputTests(unittest.TestCase):
                     sorter.CacheState(faces=[self.other]), sorter.IdentityDB(), lane="strict")
         scoring.assert_not_called()
 
+    def test_all_rejected_filing_plan_cannot_pass_activation(self):
+        dataset = self.root / "benchmark.csv"
+        dataset.touch()
+        case = replace(self.case, identity_face_id="")
+        validation = evaluation_dataset.DatasetValidation((case,), (), evaluation_dataset.REQUIRED_CASE_TYPES)
+        metrics = evaluation_dataset.EvaluationMetrics(1, 1, 1, 0, 1, 1, 0, 1)
+        rejected = replace(metrics, known_case_recall=0)
+        with patch.object(evaluation.evaluation_dataset, "load_dataset", return_value=validation), \
+             patch.object(evaluation, "cache_metrics", return_value={"incorrect": 0, "precision": 1, "recall": 1}), \
+             patch.object(evaluation, "evaluate_golden_set", side_effect=[(metrics, []), (rejected, [])]):
+            db = sorter.IdentityDB()
+            allowed, report = evaluation.activation_gate(db, db, sorter.CacheState(),
+                protected_set=dataset, protected_baseline=self.root / "missing.json",
+                progress=self.messages.append)
+        self.assertFalse(allowed)
+        self.assertIn("protected daily filing planner accepted no known identities", report["failures"])
+
     def test_refreshed_scope_counts_background_face_but_does_not_score_it(self):
         refreshed = {str(self.source): [self.main, self.other]}
         with patch.object(evaluation, "predict_face", return_value=evaluation.FacePrediction("Alice", 0, 1, True)) as scoring, \
@@ -170,6 +187,39 @@ class BenchmarkInputTests(unittest.TestCase):
         self.assertIn("Manual review remains available", message)
         self.assertEqual(cached.read_text(), "existing diagnostic state")
         self.assertEqual(review.run_automatic_sweep({"auto_review_allowed": allowed})["scanned"], 0)
+
+    def test_independent_verifier_refreshes_pins_before_scoring(self):
+        validation = evaluation_dataset.DatasetValidation((self.case,), (), frozenset({"known"}))
+        faces = {str(self.source): [self.main, self.other]}
+        seen = []
+
+        def select(case, source_faces, _db):
+            selected = benchmark_inputs.selected_identity_faces(case, source_faces)
+            seen.extend(selected)
+            return None
+
+        with patch.object(evaluation.evaluation_dataset, "load_dataset", return_value=validation), \
+             patch.object(benchmark_inputs.benchmark_detection, "detect_cases", return_value=faces), \
+             patch.object(review, "_confirmed_case_face", side_effect=select):
+            secondary = SimpleNamespace(db=SimpleNamespace(identities={}, prototypes={}, prototype_sources={}),
+                                        flush=lambda: None)
+            review.evaluate_automatic_policy_benchmark(sorter.IdentityDB(),
+                sorter.CacheState(faces=[self.other]), secondary, hard_negatives={},
+                evaluation_path=self.root / "cases.csv", progress=self.messages.append)
+        self.assertEqual(seen, [self.main])
+
+    def test_independent_verifier_rejects_unresolved_pin_before_scoring(self):
+        validation = evaluation_dataset.DatasetValidation((self.case,), (), frozenset({"known"}))
+        with patch.object(evaluation.evaluation_dataset, "load_dataset", return_value=validation), \
+             patch.object(benchmark_inputs.benchmark_detection, "detect_cases",
+                          return_value={str(self.source): [self.other]}), \
+             patch.object(review.evaluation_runtime, "evaluate_blocks") as scoring:
+            secondary = SimpleNamespace(db=SimpleNamespace(identities={}, prototypes={}, prototype_sources={}))
+            with self.assertRaises(benchmark_inputs.BenchmarkInputError):
+                review.evaluate_automatic_policy_benchmark(sorter.IdentityDB(),
+                    sorter.CacheState(faces=[self.other]), secondary, hard_negatives={},
+                    evaluation_path=self.root / "cases.csv", progress=self.messages.append)
+        scoring.assert_not_called()
 
     def test_user_interrupt_is_not_swallowed(self):
         with patch.object(review, "_prepare_automatic_review_gate", side_effect=KeyboardInterrupt):

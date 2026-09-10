@@ -344,6 +344,9 @@ def assign_identity_labels(
         confident_votes = 0
         agreeing_members: list[FaceRecord] = []
         for record in independent_records:
+            if not record.quality >= pipeline.AUTO_PERSON_CONSENSUS_MIN_QUALITY:
+                record.identity_review_reason = "low_face_quality"
+                continue
             member_candidates = rank_record(record)
             if not member_candidates:
                 continue
@@ -394,12 +397,16 @@ def assign_identity_labels(
         accepted_sources = {independent_source(record) for record in agreeing_members}
         accepted_members = []
         for record in cluster_records:
+            if not record.quality >= pipeline.AUTO_PERSON_CONSENSUS_MIN_QUALITY:
+                continue
             ranked = rank_record(record)
             if (
                 independent_source(record) in accepted_sources
                 and ranked
                 and (ranked[0].name == matched_name)
                 and (ranked[0].distance <= consensus_threshold)
+                and (ranked[0].distance <= pipeline.AUTO_PERSON_CONSENSUS_PRIMARY_MAX_DIST
+                     or secondary_agrees(record, matched_name))
                 and (
                     pipeline.identity_profiles.candidate_margin(ranked)
                     >= pipeline.AUTO_PERSON_MATCH_MARGIN

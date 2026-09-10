@@ -534,6 +534,9 @@ def activation_gate(
                 progress=progress, selected_face_overrides=selected_overrides,
                 checkpoints=checkpoints if not require_protected else None, prepared=prepared)
             protected_summary["pipeline_metrics"] = asdict(pipeline_metrics)
+            if (any(case.expected_person or case.expected_people for case in validation.cases)
+                    and pipeline_metrics.known_case_recall <= 0):
+                failures.append("protected daily filing planner accepted no known identities")
             if any(row["identity_outcome"] in {"incorrect", "false_accept"} for row in pipeline_rows):
                 failures.append("protected daily filing planner has an incorrect accept")
             protected_summary["metrics"] = asdict(metrics)
@@ -690,9 +693,14 @@ def evaluate_golden_set(
             expected_labels = case.expected_people or ((case.expected_person,) if case.expected_person else ())
             expected_names = Counter(evaluation_identity_key(name) for name in expected_labels)
             observed_names = Counter(evaluation_identity_key(name) for name in accepted_names)
+            if shadow is not None:
+                # organize_originals writes once per (person, source), even in collages.
+                # Strict face scoring above still preserves explicitly annotated counts.
+                expected_names = Counter(set(expected_names))
+                observed_names = Counter(set(observed_names))
             if expected_names:
                 known_cases += sum(expected_names.values())
-                identity_accepted += len(accepted_names)
+                identity_accepted += sum(observed_names.values())
                 correct = sum((expected_names & observed_names).values())
                 known_correct += correct
                 identity_correct += correct
@@ -710,11 +718,11 @@ def evaluate_golden_set(
                     unknown_rejected += 1
                     identity_outcome = "correct_rejection"
                 else:
-                    identity_accepted += len(accepted_names)
+                    identity_accepted += sum(observed_names.values())
                     identity_outcome = "false_accept"
 
             if case.expected_face:
-                expected_count = case.expected_face_count or max(1, sum(expected_names.values()))
+                expected_count = case.expected_face_count or max(1, len(expected_labels))
                 expected_face_cases += expected_count
                 missed_face_cases += max(0, expected_count - len(source_faces))
             if "no_face" in case.case_types:
