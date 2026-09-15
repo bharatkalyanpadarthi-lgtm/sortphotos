@@ -860,4 +860,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import pipeline_writer
+    main = pipeline_writer.serialized(main)
     raise SystemExit(main())

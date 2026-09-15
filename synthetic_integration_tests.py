@@ -5432,7 +5432,8 @@ def test_nude_audit_destinations_are_outside_nude_folder(tmp: Path) -> None:
     source = people / "Person" / "photos" / "nude" / "nested" / "photo.jpg"
     make_image(source)
     safe = audit_nude_folders.destination_for(source, people, "likely_safe")
-    review = audit_nude_folders.destination_for(source, people, "needs_review")
+    with patch.object(sort_photos, "ROUTE_UNCERTAIN_NUDITY_TO_NUDE", False):
+        review = audit_nude_folders.destination_for(source, people, "needs_review")
     confirmed = audit_nude_folders.destination_for(source, people, "confirmed_nude")
     assert_true(safe == people / "Person" / "photos" / "nested" / "photo.jpg",
                 f"safe nude-audit destination is wrong: {safe}")
@@ -5442,6 +5443,9 @@ def test_nude_audit_destinations_are_outside_nude_folder(tmp: Path) -> None:
         f"review original did not enter recoverable review: {review}",
     )
     assert_true(confirmed is None, "confirmed nude image should stay in place")
+    with patch.object(sort_photos, "ROUTE_UNCERTAIN_NUDITY_TO_NUDE", True):
+        retained = audit_nude_folders.destination_for(source, people, "needs_review")
+    assert_true(retained is None, "saved nude routing preference should retain uncertain nude originals")
 
 
 def test_uncertain_nudity_only_promotes_confirmed_files(tmp: Path) -> None:

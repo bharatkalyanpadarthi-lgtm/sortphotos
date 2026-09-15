@@ -33,6 +33,7 @@ import pipeline_paths
 
 import source_guard
 import source_manifest
+import rename_transaction
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp",
               ".tif", ".tiff", ".heic", ".heif", ".gif"}
@@ -532,25 +533,7 @@ def source_counts_ok(before: dict[str, int], people_dir: Path) -> bool:
 
 
 def apply_actions(actions: list[tuple[Path, Path]]) -> None:
-    temp_actions: list[tuple[Path, Path, Path]] = []
-    for i, (src, dest) in enumerate(actions, start=1):
-        tmp = temp_path(src, i)
-        if tmp.exists():
-            raise RuntimeError(f"temporary path already exists: {tmp}")
-        temp_actions.append((src, tmp, dest))
-
-    for src, tmp, _dest in temp_actions:
-        src.rename(tmp)
-
-    try:
-        for _src, tmp, dest in temp_actions:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists():
-                raise RuntimeError(f"destination unexpectedly exists: {dest}")
-            tmp.rename(dest)
-    except Exception:
-        print("ERROR: rename failed after temporary step; some files may have .rename_tmp names.")
-        raise
+    rename_transaction.apply(actions)
 
 
 def prune_empty_simple_dirs(person_dirs: list[Path]) -> int:
@@ -600,6 +583,8 @@ def main() -> int:
         return 1
 
     all_actions: list[tuple[Path, Path]] = []
+    if args.apply:
+        rename_transaction.recover_under(people_dir)
     simple_actions: list[dict[str, object]] = []
     folder_count = 0
     image_count = 0
@@ -695,4 +680,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import pipeline_writer
+    main = pipeline_writer.serialized(main)
     raise SystemExit(main())

@@ -26,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sort_photos  # noqa: E402
+import pipeline_writer  # noqa: E402
 import source_manifest  # noqa: E402
 import pipeline_paths  # noqa: E402
 
@@ -447,6 +448,7 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                **pipeline_writer.child_process_options(),
             )
             if proc.returncode != 0:
                 print(f"ERROR: detection worker failed for batch {batch_index + 1} (exit {proc.returncode}).")

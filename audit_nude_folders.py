@@ -107,6 +107,8 @@ def destination_for(path: Path,
     if decision == "likely_safe":
         root = person_dir / sort_photos.PERSON_PHOTOS_DIR
     elif decision == "needs_review":
+        if sort_photos.ROUTE_UNCERTAIN_NUDITY_TO_NUDE:
+            return None
         root = person_dir / sort_photos.PERSON_REVIEW_DIR / "uncertain_nudity"
     else:
         return None
@@ -452,4 +454,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import pipeline_writer
+    main = pipeline_writer.serialized(main)
     raise SystemExit(main())

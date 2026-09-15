@@ -107,7 +107,8 @@ def main() -> int:
         if args.review_only:
             command.append("--review-only")
         try:
-            result = subprocess.run(command, check=False)
+            from pipeline_writer import child_process_options
+            result = subprocess.run(command, check=False, **child_process_options())
         finally:
             file_list.unlink(missing_ok=True)
         if result.returncode != 0:

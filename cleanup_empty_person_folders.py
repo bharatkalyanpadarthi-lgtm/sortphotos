@@ -28,14 +28,13 @@ SKIP_DIRS = {
     "_smart_albums_simple_preview",
     "_duplicates",
     "_near_visual_review",
-    "review",
 }
 
 
 def has_real_source_files(person_dir: Path) -> bool:
     for dirpath, dirnames, filenames in os.walk(person_dir):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
-        visible = [name for name in filenames if name != ".DS_Store" and not name.startswith(".")]
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        visible = [name for name in filenames if name != ".DS_Store"]
         if visible:
             return True
     return False
@@ -106,4 +105,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import pipeline_writer
+    main = pipeline_writer.serialized(main)
     raise SystemExit(main())

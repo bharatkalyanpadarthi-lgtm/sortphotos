@@ -406,6 +406,7 @@ def activation_gate(
                             if confirmed_set is not None and confirmed_set.is_file() else None)
     protected_validation = (evaluation_dataset.load_dataset(protected_set)
                             if protected_set.is_file() else None)
+    protected_digest = content_identity.content_sha256(protected_set) if protected_set.is_file() else ""
     selected_overrides = {}
     # Validate pinned faces before scoring thousands of ordinary cached faces.
     # Promotion still needs fresh detection for every protected case later.
@@ -537,6 +538,14 @@ def activation_gate(
                 progress=progress, selected_face_overrides=selected_overrides,
                 checkpoints=checkpoints if not require_protected else None, prepared=prepared)
             protected_summary["pipeline_metrics"] = asdict(pipeline_metrics)
+            if candidate is not incumbent:
+                prior_pipeline, _ = evaluate_golden_set(
+                    validation.cases, cache, incumbent, lane="pipeline",
+                    fresh_detection=bool(require_protected), detected_faces=detected_faces,
+                    progress=progress, selected_face_overrides=selected_overrides)
+                protected_summary["prior_pipeline_metrics"] = asdict(prior_pipeline)
+                failures.extend("protected filing: " + value for value in
+                                evaluation_dataset.compare_to_baseline(pipeline_metrics, prior_pipeline))
             if (any(case.expected_person or case.expected_people for case in validation.cases)
                     and pipeline_metrics.known_case_recall <= 0):
                 failures.append("protected daily filing planner accepted no known identities")
@@ -554,6 +563,10 @@ def activation_gate(
                     evidence = json.loads(protected_baseline.read_text(encoding="utf-8"))
                     if require_protected and evidence.get("evaluation_mode") != "fresh_detection":
                         failures.append("protected baseline has no fresh-detection provenance")
+                    if require_protected and evidence.get("dataset_sha256") != protected_digest:
+                        failures.append("protected baseline belongs to a different dataset; rebuild the baseline")
+                    if require_protected and evidence.get("detector_signature") != sort_photos.config_fingerprint():
+                        failures.append("protected baseline belongs to a different detector; rebuild the baseline")
                     baseline = evaluation_dataset.load_baseline(protected_baseline)
                     regressions = evaluation_dataset.compare_to_baseline(metrics, baseline)
                 except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
@@ -561,6 +574,8 @@ def activation_gate(
                 protected_summary["regressions"] = regressions
                 failures.extend(f"protected benchmark: {item}" for item in regressions)
     prepared.validate()
+    if protected_digest and content_identity.content_sha256(protected_set) != protected_digest:
+        failures.append("protected dataset changed during validation")
     return not failures, {
         "candidate": current,
         "incumbent": prior,

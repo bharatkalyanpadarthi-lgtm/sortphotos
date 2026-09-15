@@ -419,8 +419,8 @@ def load_state() -> dict | None:
     try:
         with STATE_FILE.open("r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
-        return None
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"Saved daily checkpoint is unreadable; preserve it and repair before restarting: {STATE_FILE}") from error
 
 
 def save_state(state: dict) -> None:
@@ -428,7 +428,11 @@ def save_state(state: dict) -> None:
     tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, sort_keys=True)
+        f.flush()
+        os.fsync(f.fileno())
     tmp.replace(STATE_FILE)
+    from file_operations import sync_directory
+    sync_directory(STATE_FILE.parent)
 
 
 def clear_state() -> None:
@@ -547,7 +551,8 @@ def run_command(cmd: list[str], log_path: Path, *, verbose: bool = True, step_na
     with log_path.open("ab") as log:
         log.write(f"\n$ {' '.join(cmd)}\n".encode("utf-8"))
         log.flush()
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        from pipeline_writer import child_process_options
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **child_process_options(),
                                 bufsize=0, env=env)
         assert proc.stdout is not None
         selector = selectors.DefaultSelector()
@@ -777,7 +782,7 @@ def main() -> int:
     if args.restart:
         clear_state()
 
-    state = load_state() if args.resume else None
+    state = load_state()
     if state is None and not args.full_maintenance and not intake_has_media():
         print("Daily Ingest")
         print("=" * 60)
@@ -858,7 +863,7 @@ def main() -> int:
     skip_when_empty = empty_inbox_skippable_step_names()
     for index, step in enumerate(steps, start=1):
         label = step["desc"] if args.verbose else STEP_LABELS[step["name"]]
-        if state["steps"].get(step["name"], {}).get("status") == "completed":
+        if step["name"] != "preflight" and state["steps"].get(step["name"], {}).get("status") == "completed":
             print(f"[{index}/{len(steps)}] {label} - already completed", flush=True)
             continue
         if empty_inbox and step["name"] in skip_when_empty:
@@ -986,4 +991,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import pipeline_writer
+    main = pipeline_writer.serialized(main)
     raise SystemExit(main())

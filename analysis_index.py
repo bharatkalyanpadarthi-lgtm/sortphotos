@@ -186,6 +186,8 @@ class AnalysisIndex:
         for column in ("detection_sha256", "nudity_sha256"):
             if column not in analysis_columns:
                 self.connection.execute(f"ALTER TABLE asset_analysis ADD COLUMN {column} TEXT")
+        self.connection.execute("CREATE INDEX IF NOT EXISTS analysis_detection_content_idx ON asset_analysis(detection_sha256, detection_config)")
+        self.connection.execute("CREATE INDEX IF NOT EXISTS analysis_nudity_content_idx ON asset_analysis(nudity_sha256, updated_at DESC)")
         self.connection.execute(
             "INSERT INTO metadata(key, value) VALUES('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -523,9 +525,12 @@ class AnalysisIndex:
             digest = content_identity.content_sha256(path)
             if content_identity.file_version(path) != version:
                 return None
+            own_transaction = not self.connection.in_transaction
             self.connection.execute(
                 "INSERT INTO content_versions VALUES(?, ?, ?) ON CONFLICT(path) DO UPDATE SET "
                 "signature=excluded.signature, sha256=excluded.sha256", (canonical, signature, digest))
+            if own_transaction:
+                self.connection.commit()
             return digest
         except OSError:
             return None

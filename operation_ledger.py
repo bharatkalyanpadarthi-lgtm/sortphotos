@@ -17,6 +17,7 @@ from typing import Any
 
 import pipeline_paths
 import analysis_index
+import file_operations
 
 DEFAULT_SORTED = pipeline_paths.SORTED_ROOT
 DEFAULT_PEOPLE = DEFAULT_SORTED / "photos_by_person"
@@ -137,6 +138,9 @@ def append_event(event: dict[str, Any], *,
     with path.open("a", encoding="utf-8") as f:
         json.dump(event, f, sort_keys=True)
         f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    file_operations.sync_directory(path.parent)
     latest_run_path(sorted_root).write_text(rid + "\n", encoding="utf-8")
     try:
         if (
@@ -234,7 +238,13 @@ def move_path(src: Path,
     """
     src = Path(src)
     dest = Path(dest)
-    source_meta = metadata(src, hash_file=hash_file, sha256=source_sha256)
+    if src.is_symlink():
+        raise ValueError(f"Refusing to move a source symlink: {src}")
+    if os.path.lexists(dest):
+        raise FileExistsError(f"Destination already exists: {dest}")
+    source_meta = metadata(src, hash_file=src.is_file())
+    if source_sha256 and source_meta.get("sha256") != source_sha256:
+        raise ValueError(f"Source content changed before move: {src}")
     record_event(
         operation=operation,
         reason=reason,
@@ -249,12 +259,22 @@ def move_path(src: Path,
     )
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dest))
-        dest_meta = metadata(
-            dest,
-            hash_file=False,
-            sha256=str(source_meta.get("sha256") or ""),
-        )
+        if src.is_file():
+            # Keep the source until the destination bytes and ledger are durable.
+            file_operations.atomic_copy(src, dest, use_hardlinks=True)
+            actual = file_operations.verify_original_copy(src, dest, source_meta["sha256"])
+            dest_meta = metadata(dest, hash_file=False, sha256=actual)
+            record_event(operation=operation, reason=reason, status="verified",
+                         source=src, dest=dest, sorted_root=sorted_root, run_id=run_id,
+                         source_meta=source_meta, dest_meta=dest_meta, extra=extra,
+                         mirror_sqlite=mirror_sqlite)
+            src.unlink()
+            file_operations.sync_directory(src.parent)
+        else:
+            # Directory moves must remain on one filesystem. Cross-device tree
+            # relocation needs a separate verified migration, never shutil.move.
+            file_operations.rename_exclusive(src, dest)
+            dest_meta = metadata(dest, hash_file=False)
         record_event(
             operation=operation,
             reason=reason,

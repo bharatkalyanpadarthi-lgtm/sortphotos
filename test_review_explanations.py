@@ -25,6 +25,7 @@ class ReviewExplanationTests(unittest.TestCase):
         self.path = self.root / 'case.jpg'
         self.path.write_bytes(b'synthetic fixture')
         self.db = sorter.IdentityDB(identities={'Alice': np.array([1., 0.])},
+                                   source_counts={'Alice': 5},
                                    match_thresholds={'Alice': .30}, strict_thresholds={'Alice': .20})
 
     def item(self, distance=.10, margin=.60, quality=.9, verifier=None):

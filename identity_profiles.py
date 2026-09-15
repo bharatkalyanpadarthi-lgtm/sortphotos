@@ -120,9 +120,8 @@ def select_diverse_samples(
             combined = 0.58 * min(minimum_distance / 0.45, 1.0) + 0.42 * quality
             return combined, sample.quality, sample.source
 
-        winner = max(remaining, key=score)
+        winner = remaining.pop(max(range(len(remaining)), key=lambda i: score(remaining[i])))
         selected.append(winner)
-        remaining.remove(winner)
     return selected
 
 

@@ -283,6 +283,9 @@ def move_suspicious_person(person_dir: Path, review_root: Path, apply: bool) -> 
 
 
 def audit_or_repair(people_dir: Path, review_root: Path, apply: bool, quiet: bool) -> Stats:
+    if apply:
+        import rename_transaction
+        rename_transaction.recover_under(people_dir)
     stats = Stats()
     for person_dir in person_dirs(people_dir):
         if person_dir.name.startswith("_") or person_dir.name.startswith("."):
@@ -326,6 +329,8 @@ def audit_or_repair(people_dir: Path, review_root: Path, apply: bool, quiet: boo
         stats.dot_files += len(dots)
         if apply:
             for path in dots:
+                if path.name != ".DS_Store":
+                    continue
                 try:
                     path.unlink()
                     stats.removed_dot_files += 1
@@ -387,4 +392,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import pipeline_writer
+    main = pipeline_writer.serialized(main)
     raise SystemExit(main())

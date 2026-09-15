@@ -94,6 +94,7 @@ def main() -> int:
         return 1
 
     actions: list[tuple[Path, Path, str]] = []
+    reserved: set[Path] = set()
     missing = 0
     skipped = 0
     skipped_legacy = 0
@@ -135,6 +136,12 @@ def main() -> int:
                 continue
             person_dir = people_root / parts[0]
             dest = unique_dest(person_dir / subdir / src.name)
+            number = 2
+            base = dest
+            while dest in reserved or dest.exists():
+                dest = base.with_name(f"{base.stem}__{number}{base.suffix}")
+                number += 1
+            reserved.add(dest)
             actions.append((src, dest, category))
 
     confirmed = sum(1 for _src, _dest, cat in actions if cat == "confirmed_nude")
@@ -202,4 +209,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import pipeline_writer
+    main = pipeline_writer.serialized(main)
     raise SystemExit(main())

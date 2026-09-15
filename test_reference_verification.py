@@ -74,6 +74,7 @@ class ReferenceIndexTests(ReferenceFixtures, unittest.TestCase):
              patch.object(sorter, 'IDENTITY_HARD_NEGATIVES_FILE', self.root / 'negatives.json'), \
              patch.object(sorter, 'IDENTITY_DB_BUILD_FILE', self.root / 'build.pkl'), \
              patch.object(sorter, 'load_cache', return_value=cache), \
+             patch.object(sorter, 'load_identity_db', return_value=None), \
              patch.object(sorter, 'save_identity_db'), \
              patch.object(sorter, 'write_identity_db'), \
              patch.object(sorter, '_build_app', side_effect=AssertionError('unneeded detector')):

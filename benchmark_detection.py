@@ -39,11 +39,12 @@ def detect_cases(cases, *, detected_faces=None, batch_size=25):
                              "det_size": sort_photos.DET_SIZE[0]}, handle)
             print(f"Protected detection: starting {start + 1}-{start + len(keys)}"
                   f"/{len(pending)} (isolated batch)", flush=True)
+            from pipeline_writer import child_process_options
             process = subprocess.run(
                 [sys.executable, str(Path(sort_photos.__file__).resolve()),
                  "--detect-batch", str(job)],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                env=env, check=False,
+                env=env, check=False, **child_process_options(),
             )
             if process.returncode != 0 or not output.is_file():
                 raise RuntimeError(

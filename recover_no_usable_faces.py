@@ -464,8 +464,7 @@ def iter_detection_results(files: list[Path], workers: int,
                 [sort_photos.cached_face_to_index_record(face) for face in faces],
             )
             stats["detected"] += 1
-            if stats["detected"] % 25 == 0:
-                database.commit()
+            database.commit()
 
         if workers <= 1:
             app = sort_photos._build_app((primary_det_size, primary_det_size))
@@ -832,4 +831,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import pipeline_writer
+    main = pipeline_writer.serialized(main)
     raise SystemExit(main())

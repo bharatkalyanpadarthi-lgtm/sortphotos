@@ -139,7 +139,12 @@ def check_scanner_scope(findings: list[Finding]) -> None:
     }
     bad: list[str] = []
     for name, values in scopes.items():
-        missing = sorted(REQUIRED_GENERATED_EXCLUSIONS - set(values))
+        required = REQUIRED_GENERATED_EXCLUSIONS
+        if name == "cleanup_empty_person_folders.SKIP_DIRS":
+            required = required - {"review"}
+            if "review" in values:
+                bad.append("empty-folder cleanup must preserve review originals")
+        missing = sorted(required - set(values))
         if missing:
             bad.append(f"{name} missing {', '.join(missing)}")
     if bad:

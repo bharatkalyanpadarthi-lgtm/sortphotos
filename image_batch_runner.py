@@ -100,7 +100,8 @@ def run_batches(
             detection_batch_size=detection_batch_size,
             detect_workers=detect_workers,
         )
-        result = subprocess.run(command, check=False)
+        from pipeline_writer import child_process_options
+        result = subprocess.run(command, check=False, **child_process_options())
         if result.returncode != 0:
             signal_hint = (
                 " The worker was killed by macOS; rerunning will resume this slice."

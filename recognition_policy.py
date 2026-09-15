@@ -39,6 +39,8 @@ def _automatic_item_evidence(
     if not item.candidates:
         return None
     best = item.candidates[0]
+    if int(identity_db.source_counts.get(best.name, 0)) < 3:
+        return None
     margin = identity_profiles.candidate_margin(item.candidates)
     consensus_threshold = min(
         settings.recover_no_usable_faces.MATCH_MAX_DISTANCE,

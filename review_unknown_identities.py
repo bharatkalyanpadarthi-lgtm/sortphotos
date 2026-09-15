@@ -1372,9 +1372,10 @@ def _run_isolated_automatic_sweep_batch(
         encoding="utf-8",
     )
     temporary_task.replace(task_path)
+    from pipeline_writer import child_process_options
     completed = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), "--auto-sweep-worker", str(task_path)],
-        check=False,
+        check=False, **child_process_options(),
     )
     task_path.unlink(missing_ok=True)
     try:
@@ -1712,7 +1713,27 @@ def canonical_person(
     return normalized
 
 
-def apply_decision(
+def apply_decision(state, **kwargs):
+    state["_partial_review_cache"] = []
+    try:
+        return _apply_decision(state, **kwargs)
+    except Exception:
+        entries = state.get("_partial_review_cache", [])
+        if entries:
+            _remove_cache_sources(state, {source for source, _entry in entries})
+            recovered = recover_no_usable_faces.merge_recovered_faces_into_cache(
+                state["cache"], [entry for _source, entry in entries])
+            state["cache_dirty"] = True
+            if kwargs.get("trusted_confirmation", True):
+                state["identity_dirty"] = True
+            if state.get("capture_cache_delta"):
+                state.setdefault("_cache_delta_entries", []).extend(entry for _, entry in entries)
+        raise
+    finally:
+        state.pop("_partial_review_cache", None)
+
+
+def _apply_decision(
     state: dict,
     *,
     item_keys: list[str],
@@ -1739,6 +1760,8 @@ def apply_decision(
             raise ValueError("review item is no longer available")
         if not item.path.is_file():
             raise ValueError(f"file has moved: {item.path.name}")
+        if item.path.is_symlink() or item_key(item.path) != item.key:
+            raise ValueError(f"file changed since review loaded; reload before deciding: {item.path.name}")
         items.append(item)
 
     decisions = load_decisions(state["decisions_path"])
@@ -1886,8 +1909,11 @@ def apply_decision(
                 f"could not create or locate a verified destination for {item.path.name}"
             )
         destination = Path(destination).resolve()
+        if item_content_sha256(destination) != source_hash:
+            raise ValueError(f"organized destination content changed: {destination}")
         state["destinations_by_hash"][destination_key] = destination
         if trusted_confirmation:
+            state["identity_dirty"] = True
             identity_confirmations.record(
                 state["confirmations_path"],
                 person=person,
@@ -1923,6 +1949,8 @@ def apply_decision(
         )
         moved_sources.add(os.path.realpath(str(item.path)))
         cache_entries.append((destination, item.face, person))
+        state.setdefault("_partial_review_cache", []).append(
+            (os.path.realpath(str(item.path)), (destination, item.face, person)))
         destinations.append(destination)
         record_decision(
             decisions,
@@ -2594,11 +2622,17 @@ class ReviewActionQueue:
         self.state = state
         self.executor = executor
         self.pending: queue.Queue[dict | None] = queue.Queue()
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.jobs: dict[str, dict] = {}
         self.item_jobs: dict[str, str] = {}
         self.sequence = 0
         self.closed = False
+        self.job_store = None
+        if state.get("output_dir"):
+            from review_job_store import ReviewJobStore
+            self.job_store = ReviewJobStore(Path(state["output_dir"]) / "review_jobs.sqlite3")
+            self.jobs = {job["id"]: job for job in self.job_store.load()}
+            self.sequence = max((job["sequence"] for job in self.jobs.values()), default=0)
         self.worker = threading.Thread(
             target=self._run,
             name="unknown-review-actions",
@@ -2619,6 +2653,7 @@ class ReviewActionQueue:
         item_keys: list[str],
         action: str,
         person_value: str = "",
+        _publish: bool = True,
     ) -> dict:
         if self.closed:
             raise ValueError("review action queue is closing")
@@ -2671,7 +2706,7 @@ class ReviewActionQueue:
                     and existing["item_key_set"] == key_set
                 ):
                     return self._public(existing, deduplicated=True)
-            if action != "reject_candidate" and completed:
+            if action != "reject_candidate" and any(job["action"] != "reject_candidate" for job in completed):
                 raise ReviewActionConflict(
                     "one or more selected images were already reviewed in this session"
                 )
@@ -2696,10 +2731,13 @@ class ReviewActionQueue:
                 "message": "",
                 "error": "",
             }
+            if _publish and self.job_store is not None:
+                self.job_store.save(job)
             self.jobs[job["id"]] = job
             for key in unique_keys:
                 self.item_jobs[key] = job["id"]
-            self.pending.put(job)
+            if _publish:
+                self.pending.put(job)
             return self._public(job)
 
     def submit_many(
@@ -2716,14 +2754,41 @@ class ReviewActionQueue:
             raise ValueError(
                 f"select no more than {MAX_CLUSTER_ACTION_ITEMS} images per cluster action"
             )
-        jobs = []
-        for offset in range(0, len(unique_keys), MAX_BATCH_ACTION_ITEMS):
-            jobs.append(self.submit(
-                item_keys=unique_keys[offset:offset + MAX_BATCH_ACTION_ITEMS],
-                action=action,
-                person_value=person_value,
-            ))
-        return jobs
+        # Hold submission ownership while validating every chunk. The worker
+        # cannot start a prefix of a request that later fails validation.
+        with self.lock:
+            chunks = [unique_keys[offset:offset + MAX_BATCH_ACTION_ITEMS]
+                      for offset in range(0, len(unique_keys), MAX_BATCH_ACTION_ITEMS)]
+            person = person_value.strip()
+            if action in {"confirm", "reject_candidate"}:
+                person = canonical_person(person, self.state["identity_db"],
+                                          allow_new=action == "confirm", people_root=self.state.get("people_root"))
+            for chunk in chunks:
+                key_set = frozenset(chunk)
+                for existing in self.jobs.values():
+                    if not existing["item_key_set"] & key_set or existing["status"] == "failed":
+                        continue
+                    identical = existing["item_key_set"] == key_set and existing["action"] == action and existing["person"] == person
+                    feedback = existing["status"] == "completed" and (existing["action"] == "reject_candidate" or action == "reject_candidate")
+                    if not identical and not feedback:
+                        raise ReviewActionConflict("one or more selected images already have a review action")
+            previous_ids = set(self.jobs)
+            previous_items = dict(self.item_jobs)
+            previous_sequence = self.sequence
+            try:
+                results = [self.submit(item_keys=chunk, action=action, person_value=person, _publish=False)
+                           for chunk in chunks]
+                added = [job for key, job in self.jobs.items() if key not in previous_ids]
+                if self.job_store is not None:
+                    self.job_store.save_many(added)
+            except Exception:
+                self.jobs = {key: job for key, job in self.jobs.items() if key in previous_ids}
+                self.item_jobs = previous_items
+                self.sequence = previous_sequence
+                raise
+            for job in added:
+                self.pending.put(job)
+            return results
 
     def snapshot(
         self,
@@ -2768,6 +2833,9 @@ class ReviewActionQueue:
                 job["position"] = 0
                 job["started_at"] = time.time()
             try:
+                with self.lock:
+                    if self.job_store is not None:
+                        self.job_store.save(job)
                 with self.state["lock"]:
                     message = self.executor(
                         self.state,
@@ -2798,6 +2866,13 @@ class ReviewActionQueue:
                     )
                     for position, queued_job in enumerate(queued, 1):
                         queued_job["position"] = position
+                    if self.job_store is not None:
+                        try:
+                            self.job_store.save(job)
+                        except Exception as error:
+                            job["status"] = "failed"
+                            job["error"] = f"Could not save review receipt: {error}. Saved per-image decisions remain authoritative."
+                            self.closed = True
                 self.pending.task_done()
 
     def close(self, *, wait: bool = True) -> None:
@@ -2806,6 +2881,8 @@ class ReviewActionQueue:
             self.pending.join()
         self.pending.put(None)
         self.worker.join(timeout=30)
+        if self.job_store is not None and not self.worker.is_alive():
+            self.job_store.close()
 
 
 class BatchLoadJob:
@@ -3048,6 +3125,9 @@ class FinishReviewJob:
                 report=str(report_path),
                 finished_at=time.time(),
             )
+            shutdown = state.get("shutdown_server")
+            if shutdown is not None:
+                threading.Timer(5.0, shutdown).start()
         except Exception as error:  # noqa: BLE001
             self._set(
                 status="failed",
@@ -4155,6 +4235,7 @@ def main() -> int:
     except OSError:
         server = ThreadingHTTPServer((args.host, 0), make_handler(state))
     url = f"http://{args.host}:{server.server_address[1]}/"
+    state["shutdown_server"] = server.shutdown
     print(f"Live review URL:     {url}")
     print("Keys: 1/2/3 confirm suggestion | U unknown | J junk | N skip")
     print("Use Finish Review in the page when done; Ctrl+C remains a safe fallback.")
@@ -4188,4 +4269,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import pipeline_writer
+    main = pipeline_writer.serialized(main)
     raise SystemExit(main())

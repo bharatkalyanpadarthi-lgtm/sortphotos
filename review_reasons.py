@@ -18,6 +18,8 @@ def explain(item, identity_db, *, settings, gate=None, enabled=False):
     if not all(math.isfinite(value) for value in (best.distance, margin, quality)):
         return [reason("invalid_evidence", "Matching evidence is incomplete; fresh analysis is needed.")]
     evidence = settings._automatic_item_evidence(item, identity_db)
+    if evidence is None:
+        return [reason("insufficient_identity_references", "This person needs at least three verified reference images before automatic filing.")]
     strict_allowed = recognition_policy.strict_lane_allowed(gate or {})
     eligible = not evidence["secondary_dissent"] and (
         evidence["secondary"] or evidence["secondary_rescue"]

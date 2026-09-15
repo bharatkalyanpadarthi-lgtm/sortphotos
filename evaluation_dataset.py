@@ -233,6 +233,8 @@ def compare_to_baseline(
          "unknown rejection regressed"),
         (current.missed_face_rate > baseline.missed_face_rate + missed_face_increase,
          "missed-face rate regressed"),
+        (current.no_face_specificity + rejection_drop < baseline.no_face_specificity,
+         "no-face specificity regressed"),
         (current.nudity_accuracy + nudity_accuracy_drop < baseline.nudity_accuracy,
          "nudity accuracy regressed"),
         (current.nudity_false_positive_rate

@@ -70,6 +70,7 @@ class FaceMenuTests(unittest.TestCase):
     def test_daily_aliases_share_empty_inbox_fast_path(self):
         with patch.object(face, "source_review_storage_check", return_value=0), \
                 patch.object(face.daily_runner, "intake_has_media", return_value=False), \
+                patch.object(face.daily_runner, "load_state", return_value=None), \
                 patch.object(face, "cache_guard_check", side_effect=AssertionError("extra cache scan")), \
                 patch.object(face, "run_steps", side_effect=AssertionError("ran empty ingest")), \
                 redirect_stdout(io.StringIO()):

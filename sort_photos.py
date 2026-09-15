@@ -1301,7 +1301,7 @@ def build_identity_db_from_person_folders(people_dir: Path,
 
     person_dirs = sorted([p for p in people_dir.iterdir() if p.is_dir()],
                          key=lambda p: p.name.lower())
-    existing = None if force_rebuild else load_identity_db()
+    existing = load_identity_db()
     if (reference_snapshot is None and existing is not None
             and people_dir == pipeline_paths.PEOPLE_ROOT.resolve()):
         import face_reference_library
@@ -1309,8 +1309,7 @@ def build_identity_db_from_person_folders(people_dir: Path,
             reference_snapshot = face_reference_library.prepare(
                 pipeline_paths.FACE_REFERENCES, people_dir, existing)
         except (OSError, ValueError, RuntimeError, sqlite3.Error, subprocess.TimeoutExpired) as error:
-            log.warning("Reference refresh unavailable; keeping active profiles: %s", error)
-            return existing
+            log.warning("Optional reference refresh unavailable; checking canonical profiles: %s", error)
     reference_changed = (reference_snapshot is not None and reference_snapshot.signatures
                          != getattr(existing, 'reference_signatures', {}))
     partial: IdentityDB | None = None
@@ -1362,7 +1361,7 @@ def build_identity_db_from_person_folders(people_dir: Path,
             copy_identity_profile(partial, db, name)
             continue
         if (
-            existing is not None
+            not force_rebuild and existing is not None
             and existing.calibration_version == IDENTITY_CALIBRATION_VERSION
             and name in existing.identities
             and existing.source_signatures.get(name) == signature
@@ -2303,6 +2302,7 @@ def detect_in_batches_subprocess(new_images: list[Path],
             return isinstance(exc, BlockingIOError) or getattr(exc, "errno", None) in {11, 35}
 
         def run_worker_with_retry(cmd: list[str], batch_number: int) -> subprocess.CompletedProcess[str] | None:
+            from pipeline_writer import child_process_options
             for attempt in range(1, SUBPROCESS_FORK_RETRIES + 1):
                 try:
                     return subprocess.run(
@@ -2312,6 +2312,7 @@ def detect_in_batches_subprocess(new_images: list[Path],
                         stderr=subprocess.STDOUT,
                         text=True,
                         env=worker_env,
+                        **child_process_options(),
                     )
                 except KeyboardInterrupt:
                     raise
@@ -2340,6 +2341,7 @@ def detect_in_batches_subprocess(new_images: list[Path],
                     gc.collect()
 
         def popen_worker_with_retry(cmd: list[str], batch_number: int) -> subprocess.Popen | None:
+            from pipeline_writer import child_process_options
             for attempt in range(1, SUBPROCESS_FORK_RETRIES + 1):
                 try:
                     return subprocess.Popen(
@@ -2347,6 +2349,7 @@ def detect_in_batches_subprocess(new_images: list[Path],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.STDOUT,
                         env=worker_env,
+                        **child_process_options(),
                     )
                 except OSError as exc:
                     if not is_transient_fork_error(exc):
@@ -3343,7 +3346,7 @@ def archive_organized_sources(sources: set[Path],
     input_dir = input_dir.resolve()
     output_dir = output_dir.resolve()
     for src in sorted(sources, key=lambda p: str(p).lower()):
-        if not src.exists():
+        if not src.exists() or src.is_symlink():
             continue
         try:
             resolved = src.resolve()
@@ -3357,7 +3360,8 @@ def archive_organized_sources(sources: set[Path],
         try:
             rel = resolved.relative_to(input_dir)
         except ValueError:
-            rel = Path(resolved.name)
+            log.warning("Refusing to archive source outside intake: %s", src)
+            continue
         dest = unique_path(archive_root / rel)
         try:
             operation_ledger.move_path(
@@ -3382,7 +3386,7 @@ def archive_scanned_sources(sources: Iterable[Path],
     input_dir = input_dir.resolve()
     output_dir = output_dir.resolve()
     for src in sorted(set(sources), key=lambda p: str(p).lower()):
-        if not src.exists():
+        if not src.exists() or src.is_symlink():
             continue
         try:
             resolved = src.resolve()
@@ -3396,7 +3400,8 @@ def archive_scanned_sources(sources: Iterable[Path],
         try:
             rel = resolved.relative_to(input_dir)
         except ValueError:
-            rel = Path(resolved.name)
+            log.warning("Refusing to archive source outside intake: %s", src)
+            continue
         dest = unique_path(archive_root / rel)
         try:
             operation_ledger.move_path(
@@ -4242,7 +4247,8 @@ def run_post_process(output_dir: Path) -> None:
         if not Path(cmd[1]).exists():
             log.warning("Post-process helper missing, skipped: %s", cmd[1])
             continue
-        result = subprocess.run(cmd, check=False)
+        from pipeline_writer import child_process_options
+        result = subprocess.run(cmd, check=False, **child_process_options())
         if result.returncode != 0:
             log.warning("Post-process step failed (%s), exit code %d.",
                         script_name, result.returncode)
@@ -5109,6 +5115,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import pipeline_writer
+    main = pipeline_writer.serialized(main)
     # Shared recovery must see this process's CLI settings and compatibility
     # classes, rather than importing a second sorter with default settings.
     sys.modules["sort_photos"] = sys.modules[__name__]

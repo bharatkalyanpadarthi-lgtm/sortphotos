@@ -775,7 +775,8 @@ def run_steps(action: dict, extra_args: list[str], *, run_id_value: str = "") ->
             env = os.environ.copy()
             if run_id_value:
                 env["PHOTO_PIPELINE_RUN_ID"] = run_id_value
-            result = subprocess.run(cmd, env=env)
+            from pipeline_writer import child_process_options
+            result = subprocess.run(cmd, env=env, **child_process_options())
             if result.returncode != 0:
                 return int(result.returncode)
     except KeyboardInterrupt:
@@ -784,6 +785,18 @@ def run_steps(action: dict, extra_args: list[str], *, run_id_value: str = "") ->
 
 
 def run_action(action: dict, extra_args: list[str] | None = None) -> int:
+    if action.get("read_only"):
+        return _run_action(action, extra_args)
+    import pipeline_writer
+    try:
+        with pipeline_writer.writer_lease():
+            return _run_action(action, extra_args)
+    except RuntimeError as error:
+        print(f"Stopped safely: {error}")
+        return 1
+
+
+def _run_action(action: dict, extra_args: list[str] | None = None) -> int:
     storage_rc = source_review_storage_check()
     if storage_rc != 0:
         return storage_rc
@@ -793,6 +806,7 @@ def run_action(action: dict, extra_args: list[str] | None = None) -> int:
         action["key"] == "daily"
         and not daily_control_args.intersection(extra_args)
         and not daily_runner.intake_has_media()
+        and not daily_runner.load_state()
     ):
         print()
         print("Daily Ingest")
@@ -827,9 +841,6 @@ def run_action(action: dict, extra_args: list[str] | None = None) -> int:
 
     if compact_daily:
         print("Checking final library protection...", flush=True)
-    guard_rc = source_guard_finish(guard, allow_decrease=allow_original_count_decrease, verbose=not compact_daily)
-    if guard_rc != 0:
-        return guard_rc
     if allow_original_count_decrease and command_rc in {130, -2}:
         print("Manual review server stopped; continuing final manifest update.")
         command_rc = 0
@@ -839,19 +850,22 @@ def run_action(action: dict, extra_args: list[str] | None = None) -> int:
     post_manifest_check = source_manifest.validate_current(
         label=f"face_{action['key']}_before_promote",
         people_dir=daily_runner.PEOPLE,
+        relocation_run_id=str(guard["run_id"]) if allow_original_count_decrease else None,
     )
     if post_manifest_check.ok:
         if not compact_daily:
             source_manifest.print_validation(post_manifest_check)
-    elif not allow_original_count_decrease:
+    else:
         source_manifest.print_validation(post_manifest_check)
         return SOURCE_GUARD_EXIT
-    else:
-        print("Source manifest changed after an approved, ledgered review relocation; promoting current originals.")
+    guard_rc = source_guard_finish(guard, allow_decrease=post_manifest_check.ok, verbose=not compact_daily)
+    if guard_rc != 0:
+        return guard_rc
     manifest_path = source_manifest.promote_current(
         label=f"face_{action['key']}_completed",
         reason=f"successful face.py action: {action['key']}",
         people_dir=daily_runner.PEOPLE,
+        relocation_run_id=str(guard["run_id"]) if allow_original_count_decrease else None,
     )
     if compact_daily:
         print("Library protection verified.", flush=True)

@@ -24,6 +24,9 @@ from typing import Any
 
 import operation_ledger
 import pipeline_paths
+import analysis_index
+import content_identity
+import file_operations
 
 SORTED = pipeline_paths.SORTED_ROOT
 PEOPLE = SORTED / "photos_by_person"
@@ -112,11 +115,23 @@ def entry_for_path(path: Path, people_dir: Path = PEOPLE) -> dict[str, Any]:
         "person": person,
         "size": int(stat.st_size),
         "mtime_ns": int(stat.st_mtime_ns),
+        "sha256": content_identity.content_sha256(path),
     }
 
 
 def collect_entries(people_dir: Path = PEOPLE) -> list[dict[str, Any]]:
-    return [entry_for_path(path, people_dir) for path in image_files(people_dir)]
+    entries = []
+    index_path = (MANIFEST_DIR if people_dir == PEOPLE else people_dir.parent / ".source_manifest") / "hashes.sqlite3"
+    with analysis_index.AnalysisIndex(index_path) as index:
+        for path in image_files(people_dir):
+            digest = index.content_sha256(path)
+            if not digest:
+                raise OSError(f"Unable to verify original: {path}")
+            stat = path.stat()
+            rel = path.relative_to(people_dir)
+            entries.append({"relative_path": rel.as_posix(), "person": rel.parts[0],
+                            "size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "sha256": digest})
+    return entries
 
 
 def person_names(people_dir: Path = PEOPLE) -> list[str]:
@@ -141,7 +156,7 @@ def build_manifest(people_dir: Path = PEOPLE, *, reason: str = "") -> dict[str, 
     counts = person_counts(entries, people_dir)
     now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     return {
-        "version": 1,
+        "version": 2,
         "created_at": now,
         "updated_at": now,
         "reason": reason,
@@ -160,7 +175,10 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, sort_keys=True)
         f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
     tmp.replace(path)
+    file_operations.sync_directory(path.parent)
 
 
 def load_manifest(path: Path = MANIFEST_PATH) -> dict[str, Any] | None:
@@ -184,6 +202,32 @@ def save_manifest(manifest: dict[str, Any], path: Path = MANIFEST_PATH) -> None:
 
 def signature(entry: dict[str, Any]) -> tuple[str, int, int]:
     return (str(entry.get("person", "")), int(entry.get("size", 0)), int(entry.get("mtime_ns", 0)))
+
+
+def verified_relocation(expected, people_dir, events):
+    """Account for each removed original through a verified move chain."""
+    source = str(people_dir / expected["relative_path"])
+    digest = expected.get("sha256")
+    seen = set()
+    while source not in seen:
+        seen.add(source)
+        matches = [event for event in events if event.get("status") == "moved"
+                   and event.get("source_path") == source]
+        match = next((event for event in matches
+                      if event.get("source", {}).get("sha256")
+                      and event.get("source", {}).get("sha256") == event.get("dest", {}).get("sha256")
+                      and (not digest or event["source"]["sha256"] == digest)
+                      and int(event.get("source", {}).get("size", -1)) == int(expected["size"])), None)
+        if match is None:
+            return None
+        digest = match["source"]["sha256"]
+        target = Path(match["dest_path"])
+        if target.is_file() and not target.is_symlink():
+            if content_identity.content_sha256(target) == digest:
+                return target
+            return None
+        source = str(target)
+    return None
 
 
 def app_trash_candidates(people_dir: Path) -> dict[str, list[tuple[Path, str]]]:
@@ -249,7 +293,8 @@ def matching_app_trash_candidate(expected: dict[str, Any],
 def compare_manifest(manifest: dict[str, Any],
                      current_entries: list[dict[str, Any]],
                      app_trash_by_source: dict[str, list[tuple[Path, str]]] | None = None,
-                     people_dir: Path = PEOPLE) -> dict[str, list[dict[str, Any]]]:
+                     people_dir: Path = PEOPLE,
+                     relocation_events: list[dict] | None = None) -> dict[str, list[dict[str, Any]]]:
     expected_entries = [
         entry for entry in list(manifest.get("files", []))
         if is_manifest_original_entry(entry)
@@ -265,7 +310,14 @@ def compare_manifest(manifest: dict[str, Any],
         if current is None:
             missing_candidates.append(expected)
             continue
-        if int(current.get("size", 0)) != int(expected.get("size", 0)):
+        changed = int(current.get("size", 0)) != int(expected.get("size", 0))
+        if expected.get("sha256"):
+            changed = changed or current.get("sha256") != expected["sha256"]
+        else:
+            # A legacy baseline has no bytes to compare; never silently accept
+            # changed timestamps while upgrading it to content verification.
+            changed = changed or current.get("mtime_ns") != expected.get("mtime_ns")
+        if changed:
             size_changed.append({
                 "person": expected.get("person", ""),
                 "relative_path": rel,
@@ -282,13 +334,18 @@ def compare_manifest(manifest: dict[str, Any],
         rel = str(current["relative_path"])
         if rel in matched_current_paths:
             continue
-        current_by_signature.setdefault(signature(current), []).append(current)
+        key = (str(current.get("person", "")), int(current.get("size", 0)), current.get("sha256")) if current.get("sha256") else signature(current)
+        current_by_signature.setdefault(key, []).append(current)
+        if current.get("sha256"):
+            current_by_signature.setdefault(signature(current), []).append(current)
 
     missing: list[dict[str, Any]] = []
     renamed: list[dict[str, Any]] = []
     app_trashed: list[dict[str, Any]] = []
     for expected in missing_candidates:
-        candidates = current_by_signature.get(signature(expected), [])
+        key = (str(expected.get("person", "")), int(expected.get("size", 0)), expected.get("sha256")) if expected.get("sha256") else signature(expected)
+        candidates = [item for item in current_by_signature.get(key, [])
+                      if str(item["relative_path"]) not in matched_current_paths]
         if candidates:
             current = candidates.pop(0)
             matched_current_paths.add(str(current["relative_path"]))
@@ -305,6 +362,9 @@ def compare_manifest(manifest: dict[str, Any],
             app_trash_by_source or {},
         )
         if trash_path is not None:
+            if expected.get("sha256") and content_identity.content_sha256(trash_path) != expected["sha256"]:
+                trash_path = None
+        if trash_path is not None:
             try:
                 trash_relative_path = trash_path.relative_to(people_dir).as_posix()
             except ValueError:
@@ -319,6 +379,11 @@ def compare_manifest(manifest: dict[str, Any],
                 "match_source": trash_match_source,
                 "status": "recoverable_app_trash",
             })
+            continue
+        relocated = verified_relocation(expected, people_dir, relocation_events or [])
+        if relocated is not None:
+            app_trashed.append({**expected, "trash_path": str(relocated),
+                               "status": "verified_ledger_relocation"})
             continue
         missing.append({
             "person": expected.get("person", ""),
@@ -364,7 +429,8 @@ def validate_current(*,
                      label: str = "source_manifest_validate",
                      people_dir: Path = PEOPLE,
                      manifest_path: Path = MANIFEST_PATH,
-                     report_dir: Path = REPORT_DIR) -> ManifestValidation:
+                     report_dir: Path = REPORT_DIR,
+                     relocation_run_id: str | None = None) -> ManifestValidation:
     manifest = load_manifest(manifest_path)
     rid = run_id()
     report_prefix = report_dir / f"{slugify(label)}_{rid}"
@@ -408,6 +474,11 @@ def validate_current(*,
         app_trash_by_source=app_trash_candidates(people_dir),
         people_dir=people_dir,
     )
+    if comparison["missing"] and relocation_run_id:
+        comparison = compare_manifest(manifest, current_entries,
+            app_trash_by_source=app_trash_candidates(people_dir), people_dir=people_dir,
+            relocation_events=[event for event in operation_ledger.iter_events(people_dir.parent)
+                               if event.get("run_id") == relocation_run_id])
     expected_entries = [
         entry for entry in list(manifest.get("files", []))
         if is_manifest_original_entry(entry)
@@ -471,8 +542,20 @@ def promote_current(*,
                     label: str = "source_manifest_promote",
                     reason: str = "",
                     people_dir: Path = PEOPLE,
-                    manifest_path: Path = MANIFEST_PATH) -> Path:
+                    manifest_path: Path = MANIFEST_PATH,
+                    relocation_run_id: str | None = None) -> Path:
     manifest = build_manifest(people_dir, reason=reason or label)
+    existing = load_manifest(manifest_path)
+    if existing:
+        comparison = compare_manifest(existing, manifest["files"], people_dir=people_dir,
+                                      app_trash_by_source=app_trash_candidates(people_dir))
+        if comparison["missing"] and relocation_run_id:
+            comparison = compare_manifest(existing, manifest["files"], people_dir=people_dir,
+                app_trash_by_source=app_trash_candidates(people_dir),
+                relocation_events=[event for event in operation_ledger.iter_events(people_dir.parent)
+                                   if event.get("run_id") == relocation_run_id])
+        if comparison["missing"] or comparison["size_changed"]:
+            raise ValueError("Refusing to replace protected baseline: originals are missing or changed")
     save_manifest(manifest, manifest_path)
     return manifest_path
 
@@ -936,4 +1019,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    import pipeline_writer
+    main = pipeline_writer.serialized(main)
     raise SystemExit(main())

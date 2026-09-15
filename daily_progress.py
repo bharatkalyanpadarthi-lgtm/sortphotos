@@ -147,6 +147,18 @@ class CommandProgress:
         if text.startswith("Initializing face detector"):
             self.update("Loading detector", "Loading the face detector...")
             return
+        if text.startswith("Protected detection: starting "):
+            detail = text.removeprefix("Protected detection: starting ").split(" (", 1)[0]
+            self.update("Checking benchmark images", f"Checking benchmark images: batch {detail}.")
+            return
+        if text.startswith("Protected detection: completed "):
+            match = COUNTER.search(text)
+            if match:
+                self.count("Checking benchmark images", *(int(value.replace(",", "")) for value in match.groups()))
+            return
+        if text.startswith("Protected benchmark: planning held-out filing decisions"):
+            self.update("Checking filing decisions", "Checking how benchmark photos would be filed; originals remain unchanged.")
+            return
         if text.startswith("Indexing moved references for ") or text.startswith("Verifying moved references for "):
             return
         for source, label in STAGE_LABELS.items():
