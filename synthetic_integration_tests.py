@@ -225,11 +225,14 @@ def test_unassigned_intake_is_preserved_by_reason(tmp: Path) -> None:
     copy_failed = inbox / "batch" / "copy_failed.jpg"
     processing_failed = inbox / "batch" / "processing_failed.jpg"
     unreadable = inbox / "batch" / "unreadable.jpg"
+    empty = inbox / "batch" / "empty.jpg"
     quality_review = inbox / "batch" / "quality_review.jpg"
     organized = inbox / "batch" / "organized.jpg"
     for path in (no_face, unknown, copy_failed, processing_failed, quality_review, organized):
         make_image(path)
     write_bad_image(unreadable)
+    empty.parent.mkdir(parents=True, exist_ok=True)
+    empty.touch()
 
     def record(path: Path, cluster_id: int) -> sort_photos.FaceRecord:
         return sort_photos.FaceRecord(
@@ -245,13 +248,15 @@ def test_unassigned_intake_is_preserved_by_reason(tmp: Path) -> None:
 
     records = [record(unknown, -1), record(copy_failed, 1), record(organized, 2)]
     counts, report = sort_photos.archive_unassigned_sources(
-        [no_face, unknown, copy_failed, processing_failed, unreadable, quality_review, organized],
+        [no_face, unknown, copy_failed, processing_failed, unreadable, empty,
+         quality_review, organized],
         records,
         {-1: "unknown", 1: "Soundarya", 2: "Soundarya"},
         {organized},
         inbox,
         output,
-        processed_sources={no_face, unknown, copy_failed, unreadable, quality_review, organized},
+        processed_sources={no_face, unknown, copy_failed, unreadable, empty,
+                           quality_review, organized},
         detection_outcomes={str(quality_review.resolve()): "face_quality_review:face_too_small"},
     )
 
@@ -261,6 +266,7 @@ def test_unassigned_intake_is_preserved_by_reason(tmp: Path) -> None:
     assert_true(counts.get("copy_failed") == 1, f"wrong copy-failed count: {counts}")
     assert_true(counts.get("processing_failed") == 1, f"wrong processing-failed count: {counts}")
     assert_true(counts.get("unreadable_image") == 1, f"wrong unreadable count: {counts}")
+    assert_true(counts.get("empty_file_archived") == 1, f"wrong empty-file count: {counts}")
     assert_true(counts.get("face_quality_review") == 1, f"wrong quality-review count: {counts}")
     assert_true((review / "no_usable_face" / "batch" / no_face.name).exists(),
                 "no-face image was not preserved")
@@ -272,6 +278,11 @@ def test_unassigned_intake_is_preserved_by_reason(tmp: Path) -> None:
                 "unprocessed image was incorrectly classified as no-face")
     assert_true((review / "unreadable_image" / "batch" / unreadable.name).exists(),
                 "unreadable image was incorrectly classified as no-face")
+    assert_true(
+        (output / "_source_review" / "ready_to_delete" / "empty_intake_files"
+         / "batch" / empty.name).exists(),
+        "zero-byte intake placeholder was left in technical review",
+    )
     assert_true((review / "face_quality_review" / "batch" / quality_review.name).exists(),
                 "detected low-quality face was incorrectly classified as no-face")
     assert_true(organized.exists(), "organized input was incorrectly moved to review")

@@ -3524,7 +3524,19 @@ def archive_unassigned_sources(sources: Iterable[Path],
             rel = resolved.relative_to(input_dir)
         except ValueError:
             rel = Path(resolved.name)
-        dest = unique_path(review_root / reason / rel)
+        empty_file = False
+        try:
+            empty_file = resolved.is_file() and resolved.stat().st_size == 0
+        except OSError:
+            pass
+        if empty_file:
+            reason = "empty_file_archived"
+            detail = "zero_byte_file_has_no_recoverable_image_data"
+            dest = unique_path(
+                output_dir / "_source_review" / "ready_to_delete" / "empty_intake_files" / rel
+            )
+        else:
+            dest = unique_path(review_root / reason / rel)
         try:
             operation_ledger.move_path(
                 resolved,
