@@ -8,10 +8,47 @@ import tempfile
 from pathlib import Path
 
 import content_identity
+import file_operations
+import pipeline_paths
 import sort_photos
 
+CACHE_VERSION = 1
+DEFAULT_CACHE_PATH = (
+    pipeline_paths.SOURCE_REVIEW
+    / "identity_evaluation"
+    / "protected_detection_cache.pkl"
+)
 
-def detect_cases(cases, *, detected_faces=None, batch_size=25):
+
+def _load_cache(path: Path, detector_signature: str) -> dict:
+    try:
+        with path.open("rb") as handle:
+            payload = pickle.load(handle)
+        if (payload.get("version") != CACHE_VERSION
+                or payload.get("detector_signature") != detector_signature
+                or not isinstance(payload.get("entries"), dict)):
+            return {}
+        return payload["entries"]
+    except (OSError, ValueError, TypeError, pickle.PickleError, EOFError, AttributeError):
+        return {}
+
+
+def _save_cache(path: Path, detector_signature: str, entries: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("wb") as handle:
+        pickle.dump({
+            "version": CACHE_VERSION,
+            "detector_signature": detector_signature,
+            "entries": entries,
+        }, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
+    file_operations.sync_directory(path.parent)
+
+
+def detect_cases(cases, *, detected_faces=None, batch_size=25, cache_path=None):
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
     result = {} if detected_faces is None else dict(detected_faces)
@@ -22,6 +59,28 @@ def detect_cases(cases, *, detected_faces=None, batch_size=25):
         if case.content_sha256 and digest != case.content_sha256:
             raise RuntimeError(f"Benchmark content changed: {case.source}")
         expected[key] = (case.source, digest)
+    detector_signature = sort_photos.config_fingerprint()
+    cache_file = Path(cache_path or DEFAULT_CACHE_PATH)
+    cache_entries = _load_cache(cache_file, detector_signature)
+    reused = 0
+    for key, (_path, digest) in expected.items():
+        entry = cache_entries.get(key, {})
+        if not isinstance(entry, dict):
+            continue
+        faces = entry.get("faces")
+        if entry.get("sha256") != digest or not isinstance(faces, list):
+            continue
+        if any(
+            os.path.realpath(str(getattr(face, "src_str", ""))) != key
+            or getattr(face, "content_sha256", "") != digest
+            for face in faces
+        ):
+            continue
+        result[key] = faces
+        reused += 1
+    if reused:
+        print(f"Protected detection: reused {reused}/{len(expected)} unchanged image(s).",
+              flush=True)
     pending = [key for key in expected if key not in result]
     env = os.environ.copy()
     env.update(sort_photos.DETECTION_WORKER_ENV_LIMITS)
@@ -71,6 +130,12 @@ def detect_cases(cases, *, detected_faces=None, batch_size=25):
                     raise RuntimeError("Benchmark worker returned invalid face provenance")
                 batch[key].append(face)
             result.update(batch)
+            for key in keys:
+                cache_entries[key] = {
+                    "sha256": expected[key][1],
+                    "faces": batch[key],
+                }
+            _save_cache(cache_file, detector_signature, cache_entries)
             print(f"Protected detection: completed {start + len(keys)}/{len(pending)}",
                   flush=True)
 

@@ -793,12 +793,20 @@ class ArchitectureTests(unittest.TestCase):
             patch.object(sorter, "persist_detection_batch", side_effect=AssertionError("must not write index")),
             patch.object(sorter, "_build_app", side_effect=AssertionError("no model in parent")),
         ):
-            result = benchmark_detection.detect_cases(cases, detected_faces=memo, batch_size=2)
+            cache_path = self.root / "protected-detection.pkl"
+            result = benchmark_detection.detect_cases(
+                cases, detected_faces=memo, batch_size=2, cache_path=cache_path)
             self.assertEqual(run.call_count, 2)
             self.assertEqual(result, {str(case.source): [] for case in cases})
             self.assertEqual(result, memo)
-            benchmark_detection.detect_cases(cases, detected_faces=memo, batch_size=2)
+            benchmark_detection.detect_cases(
+                cases, detected_faces={}, batch_size=2, cache_path=cache_path)
             self.assertEqual(run.call_count, 2)
+
+            with patch.object(sorter, "config_fingerprint", return_value="changed-detector"):
+                benchmark_detection.detect_cases(
+                    cases, detected_faces={}, batch_size=2, cache_path=cache_path)
+            self.assertEqual(run.call_count, 4)
 
     def test_benchmark_failed_worker_cannot_return_partial_success(self):
         cases = self.benchmark_cases()
@@ -814,7 +822,9 @@ class ArchitectureTests(unittest.TestCase):
         memo = {}
         with patch.object(benchmark_detection.subprocess, "run", side_effect=worker):
             with self.assertRaisesRegex(RuntimeError, "exit -9"):
-                benchmark_detection.detect_cases(cases, detected_faces=memo, batch_size=2)
+                benchmark_detection.detect_cases(
+                    cases, detected_faces=memo, batch_size=2,
+                    cache_path=self.root / "failed-protected-detection.pkl")
         self.assertEqual(memo, {})
 
     def test_benchmark_exclusion_keeps_annotations_and_excludes_hash_group_peers(self):
@@ -870,13 +880,16 @@ class ArchitectureTests(unittest.TestCase):
 
         with patch.object(benchmark_detection.subprocess, "run", side_effect=worker):
             with self.assertRaisesRegex(RuntimeError, "changed benchmark image"):
-                benchmark_detection.detect_cases(cases)
+                benchmark_detection.detect_cases(
+                    cases, cache_path=self.root / "changed-protected-detection.pkl")
 
     def test_benchmark_missing_worker_output_is_not_no_face(self):
         with patch.object(benchmark_detection.subprocess, "run",
                           return_value=SimpleNamespace(returncode=0, stdout="")):
             with self.assertRaisesRegex(RuntimeError, "batch failed"):
-                benchmark_detection.detect_cases(self.benchmark_cases(1))
+                benchmark_detection.detect_cases(
+                    self.benchmark_cases(1),
+                    cache_path=self.root / "missing-protected-detection.pkl")
 
     def test_benchmark_gate_reports_killed_process_and_blocks_duplicate_runs(self):
         server = SimpleNamespace(gate_lock=threading.Lock(), dataset=self.root / "benchmark.csv",
