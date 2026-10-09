@@ -125,6 +125,63 @@ def select_diverse_samples(
     return selected
 
 
+def select_complementary_samples(
+    samples: Sequence[ReferenceSample],
+    *,
+    existing_embeddings: Sequence[np.ndarray],
+    limit: int,
+) -> list[ReferenceSample]:
+    """Fill bounded trusted-reference slots with appearances the core lacks.
+
+    Callers must verify the identity and content first. This is selection, not
+    evidence for accepting a new identity. Distances are updated incrementally
+    so a large confirmation history does not require pairwise comparisons.
+    """
+    if limit <= 0:
+        return []
+    valid = []
+    dimension = None
+    anchors = []
+    for value in existing_embeddings:
+        vector = np.asarray(value, dtype=np.float32).reshape(-1)
+        if not np.isfinite(vector).all() or float(np.linalg.norm(vector)) <= 1e-9:
+            continue
+        if dimension is None:
+            dimension = vector.size
+        if vector.size == dimension:
+            anchors.append(normalize_vector(vector))
+    for sample in samples:
+        vector = np.asarray(sample.embedding, dtype=np.float32).reshape(-1)
+        if (not np.isfinite(sample.quality) or not np.isfinite(vector).all()
+                or float(np.linalg.norm(vector)) <= 1e-9):
+            continue
+        if dimension is None:
+            dimension = vector.size
+        if vector.size == dimension:
+            valid.append(sample)
+    valid.sort(key=lambda sample: (-sample.quality, sample.source))
+    if len(valid) <= limit:
+        return valid
+    if not anchors:
+        return select_diverse_samples(valid, limit=limit)
+
+    matrix = normalize_matrix([sample.embedding for sample in valid])
+    nearest = np.maximum(0.0, 1.0 - np.max(matrix @ np.stack(anchors).T, axis=1))
+    qualities = np.maximum(0.0, np.asarray([sample.quality for sample in valid]))
+    quality_span = max(float(qualities.max(initial=1.0)), 1e-6)
+    quality_scores = qualities / quality_span
+    available = np.ones(len(valid), dtype=bool)
+    selected = []
+    for _ in range(min(limit, len(valid))):
+        scores = .58 * np.minimum(nearest / .45, 1.0) + .42 * quality_scores
+        scores[~available] = -np.inf
+        winner = int(np.argmax(scores))
+        selected.append(valid[winner])
+        available[winner] = False
+        nearest = np.minimum(nearest, np.maximum(0.0, 1.0 - matrix @ matrix[winner]))
+    return selected
+
+
 def select_profile_prototypes(
     dominant_samples: Sequence[ReferenceSample],
     trusted_samples: Sequence[ReferenceSample],

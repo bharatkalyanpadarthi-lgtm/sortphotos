@@ -262,6 +262,22 @@ The index checks size, modification/change timestamps, device, and inode before
 reusing a hash, revalidates lookup hits, and still requires the confirmed face.
 Lookup buckets refresh between stages; new candidate paths enter on the next
 run. This is an in-memory run index, not a permanent exemption from verification.
+Successful relocated paths survive those stage refreshes, but their current
+content version/hash is rechecked before reuse. Replaced or moved-again files
+fall back to the verified lookup rather than retaining stale trust.
+
+Trusted independent references fill gaps in the existing core's appearance
+coverage instead of spending the bounded reference budget on repeated frontal
+poses. Quality still contributes to selection, the existing core guides coverage,
+and only content-verified manual confirmations can supply these references.
+Primary recovery retains its established reference selection to keep the strong
+single-photo lane stable; the independent verifier uses complementary selection.
+The independent matcher catches up with even a small confirmation batch when
+a new review session starts; it is not rebuilt on every review click.
+Unchanged crop embeddings are reused and the model is loaded only for missing
+crops. Selection-policy changes invalidate profile/gate fingerprints without
+discarding those cached embeddings. Confidence thresholds, lookalike margins,
+source holdouts, and automatic-filing safety gates remain unchanged.
 
 Terminal progress now names reference indexing/verification, secondary and
 trusted profiles, sample selection, and primary/independent/protected benchmark

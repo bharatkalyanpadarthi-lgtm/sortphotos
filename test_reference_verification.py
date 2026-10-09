@@ -36,6 +36,36 @@ class ReferenceFixtures:
 
 
 class ReferenceIndexTests(ReferenceFixtures, unittest.TestCase):
+    def test_relocated_reference_is_reverified_without_rescanning_next_stage(self):
+        source = self.file("renamed.jpg")
+        record = self.record(source, original=source.with_name("old.jpg"))
+        index = ReferenceIndex([source], progress=None)
+        self.assertEqual(index.resolve(record), source)
+        index.refresh()
+        with patch.object(index, "_lookup", side_effect=AssertionError("rescanned person")):
+            self.assertEqual(index.resolve(record), source)
+        self.assertEqual(index.hashes_read, 1)
+        self.assertGreater(index.hashes_reused, 0)
+
+    def test_relocated_reference_replacement_cannot_reuse_old_trust(self):
+        source = self.file("renamed.jpg")
+        record = self.record(source, original=source.with_name("old.jpg"))
+        index = ReferenceIndex([source], progress=None)
+        self.assertEqual(index.resolve(record), source)
+        source.write_bytes(b"changed")
+        index.refresh()
+        self.assertIsNone(index.resolve(record))
+
+    def test_relocated_reference_can_move_again_between_stages(self):
+        source = self.file("renamed.jpg")
+        second = self.file("second.jpg", b"other")
+        record = self.record(source, original=source.with_name("old.jpg"))
+        index = ReferenceIndex([source, second], progress=None)
+        self.assertEqual(index.resolve(record), source)
+        source.replace(second)
+        index.refresh()
+        self.assertEqual(index.resolve(record), second)
+
     def test_reenrollment_retains_manual_face_scope_and_does_not_rewrite(self):
         import evaluation_enrollment as enrollment
         source = self.file('group.jpg')

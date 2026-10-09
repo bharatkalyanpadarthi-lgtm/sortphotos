@@ -24,6 +24,7 @@ import pipeline_paths
 
 MODEL_NAME = "buffalo_l"
 CACHE_VERSION = 1
+PROFILE_SELECTION_VERSION = 2
 DEFAULT_MODEL_ROOT = pipeline_paths.configured_path(
     "secondary_model_root",
     pipeline_paths.DATA_ROOT / "models" / "insightface",
@@ -62,6 +63,8 @@ class SecondaryVerification:
 
 def primary_signature(primary_db) -> str:
     digest = hashlib.sha256()
+    # Rebuild profiles after selection changes, preserving cached crop vectors.
+    digest.update(f"selection:{PROFILE_SELECTION_VERSION}\0".encode("ascii"))
     digest.update(str(getattr(primary_db, "config_fingerprint", "")).encode("utf-8"))
     for name in sorted(primary_db.identities, key=str.casefold):
         digest.update(name.encode("utf-8", errors="surrogateescape"))
@@ -345,7 +348,7 @@ def build_database(
     if (
         existing is not None
         and existing.primary_signature == signature
-        and trusted_snapshot_is_current(existing, confirmations_path)
+        and trusted_snapshot_is_current(existing, confirmations_path, rebuild_interval=1)
         and existing.identities
         and all(
             len(existing.prototype_sources.get(name, []))
@@ -358,7 +361,7 @@ def build_database(
     db.primary_signature = signature
     db.trusted_signature = trusted_signature
     db.trusted_example_count = trusted_example_count
-    app = build_app()
+    app = None
     faces_by_source = reference_index.faces_by_source if reference_index is not None else None
     if faces_by_source is None:
         faces_by_source = defaultdict(list)
@@ -431,8 +434,9 @@ def build_database(
             for face in trusted_faces.get(person, [])
             if (os.path.realpath(face.src_str), int(face.face_index)) not in used_faces
         ]
-        chosen_trusted = identity_profiles.select_diverse_samples(
+        chosen_trusted = identity_profiles.select_complementary_samples(
             trusted_samples,
+            existing_embeddings=[face.embedding for face in selected_faces],
             limit=max(0, int(maximum_trusted_per_person)),
         )
         trusted_lookup = {
@@ -457,6 +461,8 @@ def build_database(
             key = crop_key(primary_face.crop_jpeg)
             secondary = db.crop_embeddings.get(key)
             if secondary is None:
+                if app is None:
+                    app = build_app()
                 secondary = embed_crop(primary_face.crop_jpeg, app)
                 if secondary is not None:
                     db.crop_embeddings[key] = secondary

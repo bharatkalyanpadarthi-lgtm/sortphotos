@@ -170,7 +170,7 @@ def prepare_secondary_verifier(
         secondary_db is not None
         and secondary_db.primary_signature == expected_signature
         and secondary_identity_matcher.trusted_snapshot_is_current(
-            secondary_db, sort_photos.IDENTITY_CONFIRMATIONS_FILE
+            secondary_db, sort_photos.IDENTITY_CONFIRMATIONS_FILE, rebuild_interval=1
         )
         and secondary_db.identities
     ):
@@ -195,7 +195,7 @@ def prepare_secondary_verifier(
         or not secondary_db.identities
         or secondary_db.primary_signature != expected_signature
         or not secondary_identity_matcher.trusted_snapshot_is_current(
-            secondary_db, sort_photos.IDENTITY_CONFIRMATIONS_FILE
+            secondary_db, sort_photos.IDENTITY_CONFIRMATIONS_FILE, rebuild_interval=1
         )
     ):
         return None, "refresh did not produce a current verifier database"

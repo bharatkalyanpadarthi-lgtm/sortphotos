@@ -26,6 +26,7 @@ class ReferenceIndex:
         self._by_person = defaultdict(list)
         self._sizes = {}
         self._lookups = {}
+        self._resolved = {}
         seen = set()
         for candidate in faces_by_source if faces_by_source is not None else candidates:
             path = Path(candidate)
@@ -114,8 +115,16 @@ class ReferenceIndex:
         if matches(source):
             return source.resolve()
         person = str(item.get("person", "")).casefold()
+        key = person, digest, size
+        previous = self._resolved.get(key)
+        if previous is not None:
+            if matches(previous):
+                return previous.resolve()
+            self._resolved.pop(key, None)
         for candidate in self._lookup(person, size).get(digest, []):
             # Index hits are only hints until the current file is verified.
             if matches(candidate):
-                return candidate.resolve()
+                resolved = candidate.resolve()
+                self._resolved[key] = resolved
+                return resolved
         return None
