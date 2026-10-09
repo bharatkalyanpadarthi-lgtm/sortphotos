@@ -182,11 +182,16 @@ class DailyPresentationTests(unittest.TestCase):
         root = Path(self.stack.enter_context(tempfile.TemporaryDirectory(prefix="face-daily-display-")))
         self.stack.enter_context(patch.object(daily_runner, "SUMMARY_DIR", root))
         self.stack.enter_context(patch.object(daily_runner, "STATE_FILE", root / "state.json"))
+        people = root / "people"
+        people.mkdir()
+        self.stack.enter_context(patch.object(daily_runner, "PEOPLE", people))
+        self.stack.enter_context(patch.object(daily_runner, "inventory_policy", return_value="test-policy"))
         self.snapshot = {"to_process_images": 3, "person_original_images": 10}
         self.stack.enter_context(patch.object(daily_runner, "snapshot", return_value=self.snapshot))
         self.stack.enter_context(patch.object(daily_runner, "original_person_counts", return_value={"Person": 10}))
         self.stack.enter_context(patch.object(daily_runner, "memory_profile", return_value={"ok": True, "message": "normal", "available_mb": 8192, "batch_size": 50}))
         self.stack.enter_context(patch.object(daily_runner, "intake_has_media", return_value=True))
+        self.stack.enter_context(patch.object(daily_runner, "tree_contains_media", return_value=True))
         self.stack.enter_context(patch.object(daily_runner, "ensure_source_guard_baseline", return_value={}))
         self.guard = self.stack.enter_context(patch.object(daily_runner, "check_source_guard", return_value=(True, {}, [])))
         self.manifest = self.stack.enter_context(patch.object(daily_runner, "check_source_manifest", return_value=SimpleNamespace(ok=True)))
@@ -215,6 +220,16 @@ class DailyPresentationTests(unittest.TestCase):
         self.promote.assert_not_called()
         self.assertIn("face daily --resume", output.getvalue())
         self.assertNotIn("Daily run complete", output.getvalue())
+
+    def test_readonly_stages_reuse_start_and_final_protection(self):
+        self.steps[:] = [{"name": "preflight", "desc": "preflight", "cmd": ["worker"], "mutates": False},
+                         {"name": "integration-audit", "desc": "audit", "cmd": ["worker"], "mutates": False}]
+        with patch.object(sys, "argv", ["daily_runner"]), \
+             patch.object(daily_runner, "run_command", return_value=0), redirect_stdout(io.StringIO()):
+            self.assertEqual(daily_runner.main(), 0)
+        self.assertEqual(self.guard.call_count, 2)
+        self.assertEqual(self.manifest.call_count, 2)
+        self.promote.assert_called_once()
 
     def test_resume_reuses_completed_steps_without_running_workers(self):
         state = {"run_id": "resumed", "started_at": 0, "before": self.snapshot,

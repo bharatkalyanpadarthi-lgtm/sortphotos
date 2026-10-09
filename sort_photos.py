@@ -1681,6 +1681,7 @@ def persist_detection_batch(
     diagnostics: dict[str, str],
     index_path: Path | None,
     fingerprints: dict[str, dict[str, int | str]] | None = None,
+    *, strict: bool = False,
 ) -> None:
     if index_path is None:
         return
@@ -1718,6 +1719,8 @@ def persist_detection_batch(
                     expected_sha256=str(fingerprint_data["sha256"]) if fingerprint_data else None,
                 )
     except Exception as exc:  # noqa: BLE001
+        if strict:
+            raise
         log.warning("Could not mirror detection batch into SQLite: %s", exc)
 
 
@@ -3982,6 +3985,24 @@ def organize_originals(records: list[FaceRecord],
     source_nudity_statuses: dict[Path, str] = {}
     asset_index = analysis_index.AnalysisIndex(analysis_index_file())
 
+    def remember_organized_face(person: str, src: Path, dest: Path, digest: str) -> None:
+        selected = best_per_pair.get((person, src))
+        if selected is None:
+            return
+        try:
+            selected_hash = getattr(selected, "content_sha256", None)
+            if selected_hash and selected_hash != digest:
+                log.warning("Detection reuse withheld for changed source: %s", dest.name)
+                return
+            cached = record_to_cached(selected, person)
+            cached.src_str = str(dest)
+            asset_index.replace_detections(dest, config_fingerprint(), "organized_face",
+                [cached_face_to_index_record(cached)], expected_sha256=digest)
+            asset_index.commit()
+        except Exception as error:  # noqa: BLE001
+            asset_index.connection.rollback()
+            log.warning("Detection reuse unavailable for %s: %s", dest.name, error)
+
     def source_hash_and_nudity_status(src: Path) -> tuple[str, str]:
         if src in source_hashes:
             return source_hashes[src], source_nudity_statuses[src]
@@ -4079,6 +4100,7 @@ def organize_originals(records: list[FaceRecord],
                         preclassified_status=src_nudity_status,
                     )
                     src_hash = verify_original_copy(src, dest, src_hash)
+                    remember_organized_face(person, src, dest, src_hash)
                     journal.completed(operation_id, src_hash, dest)
                 except Exception as e:  # noqa: BLE001
                     log.error("Copy failed: %s → %s: %s", src.name, dest.name, e)
@@ -4137,6 +4159,7 @@ def organize_originals(records: list[FaceRecord],
                             preclassified_status=src_nudity_status,
                         )
                         src_hash = verify_original_copy(src, dest, src_hash)
+                        remember_organized_face(person, src, dest, src_hash)
                         journal.completed(operation_id, src_hash, dest)
                     except Exception as e:  # noqa: BLE001
                         log.error("Copy failed: %s → %s: %s", src.name, dest.name, e)

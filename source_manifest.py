@@ -62,6 +62,7 @@ class ManifestValidation:
     renamed_csv: Path
     extra_csv: Path
     app_trashed_csv: Path
+    current_entries: list[dict[str, Any]] | None = None
 
 
 def is_person_dir_name(name: str) -> bool:
@@ -466,6 +467,7 @@ def validate_current(*,
             renamed_csv=renamed_csv,
             extra_csv=extra_csv,
             app_trashed_csv=app_trashed_csv,
+            current_entries=current_entries,
         )
 
     comparison = compare_manifest(
@@ -508,6 +510,7 @@ def validate_current(*,
         renamed_csv=renamed_csv,
         extra_csv=extra_csv,
         app_trashed_csv=app_trashed_csv,
+        current_entries=current_entries,
     )
 
 

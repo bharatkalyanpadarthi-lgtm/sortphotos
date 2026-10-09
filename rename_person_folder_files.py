@@ -560,6 +560,7 @@ def main() -> int:
     parser.add_argument("people_dir", nargs="?", default=str(DEFAULT_PEOPLE))
     parser.add_argument("--person", default=None,
                         help="Rename one person folder only.")
+    parser.add_argument("--people-file", type=Path)
     parser.add_argument("--compact", action="store_true",
                         help="Renumber each person from 0001. Default preserves existing numbers.")
     parser.add_argument("--simple", action="store_true",
@@ -592,6 +593,10 @@ def main() -> int:
         p for p in people_dir.iterdir()
         if p.is_dir() and not p.name.startswith("_") and not p.name.startswith(".")
     ]
+    from daily_inventory import read_people_file
+    selected_people = read_people_file(args.people_file)
+    if selected_people is not None:
+        person_dirs = [p for p in person_dirs if p.name in selected_people]
     if args.person:
         wanted = args.person.casefold()
         person_dirs = [p for p in person_dirs if p.name.casefold() == wanted]
@@ -642,6 +647,10 @@ def main() -> int:
 
     if not args.apply:
         print("DRY-RUN — no files renamed. Re-run with --apply to commit.")
+        return 0
+
+    if not all_actions:
+        print("Already current: no filenames need changing; no cache or manifest was rewritten.")
         return 0
 
     manifest_check = source_manifest.validate_current(

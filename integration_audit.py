@@ -83,7 +83,6 @@ def check_daily_order(findings: list[Finding]) -> None:
     required = [
         ("structure", "cache-rehydrate"),
         ("rename", "cache-rehydrate"),
-        ("exact-dedupe", "cache-rehydrate"),
         ("advanced-dedupe", "cache-rehydrate"),
         ("cleanup-empty", "cache-rehydrate"),
         ("cache-rehydrate", "integration-audit"),
@@ -107,7 +106,7 @@ def check_daily_destructive_commands(findings: list[Finding]) -> None:
         script = Path(cmd[1]).name if len(cmd) > 1 and cmd[1].endswith(".py") else ""
         if step["name"] == "process" and "--skip-output-cleanup" not in cmd:
             bad.append("daily process must pass --skip-output-cleanup")
-        if script in {"delete_person_folder_duplicates.py", "advanced_duplicate_matching.py"}:
+        if script in {"delete_person_folder_duplicates.py", "advanced_duplicate_matching.py", "daily_duplicates.py"}:
             if "--apply" in cmd:
                 bad.append(f"daily:{step['name']} must not pass --apply to {script}")
             if "--quarantine-bad" in cmd:

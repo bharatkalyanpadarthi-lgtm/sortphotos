@@ -61,13 +61,15 @@ class InputVersions:
 
 def selection_signature(cache):
     digest = hashlib.sha256()
+    metadata = []
     for index, face in enumerate(cache.faces):
         if not getattr(face, "label", None):
             continue
-        digest.update(json.dumps((index, face.label, face.src_str, face.face_index, float(face.quality)),
-                                 allow_nan=False).encode())
         values = np.asarray(face.embedding)
-        digest.update(str(values.dtype).encode() + repr(values.shape).encode() + values.tobytes())
+        metadata.append((index, face.label, face.src_str, face.face_index, float(face.quality),
+                         str(values.dtype), values.shape))
+        digest.update(memoryview(np.ascontiguousarray(values)).cast("B"))
+    digest.update(json.dumps(metadata, allow_nan=False, separators=(",", ":")).encode())
     return digest.hexdigest()
 
 
@@ -193,17 +195,16 @@ class GateInputs:
         digest.update(json.dumps(controls, sort_keys=True).encode())
         digest.update(self.files.signature(excluding=controls).encode())
         self.fingerprint = digest.hexdigest()
+        self.tested_faces = tuple(face for face in cache.faces if id(face) in self.tested_ids)
         self.memory_fingerprint = self._memory_signature()
         self.validate()
 
     def _memory_signature(self):
         digest = hashlib.sha256(selection_signature(self.cache).encode())
         digest.update(str(self.cache.config_fingerprint).encode())
-        for face in self.cache.faces:
+        for face in self.tested_faces:
             # Byte buffers are immutable; hashing only tested crops avoids
             # reading the full library's crops on every checkpoint boundary.
-            if id(face) not in self.tested_ids:
-                continue
             for key, value in sorted(vars(face).items()):
                 digest.update(key.encode())
                 if isinstance(value, np.ndarray):

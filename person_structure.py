@@ -282,12 +282,15 @@ def move_suspicious_person(person_dir: Path, review_root: Path, apply: bool) -> 
     return True
 
 
-def audit_or_repair(people_dir: Path, review_root: Path, apply: bool, quiet: bool) -> Stats:
+def audit_or_repair(people_dir: Path, review_root: Path, apply: bool, quiet: bool,
+                    people: set[str] | None = None) -> Stats:
     if apply:
         import rename_transaction
         rename_transaction.recover_under(people_dir)
     stats = Stats()
     for person_dir in person_dirs(people_dir):
+        if people is not None and person_dir.name not in people:
+            continue
         if person_dir.name.startswith("_") or person_dir.name.startswith("."):
             stats.suspicious_people += 1
             stats.people += 1
@@ -337,9 +340,9 @@ def audit_or_repair(people_dir: Path, review_root: Path, apply: bool, quiet: boo
                 except OSError:
                     pass
 
-        stats.empty_dirs += prune_empty_dirs(person_dir, apply=False)
-        if apply:
-            stats.removed_empty_dirs += prune_empty_dirs(person_dir, apply=True)
+        empty = prune_empty_dirs(person_dir, apply=apply)
+        stats.empty_dirs += empty
+        stats.removed_empty_dirs += empty if apply else 0
 
     return stats
 
@@ -378,6 +381,7 @@ def main() -> int:
     parser.add_argument("--review-root", type=Path, default=DEFAULT_REVIEW)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--people-file", type=Path)
     args = parser.parse_args()
 
     people_dir = args.people_dir.expanduser().resolve()
@@ -386,7 +390,9 @@ def main() -> int:
         print(f"ERROR: people folder not found: {people_dir}")
         return 1
 
-    stats = audit_or_repair(people_dir, review_root, args.apply, args.quiet)
+    from daily_inventory import read_people_file
+    stats = audit_or_repair(people_dir, review_root, args.apply, args.quiet,
+                            read_people_file(args.people_file))
     print_stats(stats, people_dir, review_root, args.apply)
     return 0
 

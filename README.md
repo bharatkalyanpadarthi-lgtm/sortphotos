@@ -57,6 +57,50 @@ For troubleshooting, use `face daily --verbose` (or
 of display mode. Resume remains `face daily --resume`; interrupted steps do
 not get marked completed.
 
+### Incremental Daily Runs
+
+Option 1 maintains a transactional changed-person inventory. After the first
+successful baseline, routine structure repair, renaming, duplicate reporting,
+empty-folder cleanup and cache reconciliation target changed people only.
+External changes made in Finder are detected too. Photo-only intake skips video
+processing, and video-only intake skips photo processing. An empty inbox still
+finishes immediately unless a saved run needs resuming.
+
+Daily duplicate reporting now uses one cached exact-byte engine, preserving the
+existing advanced CSV format, hardlink accounting and separate normal/nude
+categories. It never moves duplicate candidates. Perceptual duplicate review
+and standalone maintenance commands remain available.
+
+Verified detections follow identical content across copies and renames, with
+the detector version and exact accepted face selection checked. SQLite saves
+each completed detection batch; the legacy cache snapshot is written once at
+completion, and an unchanged cache receives no rewrite or backup. Interrupted
+runs retain SQLite work and never promote a successful inventory prematurely.
+
+Protection checks remain before processing, after photo-moving stages and at
+completion. Read-only reports no longer trigger duplicate protection scans.
+Standalone maintenance commands retain their own safeguards. Primary and
+independent matching safety gates remain active; changed matching evidence or
+policy still requires reevaluation. The log explains invalidation reasons.
+
+The first run after this upgrade may take longer to establish its safe baseline
+and refresh safety results. Later unchanged inputs can reuse verified results.
+Final summary JSON includes per-stage worker/safety timings, skip reasons,
+changed-folder counts and cache reuse counters, so speed gains can be measured.
+
+Use `face daily --full-maintenance` for an intentional whole-library maintenance
+pass, `face daily --dry-run` to preview, and `face daily --resume` after a failure.
+An unavailable SSD or failed protection check stops the run; do not bypass it.
+
+Regression validation (temporary libraries only):
+
+```sh
+.venv/bin/python -m unittest discover -q
+.venv/bin/python synthetic_integration_tests.py
+# Browser lifecycle checks require Node, Playwright and Chrome:
+FACE_REVIEW_BROWSER_TEST=1 .venv/bin/python -m unittest test_review_lifecycle -q
+```
+
 ## Storage Layout
 
 The external SSD is the source of truth for photo data:

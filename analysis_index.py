@@ -52,6 +52,7 @@ class CachedDetectionSet:
     height: int
     orientation: int
     detections: tuple[DetectionRecord, ...]
+    content_sha256: str | None = None
 
 
 class AnalysisIndex:
@@ -60,6 +61,8 @@ class AnalysisIndex:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         timeout = max(0.0, float(timeout))
         self.connection = sqlite3.connect(self.path, timeout=timeout)
+        self.hash_hits = 0
+        self.hash_misses = 0
         try:
             self.connection.execute("PRAGMA journal_mode=WAL")
             self.connection.execute("PRAGMA synchronous=NORMAL")
@@ -311,21 +314,27 @@ class AnalysisIndex:
         ).fetchone()
         if row is None or row[3] is None:
             return None
-        return self._detection_set(canonical, detector_config, row)
+        return self._detection_set(canonical, detector_config, row, digest)
 
-    def reusable_detections(self, path: Path, detector_config: str) -> CachedDetectionSet | None:
+    def reusable_detections(self, path: Path, detector_config: str,
+                            preferred_label: str | None = None) -> CachedDetectionSet | None:
         """Reuse verified analysis for byte-identical copies or renamed files."""
         digest = self.content_sha256(path)
         if not digest:
             return None
         row = self.connection.execute(
             "SELECT width, height, orientation, detection_status, path FROM asset_analysis "
-            "WHERE detection_sha256=? AND detection_config=? AND detection_status IS NOT NULL LIMIT 1",
-            (digest, detector_config),
+            "WHERE detection_sha256=? AND detection_config=? AND detection_status IS NOT NULL "
+            "AND (? IS NULL OR detection_status != 'organized_face' OR EXISTS "
+            "(SELECT 1 FROM face_detections f WHERE f.asset_path=asset_analysis.path "
+            "AND f.detector_config=asset_analysis.detection_config AND f.label=?)) "
+            "ORDER BY (detection_status='organized_face') DESC LIMIT 1",
+            (digest, detector_config, preferred_label, preferred_label),
         ).fetchone()
-        return self._detection_set(str(row[4]), detector_config, row[:4]) if row else None
+        return self._detection_set(str(row[4]), detector_config, row[:4], digest) if row else None
 
-    def _detection_set(self, canonical: str, detector_config: str, row) -> CachedDetectionSet:
+    def _detection_set(self, canonical: str, detector_config: str, row,
+                       digest: str | None = None) -> CachedDetectionSet:
         records = self.connection.execute(
             "SELECT face_index, det_score, bbox_size, sharpness, yaw_proxy, quality, "
             "embedding, embedding_dimension, image_phash, image_phash_bits, crop_jpeg, label, "
@@ -357,6 +366,7 @@ class AnalysisIndex:
             height=int(row[1]),
             orientation=int(row[2]),
             detections=detections,
+            content_sha256=digest,
         )
 
     def replace_detections(
@@ -521,7 +531,11 @@ class AnalysisIndex:
                 (canonical, signature),
             ).fetchone()
             if row is not None:
+                if content_identity.file_version(path) != version:
+                    return None
+                self.hash_hits += 1
                 return str(row[0])
+            self.hash_misses += 1
             digest = content_identity.content_sha256(path)
             if content_identity.file_version(path) != version:
                 return None

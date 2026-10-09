@@ -3260,7 +3260,6 @@ def test_daily_order_is_safe(tmp: Path) -> None:
         ("video-process", "process"),
         ("structure", "cache-rehydrate"),
         ("rename", "cache-rehydrate"),
-        ("exact-dedupe", "cache-rehydrate"),
         ("advanced-dedupe", "cache-rehydrate"),
         ("cleanup-empty", "cache-rehydrate"),
         ("cache-rehydrate", "integration-audit"),

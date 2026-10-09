@@ -66,6 +66,7 @@ def main() -> int:
     parser.add_argument("--ready-dir", type=Path, default=DEFAULT_READY)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--people-file", type=Path)
     args = parser.parse_args()
 
     people_dir = args.people_dir.expanduser().resolve()
@@ -74,7 +75,10 @@ def main() -> int:
         print(f"ERROR: people folder not found: {people_dir}")
         return 1
 
-    empty = [p for p in person_dirs(people_dir) if not has_real_source_files(p)]
+    from daily_inventory import read_people_file
+    selected_people = read_people_file(args.people_file)
+    empty = [p for p in person_dirs(people_dir)
+             if (selected_people is None or p.name in selected_people) and not has_real_source_files(p)]
     archive_root = ready_dir / f"empty_person_folders_{time.strftime('%Y%m%d_%H%M%S')}"
 
     moved = 0

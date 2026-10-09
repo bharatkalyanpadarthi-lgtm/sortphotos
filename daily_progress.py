@@ -126,6 +126,9 @@ class CommandProgress:
         if "Safety benchmark: reusing unchanged cached result" in text:
             self.notice("Matching safety check: reusing the saved result.")
             return
+        if text.startswith("Safety benchmark reason:"):
+            self.notice("Matching safety check required: " + text.partition(":")[2].strip() + ".")
+            return
         if "Safety benchmark: inputs changed or no cached result" in text:
             self.notice("Matching safety check: inputs changed or no saved result; checking again.")
             return

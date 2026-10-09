@@ -825,6 +825,10 @@ def _run_action(action: dict, extra_args: list[str] | None = None) -> int:
     if cache_rc != 0:
         return cache_rc
 
+    if action["key"] == "daily":
+        # The daily orchestrator owns its protection baseline and final promotion.
+        return run_steps(action, extra_args)
+
     manifest_check = source_manifest.validate_current(
         label=f"face_{action['key']}_start",
         people_dir=daily_runner.PEOPLE,

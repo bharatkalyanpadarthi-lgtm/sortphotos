@@ -27,10 +27,14 @@ import signal
 import subprocess
 import sys
 import time
+import hashlib
+import re
+import stat as stat_types
 from pathlib import Path
 
 import source_manifest
 import pipeline_paths
+import daily_inventory
 from daily_progress import CommandProgress, OutputLines, STEP_LABELS, duration
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -201,11 +205,11 @@ def ensure_source_guard_baseline(state: dict) -> dict[str, int]:
     return {str(k): int(v) for k, v in before.items()}
 
 
-def check_source_guard(state: dict, stage: str) -> tuple[bool, dict[str, int], list[dict[str, int | str]]]:
+def check_source_guard(state: dict, stage: str, *, counts: dict | None = None) -> tuple[bool, dict[str, int], list[dict[str, int | str]]]:
     before = ensure_source_guard_baseline(state)
     guard = state.setdefault("source_guard", {})
     floor = {str(k): int(v) for k, v in guard.get("floor", before).items()}
-    after = original_person_counts()
+    after = original_person_counts() if counts is None else counts
     paths = source_guard_paths(str(state["run_id"]))
     violations = source_count_violations(floor, after)
     write_source_counts_csv(paths["after"], after)
@@ -253,6 +257,18 @@ def check_source_manifest(state: dict, stage: str, *, verbose: bool = True) -> s
         "app_trashed_csv": str(result.app_trashed_csv),
     }
     return result
+
+
+def verified_original_counts(result) -> dict | None:
+    entries = getattr(result, "current_entries", None)
+    if entries is None:
+        return None
+    counts = {name: 0 for name in source_manifest.person_names(PEOPLE)}
+    for entry in entries:
+        parts = Path(entry["relative_path"]).parts
+        if len(parts) >= 3 and parts[1] == "photos":
+            counts[parts[0]] = counts.get(parts[0], 0) + 1
+    return counts
 
 
 def size_bytes(root: Path) -> int:
@@ -348,6 +364,22 @@ def snapshot() -> dict:
     dups = duplicate_counts()
     labels = labeling_remaining()
     original_counts = original_person_counts()
+    holding = {"files": 0, "size": 0, "organized_sources": 0, "scanned_sources": 0, "intake_duplicates": 0}
+    if READY.exists():
+        for current, _dirs, files in os.walk(READY):
+            for name in files:
+                path = Path(current) / name
+                try:
+                    stat = path.stat()
+                except FileNotFoundError:
+                    continue
+                if not stat_types.S_ISREG(stat.st_mode):
+                    continue
+                holding["files"] += 1
+                holding["size"] += stat.st_size
+                category = path.relative_to(READY).parts[0]
+                if category in {"organized_sources", "scanned_sources", "intake_duplicates"}:
+                    holding[category] += 1
     return {
         "to_process_images": count_images(TO_PROCESS, exclude_generated_dirs=False),
         "to_process_videos": count_videos(TO_PROCESS, exclude_generated_dirs=False),
@@ -355,13 +387,14 @@ def snapshot() -> dict:
         "organized_images": original_person_total(original_counts),
         "person_original_images": original_person_total(original_counts),
         "person_folders": len(original_counts),
+        "person_counts": original_counts,
         "person_videos": count_videos(PEOPLE),
         "nudity_images": nudity_count(),
-        "ready_to_delete_files": count_files(READY),
-        "ready_to_delete_size": size_bytes(READY),
-        "organized_sources_files": count_files(READY / "organized_sources"),
-        "scanned_sources_files": count_files(READY / "scanned_sources"),
-        "intake_duplicates_files": count_files(READY / "intake_duplicates"),
+        "ready_to_delete_files": holding["files"],
+        "ready_to_delete_size": holding["size"],
+        "organized_sources_files": holding["organized_sources"],
+        "scanned_sources_files": holding["scanned_sources"],
+        "intake_duplicates_files": holding["intake_duplicates"],
         "unassigned_no_face": count_images(
             SOURCE_REVIEW / "unassigned_intake" / "no_usable_face",
             exclude_generated_dirs=False,
@@ -495,6 +528,7 @@ def step_list(batch_size: int) -> list[dict]:
             "name": "preflight",
             "desc": "Preflight folders, memory, disk, and process safety",
             "cmd": [py, str(SCRIPT_DIR / "preflight_check.py")],
+            "mutates": False,
         },
         {
             "name": "video-process",
@@ -521,22 +555,105 @@ def step_list(batch_size: int) -> list[dict]:
         {"name": "structure", "desc": "Normalize person folder structure",
          "cmd": [py, str(SCRIPT_DIR / "person_structure.py"), "--apply", "--quiet"]},
         {"name": "rename", "desc": "Normalize person filenames with simple stable names",
-         "cmd": [py, str(SCRIPT_DIR / "rename_person_folder_files.py"), "--simple", "--apply", "--quiet"]},
-        {"name": "exact-dedupe", "desc": "Report exact person-folder duplicates without moving originals",
-         "cmd": [py, str(SCRIPT_DIR / "delete_person_folder_duplicates.py"), "--quiet"]},
-        {"name": "advanced-dedupe", "desc": "Refresh advanced duplicate report without moving originals",
-         "cmd": [py, str(SCRIPT_DIR / "advanced_duplicate_matching.py"), "--quiet"], "heavy": True},
+         "cmd": [py, str(SCRIPT_DIR / "rename_person_folder_files.py"), "--simple", "--apply", "--quiet", "--skip-manifest-promote"]},
+        {"name": "advanced-dedupe", "desc": "Update one cached exact-duplicate and hardlink report",
+         "cmd": [py, str(SCRIPT_DIR / "daily_duplicates.py")], "mutates": False},
         {"name": "cleanup-empty", "desc": "Move empty person folders to ready_to_delete",
          "cmd": [py, str(SCRIPT_DIR / "cleanup_empty_person_folders.py"), "--apply", "--quiet"]},
         {"name": "cache-rehydrate", "desc": "Refresh face cache after all file-moving cleanup",
-         "cmd": [py, str(SCRIPT_DIR / "cache_tools.py"), "rehydrate", "--apply", "--batch-size", str(batch_size)], "heavy": True},
+         "cmd": [py, str(SCRIPT_DIR / "cache_tools.py"), "rehydrate", "--apply", "--batch-size", str(batch_size)], "heavy": True, "mutates": False},
         {"name": "unknown-triage", "desc": "Write unknown-cluster triage report",
-         "cmd": [py, str(SCRIPT_DIR / "unknown_triage.py"), "--quiet"]},
+         "cmd": [py, str(SCRIPT_DIR / "unknown_triage.py"), "--quiet"], "mutates": False},
         {"name": "integration-audit", "desc": "Verify final cross-script invariants",
-         "cmd": [py, str(SCRIPT_DIR / "integration_audit.py")]},
+         "cmd": [py, str(SCRIPT_DIR / "integration_audit.py")], "mutates": False},
         {"name": "status", "desc": "Print final dashboard",
-         "cmd": [py, str(SCRIPT_DIR / "status_report.py")]},
+         "cmd": [py, str(SCRIPT_DIR / "status_report.py")], "mutates": False},
     ]
+
+
+SCOPED_STEPS = {"structure", "rename", "advanced-dedupe", "cleanup-empty", "cache-rehydrate"}
+
+
+def inventory_policy() -> str:
+    import sort_photos
+    digest = hashlib.sha256(sort_photos.config_fingerprint().encode())
+    for name in ("daily_inventory.py", "person_structure.py", "rename_person_folder_files.py",
+                 "cleanup_empty_person_folders.py", "daily_duplicates.py",
+                 "advanced_duplicate_matching.py", "analysis_index.py", "cache_tools.py"):
+        digest.update((SCRIPT_DIR / name).read_bytes())
+    return digest.hexdigest()
+
+
+def prepare_inventory(state: dict, *, full: bool = False) -> dict:
+    entries = daily_inventory.capture(PEOPLE)
+    with daily_inventory.open_inventory(STATE_FILE.with_name("daily_inventory.sqlite3"), PEOPLE, inventory_policy()) as inventory:
+        changes = inventory.changes(entries)
+        previous = state.get("incremental", {})
+        changes["full"] = bool(full or previous.get("full") or changes["full"])
+        changes["people"] = sorted(set(changes["people"]) | set(previous.get("people", [])))
+        inventory.checkpoint(state["run_id"], changes)
+    state["incremental"] = {key: changes[key] for key in ("full", "reason", "people", "fingerprint")}
+    state["incremental"].update({key + "_count": len(changes[key]) for key in ("added", "changed", "removed")})
+    scope_path = SUMMARY_DIR / f"daily_run_{state['run_id']}_people.json"
+    source_manifest.write_json_atomic(scope_path, changes["people"])
+    state["incremental"]["scope_path"] = str(scope_path)
+    save_state(state)
+    return entries
+
+
+def skip_reason(step: dict, state: dict, *, full: bool = False) -> str | None:
+    name = step["name"]
+    if name == "process" and not tree_contains_media(TO_PROCESS, IMAGE_EXTS):
+        return "no new photos"
+    if name == "video-process" and not (tree_contains_media(TO_PROCESS, VIDEO_EXTS)
+                                       or tree_contains_media(LEGACY_VIDEO_INBOX, VIDEO_EXTS)):
+        return "no new videos"
+    plan = state.get("incremental", {})
+    if name in SCOPED_STEPS and not plan.get("full", True) and not plan.get("people"):
+        if name != "advanced-dedupe" or ADV_REPORT.exists():
+            return "no changed people or folders"
+    if name == "unknown-triage":
+        import unknown_triage
+        if not unknown_triage.DEFAULT_STATE.is_file():
+            return "no legacy review state; Quick Review remains available"
+        if not full and unknown_triage.report_current(unknown_triage.DEFAULT_STATE, unknown_triage.DEFAULT_OUTPUT_DIR):
+            return "legacy review report is already current"
+    if name == "status" and not full:
+        return "included in the final summary"
+    return None
+
+
+def scoped_command(step: dict, state: dict) -> list[str]:
+    command = list(step["cmd"])
+    plan = state.get("incremental", {})
+    if step["name"] in SCOPED_STEPS and plan and not plan["full"]:
+        command.extend(["--people-file", plan["scope_path"]])
+    return command
+
+
+def worker_diagnostics(log_path: Path, offset: int) -> dict:
+    if not log_path.exists():
+        return {}
+    counters = {}
+    benchmark = []
+    patterns = {"cached_files": r"Already cached candidate files:\s*(\d+)",
+                "missing_files": r"Remaining candidate files:\s*(\d+)",
+                "reused_detections": r"Verified detections reused:\s*(\d+)",
+                "fingerprint_hits": r"Fingerprint cache hits:\s*(\d+)",
+                "fingerprint_misses": r"Fingerprint cache misses:\s*(\d+)",
+                "hash_hits": r"Indexed content hashes:\s*(\d+) reused",
+                "hash_misses": r"Indexed content hashes:\s*\d+ reused; (\d+) newly hashed"}
+    with log_path.open("rb") as handle:
+        handle.seek(offset)
+        for raw in handle:
+            line = raw.decode("utf-8", errors="replace")
+            for name, pattern in patterns.items():
+                match = re.search(pattern, line)
+                if match:
+                    counters[name] = int(match.group(1))
+            if "Safety benchmark reason:" in line or "Safety benchmark: reusing unchanged cached result" in line:
+                benchmark.append(line.strip())
+    return {"counters": counters, "benchmark": benchmark[-10:]}
 
 
 def run_command(cmd: list[str], log_path: Path, *, verbose: bool = True, step_name: str = "") -> int:
@@ -630,10 +747,14 @@ def write_summary(path: Path, state: dict, before: dict, after: dict, status: st
         "finished_at": int(time.time()),
         "before": before,
         "after": after,
-        "delta": {key: delta(after, before, key) for key in after},
+        "delta": {key: delta(after, before, key) for key, value in after.items() if isinstance(value, (int, float))},
         "steps": state["steps"],
         "memory": state.get("memory", {}),
         "source_guard": state.get("source_guard", {}),
+        "timings_seconds": state.get("timings_seconds", {}),
+        "safety_timings_seconds": state.get("safety_timings_seconds", {}),
+        "incremental": state.get("incremental", {}),
+        "worker_diagnostics": state.get("worker_diagnostics", {}),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
@@ -742,6 +863,18 @@ def print_dry_run(steps: list[dict], before: dict, profile: dict,
             not full_maintenance or step["name"] in skip_when_empty
         )
         status = "skip: empty inbox" if would_skip else "run"
+        if not would_skip:
+            if step["name"] == "process" and not int(before.get("to_process_images", 0)):
+                status = "skip: no new photos"
+            elif step["name"] == "video-process" and not (int(before.get("to_process_videos", 0))
+                                                        + int(before.get("legacy_videos", 0))):
+                status = "skip: no new videos"
+            elif step["name"] in SCOPED_STEPS and not full_maintenance:
+                status = "changed folders only (full baseline on first run)"
+            elif step["name"] == "unknown-triage":
+                status = "only if saved legacy review labels changed"
+            elif step["name"] == "status" and not full_maintenance:
+                status = "skip: included in final summary"
         print(f"[{index}/{len(steps)}] {status:18} {step['desc']}")
         print(f"    {' '.join(step['cmd'])}")
     print()
@@ -783,6 +916,7 @@ def main() -> int:
         clear_state()
 
     state = load_state()
+    resumed = state is not None
     if state is None and not args.full_maintenance and not intake_has_media():
         print("Daily Ingest")
         print("=" * 60)
@@ -807,7 +941,7 @@ def main() -> int:
             "steps": {},
             "memory": profile,
             "source_guard": {
-                "before": original_person_counts(),
+                "before": before_snapshot.get("person_counts") or original_person_counts(),
                 "started_at": int(time.time()),
             },
         }
@@ -834,7 +968,8 @@ def main() -> int:
     if args.verbose and guard.get("before_csv"):
         print(f"Source guard before CSV: {guard['before_csv']}")
 
-    ok, _, violations = check_source_guard(state, "start")
+    manifest_result = check_source_manifest(state, "start", verbose=args.verbose)
+    ok, _, violations = check_source_guard(state, "start", counts=verified_original_counts(manifest_result))
     save_state(state)
     if not ok:
         paths = source_guard_paths(str(state["run_id"]))
@@ -844,32 +979,40 @@ def main() -> int:
             print(f"  {row['person']}: {row['before']} -> {row['after']} ({row['delta']})")
         return SOURCE_GUARD_EXIT
 
-    manifest_result = check_source_manifest(state, "start", verbose=args.verbose)
-    save_state(state)
     if not manifest_result.ok:
         print("ERROR: protected source manifest failed before running steps.")
         print("Fix or recover the missing originals before cache/smart-album refresh can run.")
         return SOURCE_GUARD_EXIT
 
+    # Reconcile external moves as well as this run's writes. Never publish this
+    # inventory as a successful baseline until final original verification.
+    inventory_entries = prepare_inventory(state, full=args.full_maintenance)
+    if resumed:
+        for name in SCOPED_STEPS:
+            if state["steps"].get(name, {}).get("status") == "completed":
+                state["steps"][name]["status"] = "needs_revalidation"
+        save_state(state)
+
     log_path = SUMMARY_DIR / f"daily_run_{state['run_id']}.log"
     summary_path = SUMMARY_DIR / f"daily_run_{state['run_id']}.json"
     print(f"Full diagnostics are saved to: {log_path}", flush=True)
     steps = step_list(batch_size)
-    empty_inbox = (
-        int(before.get("to_process_images", 0)) == 0
-        and int(before.get("to_process_videos", 0)) == 0
-        and int(before.get("legacy_videos", 0)) == 0
-    )
-    skip_when_empty = empty_inbox_skippable_step_names()
     for index, step in enumerate(steps, start=1):
         label = step["desc"] if args.verbose else STEP_LABELS[step["name"]]
+        if step["name"] == "structure":
+            inventory_entries = prepare_inventory(state, full=args.full_maintenance)
+            plan = state["incremental"]
+            print("  Maintenance: " + ("full safe baseline" if plan["full"] else
+                  f"{len(plan['people'])} changed person folder(s) only"), flush=True)
         if step["name"] != "preflight" and state["steps"].get(step["name"], {}).get("status") == "completed":
             print(f"[{index}/{len(steps)}] {label} - already completed", flush=True)
             continue
-        if empty_inbox and step["name"] in skip_when_empty:
-            print(f"[{index}/{len(steps)}] {label} - skipped (empty inbox)", flush=True)
+        reason = skip_reason(step, state, full=args.full_maintenance)
+        if reason:
+            print(f"[{index}/{len(steps)}] {label} - skipped ({reason})", flush=True)
             state["steps"][step["name"]] = {
-                "status": "skipped_empty_inbox",
+                "status": "skipped",
+                "reason": reason,
                 "finished_at": int(time.time()),
             }
             save_state(state)
@@ -888,17 +1031,22 @@ def main() -> int:
                 return 2
         print()
         print(f"[{index}/{len(steps)}] {label}", flush=True)
-        state["steps"][step["name"]] = {"status": "running", "started_at": int(time.time())}
+        started_at = int(time.time())
+        state["steps"][step["name"]] = {"status": "running", "started_at": started_at}
         save_state(state)
         step_started = time.perf_counter()
-        rc = run_command(step["cmd"], log_path, verbose=args.verbose, step_name=step["name"])
+        log_offset = log_path.stat().st_size if log_path.exists() else 0
+        rc = run_command(scoped_command(step, state), log_path, verbose=args.verbose, step_name=step["name"])
         elapsed = time.perf_counter() - step_started
+        state.setdefault("worker_diagnostics", {})[step["name"]] = worker_diagnostics(log_path, log_offset)
         state.setdefault("timings_seconds", {})[step["name"]] = round(elapsed, 3)
         if args.verbose:
             print(f"Step timing: {step['name']} {elapsed:.1f}s (exit {rc})", flush=True)
         if rc != 0:
             state["steps"][step["name"]] = {
                 "status": "failed",
+                "started_at": started_at,
+                "worker_seconds": round(elapsed, 3),
                 "returncode": rc,
                 "finished_at": int(time.time()),
             }
@@ -909,9 +1057,13 @@ def main() -> int:
             print("Resume with: face daily --resume")
             print(f"Full error details: {log_path}")
             return rc
-        if not args.verbose:
+        safety_started = time.perf_counter()
+        mutates = step.get("mutates", True)
+        if not args.verbose and mutates:
             print("  Checking that originals are preserved...", flush=True)
-        ok, guarded_after, violations = check_source_guard(state, step["name"])
+        manifest_result = (check_source_manifest(state, step["name"], verbose=args.verbose) if mutates else None)
+        ok, guarded_after, violations = (check_source_guard(state, step["name"],
+            counts=verified_original_counts(manifest_result)) if mutates else (True, {}, []))
         if not ok:
             state["steps"][step["name"]] = {
                 "status": "failed_source_count_guard",
@@ -934,9 +1086,8 @@ def main() -> int:
                 print(f"  ... {len(violations) - 10} more")
             print(f"Resume after fixing counts with: python face.py daily --resume")
             return SOURCE_GUARD_EXIT
-        manifest_result = check_source_manifest(state, step["name"], verbose=args.verbose)
         save_state(state)
-        if not manifest_result.ok:
+        if manifest_result is not None and not manifest_result.ok:
             state["steps"][step["name"]] = {
                 "status": "failed_source_manifest_guard",
                 "returncode": SOURCE_GUARD_EXIT,
@@ -952,14 +1103,21 @@ def main() -> int:
             print(f"Changed report CSV: {manifest_result.changed_csv}")
             print(f"Resume after fixing originals with: python face.py daily --resume")
             return SOURCE_GUARD_EXIT
-        state["steps"][step["name"]] = {"status": "completed", "finished_at": int(time.time())}
+        safety_seconds = time.perf_counter() - safety_started
+        state.setdefault("safety_timings_seconds", {})[step["name"]] = round(safety_seconds, 3)
+        state["steps"][step["name"]] = {"status": "completed", "started_at": started_at,
+            "finished_at": int(time.time()), "worker_seconds": round(elapsed, 3),
+            "safety_seconds": round(safety_seconds, 3)}
+        if step["name"] == "cache-rehydrate":
+            inventory_entries = daily_inventory.capture(PEOPLE)
         save_state(state)
         if not args.verbose:
             print(f"  Done ({duration(time.perf_counter() - step_started)}, including safety checks).", flush=True)
 
     print("Finalizing library counts and safety checks...", flush=True)
     after = snapshot()
-    ok, _, violations = check_source_guard(state, "completed")
+    manifest_result = check_source_manifest(state, "completed_before_promote", verbose=args.verbose)
+    ok, _, violations = check_source_guard(state, "completed", counts=verified_original_counts(manifest_result))
     if not ok:
         save_state(state)
         write_summary(summary_path, state, before, after, "failed_source_count_guard")
@@ -969,8 +1127,6 @@ def main() -> int:
         for row in violations[:10]:
             print(f"  {row['person']}: {row['before']} -> {row['after']} ({row['delta']})")
         return SOURCE_GUARD_EXIT
-    manifest_result = check_source_manifest(state, "completed_before_promote", verbose=args.verbose)
-    save_state(state)
     if not manifest_result.ok:
         write_summary(summary_path, state, before, after, "failed_source_manifest_guard")
         print("ERROR: protected source manifest failed at final validation.")
@@ -983,6 +1139,9 @@ def main() -> int:
         people_dir=PEOPLE,
     )
     state.setdefault("source_manifest", {})["promoted_manifest_path"] = str(manifest_path)
+    with daily_inventory.open_inventory(STATE_FILE.with_name("daily_inventory.sqlite3"), PEOPLE, inventory_policy()) as inventory:
+        inventory.publish(state["run_id"], inventory_entries,
+                          None if state["incremental"]["full"] else set(state["incremental"]["people"]))
     save_state(state)
     write_summary(summary_path, state, before, after, "completed")
     print_summary(before, after, summary_path, verbose=args.verbose)

@@ -12,6 +12,7 @@ import argparse
 import base64
 import csv
 import html
+import json
 import pickle
 import sys
 from collections import Counter, defaultdict
@@ -30,6 +31,21 @@ DEFAULT_STATE = Path.home() / ".face_sort_cache" / "labeling_state.pkl"
 DEFAULT_OUTPUT_DIR = (
     pipeline_paths.SOURCE_REVIEW / "unknown_triage"
 )
+
+
+def input_signature(path: Path, min_faces: int = 2, max_samples: int = 12) -> dict:
+    import content_identity
+    return {"source": str(path.resolve()), "version": list(content_identity.file_version(path)),
+            "code": content_identity.content_sha256(Path(__file__)),
+            "min_faces": max(1, int(min_faces)), "max_samples": max(1, int(max_samples))}
+
+
+def report_current(path: Path, output: Path) -> bool:
+    try:
+        return ((output / "unknown_triage.csv").is_file() and (output / "unknown_triage.html").is_file()
+                and json.loads((output / "input_signature.json").read_text()) == input_signature(path))
+    except (OSError, ValueError):
+        return False
 
 
 def load_state(path: Path):
@@ -180,6 +196,8 @@ def main() -> int:
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
+    signature = (input_signature(args.state.expanduser(), args.min_faces, args.max_samples)
+                 if args.state.expanduser().exists() else None)
     state = load_state(args.state.expanduser())
     output_dir = args.output_dir.expanduser().resolve()
     if state is None:
@@ -198,6 +216,12 @@ def main() -> int:
     html_path = output_dir / "unknown_triage.html"
     write_csv(csv_path, clusters)
     write_html(html_path, clusters)
+    import source_manifest
+    if signature != input_signature(args.state.expanduser(), args.min_faces, args.max_samples):
+        (output_dir / "input_signature.json").unlink(missing_ok=True)
+        print("Saved labels changed during reporting; this report will refresh on the next run.")
+    else:
+        source_manifest.write_json_atomic(output_dir / "input_signature.json", signature)
     print(f"Unknown clusters: {len(clusters)}")
     print(f"CSV:              {csv_path}")
     print(f"HTML:             {html_path}")

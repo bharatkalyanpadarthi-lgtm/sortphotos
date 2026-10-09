@@ -29,6 +29,7 @@ import sort_photos  # noqa: E402
 import pipeline_writer  # noqa: E402
 import source_manifest  # noqa: E402
 import pipeline_paths  # noqa: E402
+from daily_inventory import read_people_file
 
 for _name in ("CacheState", "CachedFace", "FaceRecord", "LabelingState", "IdentityDB"):
     if hasattr(sort_photos, _name):
@@ -317,8 +318,11 @@ def signature_matches_current_file(src: str, sig: tuple[float, int]) -> bool:
 
 def rehydrate(people_dir: Path, person: str | None, apply: bool,
               replace: bool, max_images: int | None, batch_size: int,
-              max_missing: int | None = None) -> int:
-    candidates = person_folder_images(people_dir, person)
+              max_missing: int | None = None, people: set[str] | None = None,
+              index_path: Path | None = None) -> int:
+    candidates = (person_folder_images(people_dir, person) if people is None else
+                  sorted([item for name in sorted(people)
+                          for item in person_folder_images(people_dir, name)], key=lambda item: str(item[0])))
     all_candidate_paths = {str(path) for path, _person in candidates}
     selected_person_dir: Path | None = None
     if person:
@@ -336,7 +340,7 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
     print(f"Cache strategy:     {'replace' if replace else 'merge existing/resume'}")
     print(f"Batch size:         {batch_size}")
     print()
-    if not candidates:
+    if not candidates and not apply:
         print("No candidate images found.")
         return 0
     if not apply:
@@ -351,6 +355,13 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
     candidate_paths = {str(path) for path, _person in candidates}
 
     def should_keep_existing(src: str) -> bool:
+        if people is not None:
+            try:
+                selected = Path(src).relative_to(people_dir).parts[0] in people
+            except ValueError:
+                selected = False
+            retain_paths = candidate_paths if max_images is None else all_candidate_paths
+            return not selected if replace else not selected or src in retain_paths
         if selected_person_dir is not None:
             try:
                 is_selected_person = Path(src).resolve().is_relative_to(selected_person_dir)
@@ -381,7 +392,7 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
                 continue
             new_cache.faces.append(face)
             kept_existing_faces += 1
-    elif replace and selected_person_dir is not None and old_cache.config_fingerprint == sort_photos.config_fingerprint():
+    elif replace and (selected_person_dir is not None or people is not None) and old_cache.config_fingerprint == sort_photos.config_fingerprint():
         for src, sig in old_cache.file_signatures.items():
             if not should_keep_existing(src):
                 continue
@@ -412,8 +423,53 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
         else:
             print(f"Remaining candidate files:      {len(remaining)}")
         print()
-    if max_missing is not None and not remaining:
-        print("No missing candidate images selected for this run.")
+
+    reused_images = 0
+    if remaining:
+        database = index_path or (sort_photos.analysis_index_file() if people_dir == DEFAULT_PEOPLE
+                                  else people_dir.parent / ".face_analysis.sqlite3")
+        pending = []
+        with sort_photos.analysis_index.AnalysisIndex(database) as index:
+            for path, label in remaining:
+                version = sort_photos.content_identity.file_version(path)
+                indexed = index.cached_detections(path, new_cache.config_fingerprint)
+                if indexed is None:
+                    indexed = index.reusable_detections(path, new_cache.config_fingerprint, label)
+                faces = list(indexed.detections) if indexed else []
+                chosen = [face for face in faces if face.label == label]
+                if not chosen and len(faces) == 1 and faces[0].label in {None, label}:
+                    chosen = faces
+                if (indexed is None or indexed.status.startswith(("processing_failed", "unreadable"))
+                        or (faces and not chosen)
+                        or (not faces and not indexed.status.startswith("no_usable_face"))):
+                    pending.append((path, label))
+                    continue
+                digest = index.content_sha256(path)
+                if (not digest or digest != indexed.content_sha256
+                        or sort_photos.content_identity.file_version(path) != version):
+                    raise RuntimeError("Source changed during detection reuse; refresh can be safely resumed")
+                signature = sort_photos.file_signature(path)
+                if chosen:
+                    record = max(chosen, key=lambda face: face.quality)
+                    face = sort_photos.index_record_to_cached_face(path, record)
+                    face.label = label
+                    face.content_sha256 = digest
+                    index.replace_detections(path, new_cache.config_fingerprint, "organized_face",
+                        [sort_photos.cached_face_to_index_record(face)], expected_sha256=face.content_sha256)
+                if sort_photos.content_identity.file_version(path) != version:
+                    raise RuntimeError("Source changed during detection reuse; refresh can be safely resumed")
+                if chosen:
+                    new_cache.faces.append(face)
+                new_cache.file_signatures[str(path)] = signature
+                reused_images += 1
+        remaining = pending
+    print(f"Verified detections reused:     {reused_images}")
+    unchanged = (not replace and new_cache.config_fingerprint == old_cache.config_fingerprint
+                 and new_cache.file_signatures == old_cache.file_signatures
+                 and len(new_cache.faces) == len(old_cache.faces)
+                 and all(left is right for left, right in zip(new_cache.faces, old_cache.faces)))
+    if not remaining and unchanged:
+        print("Already current: no detection, cache backup or cache rewrite needed.")
         return 0
 
     detected_images = 0
@@ -454,11 +510,11 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
                 print(f"ERROR: detection worker failed for batch {batch_index + 1} (exit {proc.returncode}).")
                 if proc.stdout:
                     print(proc.stdout[-4000:])
-                print("Cache has been saved through the last completed batch.")
+                print("Completed detection batches remain resumable in SQLite.")
                 return proc.returncode
             if not out_path.exists():
                 print(f"ERROR: detection worker produced no output for batch {batch_index + 1}.")
-                print("Cache has been saved through the last completed batch.")
+                print("Completed detection batches remain resumable in SQLite.")
                 return 2
 
             with out_path.open("rb") as f:
@@ -468,6 +524,18 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
             else:
                 batch_faces = list(payload)
 
+            fingerprints = payload.get("fingerprints", {}) if isinstance(payload, dict) else {}
+            diagnostics = payload.get("diagnostics", {}) if isinstance(payload, dict) else {}
+            valid_paths, batch_faces = sort_photos.validate_detection_batch(
+                image_paths, batch_faces, fingerprints, diagnostics)
+            if len(valid_paths) != len(image_paths):
+                raise RuntimeError("Source changed during cache refresh; completed SQLite batches are safe to resume")
+
+            # SQLite commits make each batch resumable without rewriting the
+            # entire legacy pickle. The compatibility snapshot is saved once.
+            sort_photos.persist_detection_batch(image_paths, batch_faces,
+                diagnostics, database, fingerprints, strict=True)
+
             faces_by_path: dict[str, list[sort_photos.CachedFace]] = {}
             for face in batch_faces:
                 faces_by_path.setdefault(face.src_str, []).append(face)
@@ -475,6 +543,9 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
             batch_detected = 0
             batch_no_face = 0
             for image in image_paths:
+                if diagnostics.get(str(image), "").startswith(("processing_failed", "unreadable")):
+                    read_errors += 1
+                    continue
                 try:
                     new_cache.file_signatures[str(image)] = sort_photos.file_signature(image)
                 except OSError:
@@ -491,9 +562,8 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
                 detected_images += 1
                 batch_detected += 1
 
-            backup = save_cache_with_backup(new_cache, backup)
             print(
-                f"    saved cache: files={len(new_cache.file_signatures)} "
+                f"    indexed batch: files={len(new_cache.file_signatures)} "
                 f"faces={len(new_cache.faces)} batch_faces={batch_detected} "
                 f"batch_no_face={batch_no_face}"
             )
@@ -518,12 +588,16 @@ def rehydrate(people_dir: Path, person: str | None, apply: bool,
     print(f"Cache written:           {sort_photos.CACHE_FILE}")
     print(f"Existing files kept:     {kept_existing_files}")
     print(f"Existing faces kept:     {kept_existing_faces}")
+    print(f"Verified detections reused: {reused_images}")
     print(f"Candidate files stored:  {len(candidate_paths & set(new_cache.file_signatures))}")
     print(f"Detected/labeled faces:  {detected_images}")
     print(f"No-face images cached:   {no_face_images}")
     print(f"Read/signature errors:   {read_errors}")
     print(f"Total cache files:       {len(new_cache.file_signatures)}")
     print(f"Total cache faces:       {len(new_cache.faces)}")
+    if read_errors:
+        print("Cache refresh is incomplete; completed analysis is saved. Fix unreadable files and resume.")
+        return 2
     return 0
 
 
@@ -544,6 +618,7 @@ def main() -> int:
     rebuild = sub.add_parser("rehydrate", help="Rebuild cache from current person folders.")
     rebuild.add_argument("--people-dir", type=Path, default=DEFAULT_PEOPLE)
     rebuild.add_argument("--person", default=None)
+    rebuild.add_argument("--people-file", type=Path)
     rebuild.add_argument("--apply", action="store_true")
     rebuild.add_argument("--replace", action="store_true",
                          help="Replace existing cache instead of merging existing live entries.")
@@ -583,6 +658,7 @@ def main() -> int:
         return rehydrate(
             people_dir, args.person, args.apply, args.replace,
             args.max_images, args.batch_size, args.max_missing,
+            read_people_file(args.people_file),
         )
     if args.command == "migrate-sqlite":
         return migrate_sqlite(args.database.expanduser(), args.apply, args.max_images)
