@@ -5,6 +5,7 @@ import pickle
 import subprocess
 import sys
 import tempfile
+import copy
 from pathlib import Path
 
 import content_identity
@@ -62,9 +63,25 @@ def detect_cases(cases, *, detected_faces=None, batch_size=25, cache_path=None):
     detector_signature = sort_photos.config_fingerprint()
     cache_file = Path(cache_path or DEFAULT_CACHE_PATH)
     cache_entries = _load_cache(cache_file, detector_signature)
+    by_digest = {}
+    for old_key, entry in cache_entries.items():
+        if not isinstance(entry, dict) or not isinstance(entry.get("faces"), list):
+            continue
+        digest = entry.get("sha256")
+        if digest and all(os.path.realpath(str(getattr(face, "src_str", ""))) == old_key
+                          and getattr(face, "content_sha256", "") == digest
+                          for face in entry["faces"]):
+            by_digest.setdefault(digest, entry)
     reused = 0
     for key, (_path, digest) in expected.items():
         entry = cache_entries.get(key, {})
+        if not isinstance(entry, dict) or entry.get("sha256") != digest:
+            previous = by_digest.get(digest)
+            if previous is not None:
+                faces = [copy.copy(face) for face in previous["faces"]]
+                for face in faces:
+                    face.src_str = key
+                entry = {"sha256": digest, "faces": faces}
         if not isinstance(entry, dict):
             continue
         faces = entry.get("faces")

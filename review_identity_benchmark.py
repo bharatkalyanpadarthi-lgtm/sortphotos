@@ -57,6 +57,12 @@ def read_rows(path: Path) -> list[dict[str, str]]:
 
 
 def write_rows(path: Path, rows: list[dict[str, str]]) -> None:
+    import protected_benchmark_assets
+    for row in rows:
+        source = Path(row.get("source") or "")
+        if ("unassigned_intake" in source.parts
+                and evaluation_dataset.parse_bool(row.get("verified", ""))):
+            protected_benchmark_assets.pin(path, source, row.get("content_sha256") or "")
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
         prefix=path.name + ".", suffix=".tmp", dir=path.parent
@@ -103,9 +109,16 @@ def _normalized_row(row: dict[str, str]) -> dict[str, str]:
     return normalized
 
 
-def _verification_errors(row: dict[str, str]) -> list[str]:
+def _verification_errors(row: dict[str, str], *, dataset: Path | None = None) -> list[str]:
     errors: list[str] = []
     source = Path(row["source"])
+    if not source.is_file() and dataset is not None:
+        import protected_benchmark_assets
+        protected = protected_benchmark_assets.asset_path(dataset, source, row.get("content_sha256") or "")
+        if protected is not None and protected.is_file():
+            if sort_photos.content_identity.content_sha256(protected) != row.get("content_sha256"):
+                errors.append("protected source content changed")
+            source = protected
     case_types = evaluation_dataset.parse_case_types(row["case_types"])
     expected_face = evaluation_dataset.parse_bool(row["expected_face"], default=True)
     if not source.is_file():
@@ -180,7 +193,7 @@ def bulk_update_rows(
             candidate["verified"] = str(verified).lower()
         candidate = _normalized_row(candidate)
         if evaluation_dataset.parse_bool(candidate["verified"]):
-            row_errors = _verification_errors(candidate)
+            row_errors = _verification_errors(candidate, dataset=path)
             if row_errors:
                 validation_errors.append(
                     f"{Path(source).name}: " + "; ".join(row_errors)
@@ -447,15 +460,16 @@ class Handler(BaseHTTPRequestHandler):
             if not row["source"]:
                 self._redirect("Source path is required")
                 return
-            if "identity_face_id" not in values:
-                canonical = str(Path(row["source"]).expanduser().resolve(strict=False))
-                with self.server.dataset_lock:
-                    previous = next((item for item in read_rows(self.server.dataset)
-                                     if item["source"] == canonical), {})
-                row["identity_face_id"] = previous.get("identity_face_id", "")
+            canonical = str(Path(row["source"]).expanduser().resolve(strict=False))
+            with self.server.dataset_lock:
+                previous = next((item for item in read_rows(self.server.dataset)
+                                 if item["source"] == canonical), {})
+            for field in ("identity_face_id", "content_sha256", "group_id"):
+                if field not in values:
+                    row[field] = previous.get(field, "")
             normalized = _normalized_row(row)
             if evaluation_dataset.parse_bool(normalized["verified"]):
-                errors = _verification_errors(normalized)
+                errors = _verification_errors(normalized, dataset=self.server.dataset)
                 if errors:
                     self._redirect("Cannot verify: " + "; ".join(errors))
                     return
@@ -496,12 +510,15 @@ class Handler(BaseHTTPRequestHandler):
         with self.server.dataset_lock:
             rows = read_rows(self.server.dataset)
         validation = evaluation_dataset.load_dataset(self.server.dataset)
+        display_sources = {str(case.original_source or case.source): str(case.source)
+                           for case in validation.cases}
         missing = sorted(evaluation_dataset.REQUIRED_CASE_TYPES - validation.covered_types)
         cards: list[str] = []
         for row in rows:
             source = row["source"]
-            media = "/media?" + urlencode({"path": source})
-            thumbnail = "/thumbnail?" + urlencode({"path": source})
+            display_source = display_sources.get(source, source)
+            media = "/media?" + urlencode({"path": display_source})
+            thumbnail = "/thumbnail?" + urlencode({"path": display_source})
             verified = evaluation_dataset.parse_bool(row["verified"])
             checked = " checked" if verified else ""
             expected_face = evaluation_dataset.parse_bool(

@@ -3,14 +3,22 @@
 import io
 import unittest
 from collections import Counter
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import face
+import pipeline_writer
 
 
 class FaceMenuTests(unittest.TestCase):
+    def setUp(self):
+        # Menu tests are isolated from the live pipeline; lease behavior has
+        # dedicated tests and must not depend on an active production run.
+        lease = patch.object(pipeline_writer, "writer_lease", side_effect=nullcontext)
+        lease.start()
+        self.addCleanup(lease.stop)
+
     def choose(self, *answers):
         output = io.StringIO()
         with patch("builtins.input", side_effect=answers), redirect_stdout(output), \

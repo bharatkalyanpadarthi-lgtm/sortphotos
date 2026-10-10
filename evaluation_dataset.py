@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Iterable
 
 import content_identity
+import protected_benchmark_assets
 
 
 REQUIRED_CASE_TYPES = {
@@ -47,6 +48,7 @@ class EvaluationCase:
     group_id: str = ""
     expected_face_count: int | None = None
     identity_face_id: str = ""
+    original_source: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,7 @@ def load_dataset(path: Path) -> DatasetValidation:
             )
         for row_number, row in enumerate(reader, start=2):
             source = Path(str(row.get("source") or "")).expanduser()
+            original_source = source
             types = parse_case_types(str(row.get("case_types") or ""))
             verified = parse_bool(str(row.get("verified") or ""))
             expected_face = parse_bool(str(row.get("expected_face") or ""), default=True)
@@ -130,7 +133,12 @@ def load_dataset(path: Path) -> DatasetValidation:
             expected_people = tuple(value.strip() for value in str(row.get("expected_people") or "").split("|") if value.strip())
             identity_face_id = str(row.get("identity_face_id") or "").strip()
             digest = str(row.get("content_sha256") or "").strip()
+            protected = protected_benchmark_assets.asset_path(path, source, digest)
             try:
+                if source.is_file() and digest and content_identity.content_sha256(source) != digest:
+                    errors.append(f"row {row_number} content changed since verification")
+                if protected is not None and protected.is_file():
+                    source = protected
                 actual_digest = content_identity.content_sha256(source)
                 if digest and digest != actual_digest:
                     errors.append(f"row {row_number} content changed since verification")
@@ -178,6 +186,7 @@ def load_dataset(path: Path) -> DatasetValidation:
                 group_id=str(row.get("group_id") or digest),
                 expected_face_count=face_count,
                 identity_face_id=identity_face_id,
+                original_source=original_source if original_source != source else None,
             )
             cases.append(case)
             if verified:

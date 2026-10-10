@@ -11,6 +11,12 @@ class BenchmarkInputError(RuntimeError):
     pass
 
 
+def protected_case_faces(cases):
+    """Evaluate protected copies with detector-versioned, content-verified faces."""
+    copied = tuple(case for case in cases if getattr(case, "original_source", None))
+    return benchmark_detection.detect_cases(copied) if copied else {}
+
+
 def selected_identity_faces(case, faces):
     if not case.identity_face_id:
         return faces
@@ -39,6 +45,7 @@ def prepare_selected_faces(cases, cache, *, force_fresh=False, progress=terminal
         key = os.path.realpath(face.src_str)
         if key in cached:
             cached[key].append(face)
+    cached.update(protected_case_faces(scoped))
     refresh = []
     status = StageProgress("Checking saved benchmark face selections", len(scoped), progress)
     for case in status.items(scoped):

@@ -286,6 +286,25 @@ read/reused. Updates are throttled to avoid flooding the terminal. A cached
 safety-gate hit is explicit; changed inputs still require evaluation. These
 changes apply to newly started processes, not an already-running worker.
 
+Verified protected-benchmark examples from `unassigned_intake` have independent,
+SHA-256-checked copies beside the evaluation CSV (`.assets` directory). Normal
+sorting can move or archive intake files without invalidating these examples.
+The CSV, human labels, source groups, selected-face fingerprints and baseline
+binding are preserved. The benchmark UI displays the protected copies when
+needed. Replaced sources or corrupt copies still block automatic filing; they
+are never silently re-labelled or overwritten.
+
+Invalid/incomplete required benchmarks now stop before bulk face scoring.
+Unchanged examples reuse content- and detector-version-verified detections,
+including after a move. Saved gate results remain tied to tested faces, model
+code, reference evidence and annotations; genuine changes still require a
+new safety evaluation. The first run after a code/model update is intentionally
+slower than an unchanged run. This does not eliminate the CPU cost of detecting
+new images, and the memory-safe single-worker default remains unchanged.
+An isolated 24-image check on the 16 GB Mac produced identical detections with
+one and two workers (14.89 s versus 12.72 s). That small sample is not a
+full-ingest stress test; parallel detection is not enabled automatically.
+
 Saved foreground-face selections are checked before bulk benchmark scoring.
 If the normal face cache has different crops, a read-only worker re-detects
 only the affected benchmark images and must reproduce the exact saved crop

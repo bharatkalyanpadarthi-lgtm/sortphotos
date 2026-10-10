@@ -23,6 +23,7 @@ import content_identity
 import benchmark_detection
 import benchmark_inputs
 import evaluation_runtime
+import protected_benchmark_assets
 from pipeline_progress import StageProgress, terminal_progress
 
 
@@ -56,12 +57,14 @@ def evaluation_identity_key(name: str) -> str:
 def split_excluded_cases(cases, sources):
     """Exclude explicitly requested cases and their content/holdout peers."""
     requested = {os.path.realpath(str(source)) for source in sources}
-    available = {os.path.realpath(str(case.source)) for case in cases}
+    def paths(case):
+        return {os.path.realpath(str(path)) for path in (case.source, case.original_source) if path is not None}
+    available = {path for case in cases for path in paths(case)}
     missing = requested - available
     if missing:
         raise ValueError("Excluded source is not in the benchmark: " + ", ".join(sorted(missing)))
     excluded = {index for index, case in enumerate(cases)
-                if os.path.realpath(str(case.source)) in requested}
+                if paths(case) & requested}
     while True:
         hashes = {cases[index].content_sha256 for index in excluded if cases[index].content_sha256}
         groups = {cases[index].group_id for index in excluded if cases[index].group_id}
@@ -402,11 +405,50 @@ def activation_gate(
     """Block profile promotion when precision or known-person recall regresses."""
     if require_protected is None:
         require_protected = candidate is not incumbent
+    protected_benchmark_assets.pin_dataset(protected_set)
     confirmed_validation = (evaluation_dataset.load_dataset(confirmed_set)
                             if confirmed_set is not None and confirmed_set.is_file() else None)
     protected_validation = (evaluation_dataset.load_dataset(protected_set)
                             if protected_set.is_file() else None)
     protected_digest = content_identity.content_sha256(protected_set) if protected_set.is_file() else ""
+    failures = []
+    if confirmed_validation is not None and confirmed_validation.errors:
+        failures.append("confirmed evaluation set is invalid")
+    if require_protected and protected_validation is None:
+        failures.append("profile promotion requires the verified protected benchmark")
+    if require_protected and not protected_baseline.is_file():
+        failures.append("profile promotion requires a fresh-detection protected baseline")
+    if protected_baseline.is_file() and protected_validation is None:
+        failures.append("protected benchmark is missing while its baseline exists")
+    if (protected_validation is not None
+            and (protected_validation.errors or
+                 ((require_protected or protected_baseline.is_file()) and not protected_validation.activation_ready))):
+        failures.append("protected benchmark is incomplete or invalid")
+    if require_protected and protected_baseline.is_file():
+        try:
+            evidence = json.loads(protected_baseline.read_text(encoding="utf-8"))
+            if not isinstance(evidence, dict):
+                raise ValueError("baseline must be an object")
+            evaluation_dataset.load_baseline(protected_baseline)
+            if evidence.get("evaluation_mode") != "fresh_detection":
+                failures.append("protected baseline has no fresh-detection provenance")
+            if evidence.get("dataset_sha256") != protected_digest:
+                failures.append("protected baseline belongs to a different dataset; rebuild the baseline")
+            if evidence.get("detector_signature") != sort_photos.config_fingerprint():
+                failures.append("protected baseline belongs to a different detector; rebuild the baseline")
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            failures.append(f"protected baseline is unreadable: {error}")
+    if failures:
+        progress("Safety benchmark inputs need attention; scoring skipped (automatic filing stays off).")
+        return False, {"candidate": {"skipped": True}, "incumbent": {"skipped": True},
+            "confirmed": {"available": confirmed_validation is not None,
+                          "errors": list(confirmed_validation.errors) if confirmed_validation else []},
+            "protected": {"available": protected_validation is not None,
+                          "cases": len(protected_validation.cases) if protected_validation else 0,
+                          "covered_case_types": sorted(protected_validation.covered_types) if protected_validation else [],
+                          "errors": list(protected_validation.errors) if protected_validation else [],
+                          "activation_ready": bool(protected_validation and protected_validation.activation_ready)},
+            "failures": failures}
     selected_overrides = {}
     # Validate pinned faces before scoring thousands of ordinary cached faces.
     # Promotion still needs fresh detection for every protected case later.
@@ -638,6 +680,7 @@ def evaluate_golden_set(
     else:
         for face in cache.faces:
             faces_by_source[os.path.realpath(face.src_str)].append(face)
+        faces_by_source.update(benchmark_inputs.protected_case_faces(cases))
         for case in cases:
             key = os.path.realpath(str(case.source))
             if case.identity_face_id and key in (selected_face_overrides or {}):

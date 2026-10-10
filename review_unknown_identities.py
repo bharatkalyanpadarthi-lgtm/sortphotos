@@ -2291,6 +2291,7 @@ def evaluate_automatic_policy_benchmark(
         prototype_sources=secondary_matcher.db.prototype_sources), negative_examples=[])
     faces_by_source = _faces_by_source(cache)
     import benchmark_inputs
+    faces_by_source.update(benchmark_inputs.protected_case_faces(cases))
     faces_by_source.update(benchmark_inputs.prepare_selected_faces(cases, cache, progress=progress))
     groups = {}
     for case in cases:
@@ -2403,7 +2404,7 @@ def automatic_review_gate_signature(
                         "identity_confirmations.py", "verified_references.py", "benchmark_inputs.py",
                         "evaluation_profiles.py", "evaluation_runtime.py", "evaluation_checkpoints.py",
                         "sort_photos.py", "recover_no_usable_faces.py", "appearance_profiles.py",
-                        "evaluation_dataset.py", "benchmark_detection.py", "shadow_evaluation.py",
+                        "evaluation_dataset.py", "protected_benchmark_assets.py", "benchmark_detection.py", "shadow_evaluation.py",
                         "identity_hard_negatives.py", "content_identity.py"):
         record("recognition code: " + module_name,
                sort_photos.content_identity.content_sha256(Path(__file__).with_name(module_name)))
@@ -2527,6 +2528,7 @@ def _prepare_automatic_review_gate(
         )
 
     progress("Safety benchmark: checking cached result and input versions...")
+    identity_evaluation.protected_benchmark_assets.pin_dataset(identity_evaluation.DEFAULT_PROTECTED_SET)
     signature_components = {}
     policy_signature = automatic_review_gate_signature(
         identity_db,

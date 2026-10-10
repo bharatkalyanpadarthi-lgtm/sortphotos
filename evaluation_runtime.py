@@ -9,10 +9,13 @@ import json
 import os
 from pathlib import Path
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import numpy as np
 
 import content_identity
+import evaluation_dataset
+import benchmark_inputs
 from pipeline_progress import StageProgress, terminal_progress
 from evaluation_checkpoints import BenchmarkCheckpoints
 
@@ -137,6 +140,7 @@ class GateInputs:
         self.tested_ids = set()
         self.selection_fingerprint = selection_signature(cache)
         self.files = InputVersions()
+        self.original_files = InputVersions()
         controls = {}
         def control(path):
             self.files.add(path)
@@ -146,6 +150,7 @@ class GateInputs:
             except FileNotFoundError:
                 controls[key] = None
         case_sources = set()
+        protected_cases = []
         for path in datasets:
             control(path)
             if not Path(path).is_file():
@@ -153,7 +158,19 @@ class GateInputs:
             with Path(path).open(newline="", encoding="utf-8-sig") as handle:
                 for row in csv.DictReader(handle):
                     if row.get("source"):
-                        case_sources.add(self.files.add(row["source"]))
+                        source = Path(row["source"])
+                        protected = evaluation_dataset.protected_benchmark_assets.asset_path(
+                            Path(path), source, row.get("content_sha256") or "")
+                        if protected is not None and protected.is_file():
+                            self.original_files.add(source)
+                            if (source.is_file() and content_identity.content_sha256(source)
+                                    != row.get("content_sha256")):
+                                raise RuntimeError(f"Verified benchmark source changed: {source}")
+                            source = protected
+                            protected_cases.append(SimpleNamespace(source=source,
+                                original_source=Path(row["source"]),
+                                content_sha256=row["content_sha256"]))
+                        case_sources.add(self.files.add(source))
         for path in evidence_paths:
             control(path)
         for database in (db, secondary_db):
@@ -173,7 +190,10 @@ class GateInputs:
         digest.update(str(cache.config_fingerprint).encode())
         selected_ids = {id(face) for face in primary_faces}
         canonical = {}
-        for face in cache.faces:
+        protected_faces = [face for faces in benchmark_inputs.protected_case_faces(protected_cases).values()
+                           for face in faces]
+        all_faces = [*cache.faces, *protected_faces]
+        for face in all_faces:
             source = canonical.setdefault(face.src_str, None)
             if source is None:
                 source = canonical[face.src_str] = os.path.realpath(face.src_str)
@@ -195,7 +215,7 @@ class GateInputs:
         digest.update(json.dumps(controls, sort_keys=True).encode())
         digest.update(self.files.signature(excluding=controls).encode())
         self.fingerprint = digest.hexdigest()
-        self.tested_faces = tuple(face for face in cache.faces if id(face) in self.tested_ids)
+        self.tested_faces = tuple(face for face in all_faces if id(face) in self.tested_ids)
         self.memory_fingerprint = self._memory_signature()
         self.validate()
 
@@ -217,6 +237,7 @@ class GateInputs:
 
     def validate(self):
         self.files.validate()
+        self.original_files.validate()
         if (tuple(id(face) for face in self.cache.faces) != self.face_ids
                 or self._memory_signature() != self.memory_fingerprint):
             raise RuntimeError("Safety benchmark cached faces changed during evaluation")
