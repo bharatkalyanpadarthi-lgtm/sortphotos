@@ -861,9 +861,10 @@ def review_progress(state: dict, decisions: dict | None = None) -> dict:
     }
 
 
-def save_session_state(state: dict, *, status: str = "reviewing") -> None:
+def save_session_state(state: dict, *, status: str = "reviewing", progress: dict | None = None) -> None:
     path = Path(state["session_path"])
-    progress = review_progress(state)
+    if progress is None:
+        progress = review_progress(state)
     payload = {
         "version": 1,
         "status": status,
@@ -1106,12 +1107,14 @@ def reconcile_unknown_queue(state: dict, *, dry_run: bool = False) -> Counter:
     return counts
 
 
-def write_review_reports(state: dict) -> None:
+def write_review_reports(state: dict, *, decisions: dict | None = None,
+                         progress: dict | None = None) -> None:
     output_dir = Path(state["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
-    decisions = load_decisions(state["decisions_path"])
+    if decisions is None:
+        decisions = load_decisions(state["decisions_path"])
     summary = dict(state.get("summary", {}))
-    summary["progress"] = review_progress(state, decisions)
+    summary["progress"] = review_progress(state, decisions) if progress is None else progress
     summary["review_reasons"] = {
         item.key: review_reasons.explain(
             item, state["identity_db"], settings=sys.modules[__name__],
@@ -1133,7 +1136,7 @@ def write_review_reports(state: dict) -> None:
         ),
         encoding="utf-8",
     )
-    save_session_state(state)
+    save_session_state(state, progress=summary["progress"])
 
 
 def load_next_batch(state: dict) -> dict:
@@ -1170,7 +1173,7 @@ def load_next_batch(state: dict) -> dict:
                 "clusters": 0,
                 "progress": progress,
             }
-            write_review_reports(state)
+            write_review_reports(state, decisions=decisions, progress=progress)
             return {"complete": progress["pending"] == 0, "summary": state["summary"]}
 
         batch_files = pending_files[:limit]
@@ -1253,7 +1256,7 @@ def load_next_batch(state: dict) -> dict:
         "batch_number": state["batch_number"],
         "progress": progress,
     }
-    write_review_reports(state)
+    write_review_reports(state, decisions=decisions, progress=progress)
     print(
         f"Batch {state['batch_number']} ready: {len(items)} reviewable face(s), "
         f"{len(clusters)} cluster(s), {int(auto_result['confirmed'])} safely auto-confirmed, "
@@ -3100,6 +3103,7 @@ class FinishReviewJob:
                         state["identity_db"],
                         state["cache"],
                         confirmed_set=Path(state["evaluation_path"]),
+                        stage_cache_dir=Path(state["output_dir"]) / "primary_stages",
                     )
                     activation_report["current_profile_check"] = True
 
@@ -3108,8 +3112,8 @@ class FinishReviewJob:
                     secondary.flush()
 
                 self._set(step="Writing final report")
-                progress = review_progress(state)
                 decisions = load_decisions(state["decisions_path"])
+                progress = review_progress(state, decisions)
                 automatic_confirmations = sum(
                     1
                     for value in decisions.get("items", {}).values()
@@ -3142,7 +3146,7 @@ class FinishReviewJob:
                 )
                 temporary.replace(report_path)
                 state["summary"]["progress"] = progress
-                save_session_state(state, status="finished")
+                save_session_state(state, status="finished", progress=progress)
                 state["review_finished"] = True
             self._set(
                 status="completed",
@@ -3400,11 +3404,16 @@ def run_automatic_sweep_worker(task_path: Path) -> int:
             )
         ):
             raise RuntimeError("independent verifier is unavailable or out of date")
-        review_prototypes, _counts = build_trusted_review_prototypes(
-            identity_db,
-            cache,
-            confirmations_path=sort_photos.IDENTITY_CONFIRMATIONS_FILE,
-        )
+        with identity_confirmations.ReferenceIndex(
+            faces_by_source=_faces_by_source(cache),
+            database=Path(task.get("analysis_index", sort_photos.analysis_index_file())),
+        ) as reference_index:
+            review_prototypes, _counts = build_trusted_review_prototypes(
+                identity_db,
+                cache,
+                confirmations_path=sort_photos.IDENTITY_CONFIRMATIONS_FILE,
+                reference_index=reference_index,
+            )
         matcher = secondary_identity_matcher.SecondaryMatcher(secondary_db)
         allowed, gate, gate_message = prepare_automatic_review_gate(
             identity_db, cache, matcher, requested=True,

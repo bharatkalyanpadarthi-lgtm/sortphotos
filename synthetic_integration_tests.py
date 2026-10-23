@@ -2600,7 +2600,9 @@ def test_unknown_review_finish_runs_safety_gate_once(tmp: Path) -> None:
 
     calls = []
 
-    def fake_gate(candidate, incumbent, cache, *, confirmed_set):
+    def fake_gate(candidate, incumbent, cache, *, confirmed_set, stage_cache_dir):
+        assert_true(stage_cache_dir == tmp / "reports" / "primary_stages",
+                    "Finish Review did not use its session's shared primary stages")
         calls.append((candidate, incumbent, cache, confirmed_set))
         return True, {"allowed": True, "failures": []}
 

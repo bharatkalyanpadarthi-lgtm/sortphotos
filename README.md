@@ -355,6 +355,15 @@ back to ordinary verified lookup. Confirmation enrollment reads/indexes its
 CSV once per batch and writes once only when rows change, preserving manual
 annotations and leaving no-op runs byte-for-byte unchanged.
 
+Quick Review's bounded automatic-sweep workers use that same verified index,
+not the legacy full-folder hashing fallback on every worker launch. Each worker
+still checks the current verifier and safety gate before touching destinations;
+process isolation intentionally bounds native-model memory. Finish Review
+shares exact-input primary checkpoints while keeping confirmed/protected
+evaluations. Batch reports and saved sessions share a single freshly computed
+progress snapshot. Per-image decision receipts and source-copy verification
+remain durable; these are not removed as redundant work.
+
 For an opt-in comparison against another checkout, use
 `validate_daily_performance.py --module-root CHECKOUT --report-dir PRIVATE_DIR`.
 It reads the saved library without ingesting or moving photos, writes derived
