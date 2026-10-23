@@ -1334,13 +1334,12 @@ def build_identity_db_from_person_folders(people_dir: Path,
         if name.startswith(("_", ".")) or not is_real_person_label(name):
             continue
         images = identity_source_images(person_dir)
-        confirmed_paths = identity_confirmations.paths_for_person(
-            IDENTITY_CONFIRMATIONS_FILE, name, people_dir
-        )
+        confirmed_examples = identity_confirmations.examples_for_person(
+            IDENTITY_CONFIRMATIONS_FILE, name, people_dir,
+            database=analysis_index_file() if people_dir == pipeline_paths.PEOPLE_ROOT.resolve() else None)
+        confirmed_paths = sorted(confirmed_examples, key=lambda value: str(value).casefold())
         source_signature = identity_source_signature(person_dir, images)
-        confirmation_signature = identity_confirmations.signature_for_person(
-            IDENTITY_CONFIRMATIONS_FILE, name, people_dir
-        )
+        confirmation_signature = identity_confirmations.signature_for_examples(confirmed_examples)
         signature = (
             hashlib.sha256(
                 f"{source_signature}:{confirmation_signature}".encode("ascii")
@@ -1571,12 +1570,15 @@ def build_identity_db_from_person_folders(people_dir: Path,
             identity_confirmations.load(IDENTITY_CONFIRMATIONS_FILE),
             cache.faces,
             path=evaluation_enrollment.DEFAULT_PATH,
+            database=analysis_index_file() if people_dir == pipeline_paths.PEOPLE_ROOT.resolve() else None,
         )
         allowed, gate = identity_evaluation.activation_gate(
             db,
             existing,
             cache,
             confirmed_set=evaluation_enrollment.DEFAULT_PATH,
+            stage_cache_dir=(pipeline_paths.SOURCE_REVIEW / "identity_audits/unknown_review/primary_stages"
+                             if people_dir == pipeline_paths.PEOPLE_ROOT.resolve() else None),
         )
         gate_path = (
             pipeline_paths.SOURCE_REVIEW

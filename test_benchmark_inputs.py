@@ -248,7 +248,8 @@ class BenchmarkInputTests(unittest.TestCase):
 
     def test_changing_annotations_cannot_cache_an_outdated_verdict(self):
         with patch.object(review, "automatic_review_gate_signature", side_effect=["before", "after"]), \
-             patch.object(review.evaluation_runtime, "GateInputs", return_value=SimpleNamespace(fingerprint="inputs", validate=lambda: None)), \
+             patch.object(review.evaluation_runtime, "GateInputs", return_value=SimpleNamespace(fingerprint="inputs", validate=lambda: None,
+                 validate_snapshot=lambda: None, snapshot_cache=sorter.CacheState(), snapshot_primary_faces=[])), \
              patch.object(evaluation, "activation_gate", return_value=(True, {})), \
              patch.object(review, "evaluate_automatic_policy_benchmark", return_value=(True, {})), \
              patch.object(review.identity_hard_negatives, "vectors_by_person", return_value={}):

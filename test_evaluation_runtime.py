@@ -185,7 +185,8 @@ class EvaluationRuntimeTests(unittest.TestCase):
             self.assertEqual(select.call_count, 2)
 
     def test_failed_primary_gate_skips_independent_and_is_reused(self):
-        inputs = SimpleNamespace(fingerprint="inputs", validate=lambda: None)
+        inputs = SimpleNamespace(fingerprint="inputs", validate=lambda: None,
+            validate_snapshot=lambda: None, snapshot_cache=sorter.CacheState(), snapshot_primary_faces=[])
         messages = []
         with patch.object(review, "automatic_review_gate_signature", return_value="policy"), \
              patch.object(review.evaluation_runtime, "GateInputs", return_value=inputs), \

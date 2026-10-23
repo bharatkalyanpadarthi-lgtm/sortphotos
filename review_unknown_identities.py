@@ -2403,6 +2403,8 @@ def automatic_review_gate_signature(
                         "identity_profiles.py", "secondary_identity_matcher.py", "review_unknown_identities.py",
                         "identity_confirmations.py", "verified_references.py", "benchmark_inputs.py",
                         "evaluation_profiles.py", "evaluation_runtime.py", "evaluation_checkpoints.py",
+                        "benchmark_snapshot.py", "primary_stage_cache.py", "analysis_index.py",
+                        "evaluation_enrollment.py",
                         "sort_photos.py", "recover_no_usable_faces.py", "appearance_profiles.py",
                         "evaluation_dataset.py", "protected_benchmark_assets.py", "benchmark_detection.py", "shadow_evaluation.py",
                         "identity_hard_negatives.py", "content_identity.py"):
@@ -2547,8 +2549,8 @@ def _prepare_automatic_review_gate(
     signature = hashlib.sha256((policy_signature + inputs.fingerprint).encode()).hexdigest()
     signature_components["recognition policy"] = policy_signature
     signature_components["selected benchmark images and reference contents"] = inputs.fingerprint
-    def validate_inputs():
-        inputs.validate()
+    def validate_inputs(*, full=True):
+        inputs.validate() if full else inputs.validate_snapshot()
         current_policy = automatic_review_gate_signature(identity_db, secondary_db=secondary_matcher.db,
                                                          review_prototypes=review_prototypes)
         if current_policy != policy_signature:
@@ -2582,17 +2584,18 @@ def _prepare_automatic_review_gate(
     output_dir.mkdir(parents=True, exist_ok=True)
     with BenchmarkCheckpoints(output_dir / "benchmark_checkpoints.sqlite3", signature) as store:
         store.prune()
-        checkpoints = evaluation_runtime.GuardedCheckpoints(store, validate_inputs)
+        checkpoints = evaluation_runtime.GuardedCheckpoints(store, lambda: validate_inputs(full=False))
         try:
             primary_allowed, report = identity_evaluation.activation_gate(
-                identity_db, identity_db, cache, confirmed_set=None, progress=progress,
-                checkpoints=checkpoints, selected_faces=primary_faces, fail_fast=True)
+                identity_db, identity_db, inputs.snapshot_cache, confirmed_set=None, progress=progress,
+                checkpoints=checkpoints, selected_faces=inputs.snapshot_primary_faces, fail_fast=True,
+                stage_cache_dir=output_dir / "primary_stages")
             checkpoints.check()
             if primary_allowed or diagnose_independent:
                 if not primary_allowed:
                     progress("Primary safety check failed; evaluating independent matcher for diagnosis only.")
                 policy_allowed, policy_report = evaluate_automatic_policy_benchmark(
-                    identity_db, cache, secondary_matcher,
+                    identity_db, inputs.snapshot_cache, secondary_matcher,
                     hard_negatives=identity_hard_negatives.vectors_by_person(
                         sort_photos.IDENTITY_HARD_NEGATIVES_FILE),
                     review_prototypes=review_prototypes, progress=progress,
@@ -2602,12 +2605,14 @@ def _prepare_automatic_review_gate(
                 progress("Safety benchmark blocked; skipping independent matcher. Manual review remains available.")
                 policy_allowed, policy_report = False, {"skipped": True, "reason": "primary safety gate blocked"}
             checkpoints.check()
+            validate_inputs()
         except BaseException:
             # Keep ordinary interruption checkpoints, discard any mixed-input work.
             try:
+                validate_inputs()
                 checkpoints.check()
             except Exception:
-                pass
+                store.invalidate()
             raise
     allowed = bool(primary_allowed and policy_allowed)
     report["automatic_policy"] = policy_report
@@ -3574,7 +3579,8 @@ def main() -> int:
     )
     cache = sort_photos.load_cache()
     print("Preparing shared confirmed-reference index...", flush=True)
-    reference_index = identity_confirmations.ReferenceIndex(faces_by_source=_faces_by_source(cache))
+    reference_index = identity_confirmations.ReferenceIndex(faces_by_source=_faces_by_source(cache),
+        database=sort_photos.analysis_index_file())
     secondary_matcher, secondary_status = prepare_secondary_verifier(
         identity_db,
         cache,
@@ -3587,7 +3593,7 @@ def main() -> int:
         confirmations_path=sort_photos.IDENTITY_CONFIRMATIONS_FILE,
         reference_index=reference_index,
     )
-    del reference_index
+    reference_index.close()
     decisions_path = args.decisions.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)

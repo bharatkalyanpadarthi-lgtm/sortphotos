@@ -163,11 +163,14 @@ def plan_recovery(
         return plan
 
     matcher = None
+    reference_index = None
     try:
         progress(f"Individual identity recovery: {len(pending)} images; checking independent verifier...")
         progress("Preparing shared confirmed-reference index...")
         reference_index = review.identity_confirmations.ReferenceIndex(
-            faces_by_source=review._faces_by_source(cache), progress=progress
+            faces_by_source=review._faces_by_source(cache), progress=progress,
+            database=(sort_photos.analysis_index_file()
+                      if people_root.resolve() == sort_photos.pipeline_paths.PEOPLE_ROOT.resolve() else None),
         )
         matcher, plan.verifier_status = review.prepare_secondary_verifier(
             identity_db, cache, requested=True, reference_index=reference_index, progress=progress
@@ -181,7 +184,7 @@ def plan_recovery(
             identity_db, cache, confirmations_path=sort_photos.IDENTITY_CONFIRMATIONS_FILE,
             reference_index=reference_index, progress=progress,
         )
-        del reference_index
+        reference_index.close()
         progress("Individual identity recovery: checking safety benchmark (cached when unchanged)...")
         allowed, _gate, plan.gate_message = review.prepare_automatic_review_gate(
             identity_db, cache, matcher, requested=True, output_dir=gate_dir,
@@ -244,6 +247,8 @@ def plan_recovery(
             row.update(status="held", reason="recovery_error", person="")
         progress(plan.gate_message)
     finally:
+        if reference_index is not None:
+            reference_index.close()
         if matcher is not None:
             try:
                 matcher.flush()

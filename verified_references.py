@@ -9,6 +9,8 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from pathlib import Path
+import sqlite3
+import weakref
 
 import content_identity
 from pipeline_progress import StageProgress, terminal_progress
@@ -17,6 +19,7 @@ from pipeline_progress import StageProgress, terminal_progress
 class ReferenceIndex:
     def __init__(self, candidates: Iterable[Path | str] = (), *,
                  faces_by_source: dict[str, list] | None = None,
+                 database: Path | None = None,
                  progress: Callable[[str], None] | None = terminal_progress):
         self.progress = progress
         self.faces_by_source = faces_by_source
@@ -27,6 +30,9 @@ class ReferenceIndex:
         self._sizes = {}
         self._lookups = {}
         self._resolved = {}
+        self._database = database
+        self._analysis = None
+        self._finalizer = None
         seen = set()
         for candidate in faces_by_source if faces_by_source is not None else candidates:
             path = Path(candidate)
@@ -36,6 +42,29 @@ class ReferenceIndex:
             for i, part in enumerate(path.parts[:-1]):
                 if path.parts[i + 1] == "photos":
                     self._by_person[part.casefold()].append(path)
+        self._candidate_sets = {person: set(paths) for person, paths in self._by_person.items()}
+
+    def _index(self):
+        if self._database is not None and self._analysis is None:
+            try:
+                from analysis_index import AnalysisIndex
+                self._analysis = AnalysisIndex(self._database, timeout=1)
+                self._finalizer = weakref.finalize(self, self._analysis.connection.close)
+            except (OSError, ValueError, sqlite3.Error):
+                self._database = None
+        return self._analysis
+
+    def close(self):
+        if self._finalizer is not None:
+            self._finalizer()
+        self._analysis = None
+        self._database = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.close()
 
     def summary(self) -> str:
         return f"{self.hashes_read} files hashed, {self.hashes_reused} verified hashes reused"
@@ -47,11 +76,22 @@ class ReferenceIndex:
         if cached is not None and cached[0] == version:
             self.hashes_reused += 1
             return cached[1]
-        digest = content_identity.content_sha256(path)
+        index = self._index()
+        hits = index.hash_hits if index is not None else 0
+        try:
+            digest = index.content_sha256(path) if index is not None else None
+        except sqlite3.Error:
+            digest = None
+            self.close()
+        if not digest:
+            digest = content_identity.content_sha256(path)
         if content_identity.file_version(path) != version:
             raise OSError(f"Reference changed while verifying: {path}")
         self._hashes[path] = (version, digest)
-        self.hashes_read += 1
+        if index is not None and index.hash_hits > hits:
+            self.hashes_reused += 1
+        else:
+            self.hashes_read += 1
         return digest
 
     def refresh(self) -> None:
@@ -121,6 +161,18 @@ class ReferenceIndex:
             if matches(previous):
                 return previous.resolve()
             self._resolved.pop(key, None)
+        index = self._index()
+        if index is not None:
+            try:
+                candidates = index.paths_for_content(digest)
+            except sqlite3.Error:
+                candidates = []
+                self.close()
+            allowed = self._candidate_sets.get(person, set())
+            for candidate in candidates:
+                if candidate in allowed and matches(candidate):
+                    self._resolved[key] = candidate.resolve()
+                    return self._resolved[key]
         for candidate in self._lookup(person, size).get(digest, []):
             # Index hits are only hints until the current file is verified.
             if matches(candidate):

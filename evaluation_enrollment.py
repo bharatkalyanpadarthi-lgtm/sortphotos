@@ -57,16 +57,30 @@ def enroll(
     quality: float = 1.0,
     path: Path = DEFAULT_PATH,
 ) -> None:
+    existing = _read(path)
+    lookup = _row_lookup(existing)
+    if _enroll_row(existing, lookup, source=source, person=person,
+                   content_sha256=content_sha256, pose_label=pose_label, quality=quality):
+        _write(path, existing)
+
+
+def _row_lookup(rows):
+    lookup = {}
+    for row in rows:
+        key = str(row.get("content_sha256", "")), str(row.get("expected_person", "")).casefold()
+        lookup.setdefault(key, []).append(row)
+    return lookup
+
+
+def _enroll_row(existing, lookup, *, source, person, content_sha256, pose_label, quality, sort_rows=True):
     case_types = {"known"}
     if "profile" in str(pose_label):
         case_types.add("side_profile")
     if float(quality) < 0.45:
         case_types.add("blurry_small")
     canonical = str(source.expanduser().resolve(strict=False))
-    existing = _read(path)
-    matching = [row for row in existing
-                if str(row.get("content_sha256", "")) == content_sha256
-                and str(row.get("expected_person", "")).casefold() == person.casefold()]
+    key = content_sha256, person.casefold()
+    matching = lookup.get(key, [])
     if matching:
         # Backfilling profiles is not a new annotation. Retain manual face
         # selections, counts, review state, and categories without a rewrite.
@@ -75,17 +89,8 @@ def enroll(
             if not Path(row.get("source", "")).is_file() and row.get("source") != canonical:
                 row["source"] = canonical
                 moved = True
-        if moved:
-            _write(path, existing)
-        return
-    rows = [
-        row for row in existing
-        if not (
-            str(row.get("content_sha256", "")) == content_sha256
-            and str(row.get("expected_person", "")).casefold() == person.casefold()
-        )
-    ]
-    rows.append({
+        return moved
+    row = {
         "source": canonical,
         "expected_person": person,
         "case_types": "|".join(sorted(case_types)),
@@ -97,12 +102,15 @@ def enroll(
         "group_id": content_sha256,
         "expected_people": person,
         "expected_face_count": "1",
-    })
-    rows.sort(key=lambda row: (
-        str(row.get("expected_person", "")).casefold(),
-        str(row.get("source", "")).casefold(),
-    ))
-    _write(path, rows)
+    }
+    existing.append(row)
+    lookup[key] = [row]
+    if sort_rows:
+        existing.sort(key=lambda row: (
+            str(row.get("expected_person", "")).casefold(),
+            str(row.get("source", "")).casefold(),
+        ))
+    return True
 
 
 def backfill_confirmations(
@@ -110,6 +118,7 @@ def backfill_confirmations(
     cached_faces: list,
     *,
     path: Path = DEFAULT_PATH,
+    database: Path | None = None,
 ) -> int:
     """Enroll older explicit confirmations without re-detecting their files."""
     faces_by_path: dict[str, list] = {}
@@ -117,7 +126,11 @@ def backfill_confirmations(
         canonical = str(Path(face.src_str).expanduser().resolve(strict=False))
         faces_by_path.setdefault(canonical, []).append(face)
     enrolled = 0
-    reference_index = identity_confirmations.ReferenceIndex(faces_by_path)
+    rows = _read(path)
+    initial_count = len(rows)
+    lookup = _row_lookup(rows)
+    changed = False
+    reference_index = identity_confirmations.ReferenceIndex(faces_by_path, database=database)
     for item in confirmation_payload.get("examples", []):
         person = str(item.get("person", "")).strip()
         digest = str(item.get("content_sha256", "")).strip()
@@ -129,15 +142,21 @@ def backfill_confirmations(
         if len(candidates) != 1 or len(selected) != 1:
             continue
         face = selected[0]
-        enroll(
+        changed = _enroll_row(rows, lookup,
             source=source,
             person=person,
             content_sha256=digest,
             pose_label=str(getattr(face, "pose_label", "unknown")) if face else "unknown",
             quality=float(getattr(face, "quality", 1.0)) if face else 1.0,
-            path=path,
-        )
+            sort_rows=False,
+        ) or changed
         enrolled += 1
+    reference_index.close()
+    if changed:
+        if len(rows) != initial_count:
+            rows.sort(key=lambda row: (str(row.get("expected_person", "")).casefold(),
+                                       str(row.get("source", "")).casefold()))
+        _write(path, rows)
     return enrolled
 
 

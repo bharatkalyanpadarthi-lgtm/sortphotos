@@ -360,7 +360,8 @@ class IntegrationTests(ReferenceFixtures, unittest.TestCase):
         matcher = SimpleNamespace(db=object())
         messages = []
         with patch.object(review, "automatic_review_gate_signature", return_value="unchanged"), \
-             patch.object(review.evaluation_runtime, "GateInputs", return_value=SimpleNamespace(fingerprint="inputs", validate=lambda: None)), \
+             patch.object(review.evaluation_runtime, "GateInputs", return_value=SimpleNamespace(fingerprint="inputs", validate=lambda: None,
+                 validate_snapshot=lambda: None, snapshot_cache=SimpleNamespace(faces=[]), snapshot_primary_faces=[])), \
              patch.object(review.identity_evaluation, "activation_gate", return_value=(True, {})) as primary, \
              patch.object(review, "evaluate_automatic_policy_benchmark", return_value=(True, {})) as policy, \
              patch.object(review.identity_hard_negatives, "vectors_by_person", return_value={}):

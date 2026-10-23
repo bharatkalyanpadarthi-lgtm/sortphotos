@@ -3632,7 +3632,6 @@ def test_daily_empty_inbox_gate_is_fast_and_media_aware(tmp: Path) -> None:
 
 
 def test_face_main_menu_is_streamlined(tmp: Path) -> None:
-    del tmp
     import face
 
     visible = [key for _heading, keys in face.MENU_GROUPS for key in keys]
@@ -3665,7 +3664,15 @@ def test_face_main_menu_is_streamlined(tmp: Path) -> None:
     )
 
     proc = subprocess.run(
-        [sys.executable, str(SCRIPT_DIR / "sort_photos.py"), "--help"],
+        [sys.executable, "-c", "\n".join([
+            "import runpy, sys",
+            "from pathlib import Path",
+            "import pipeline_writer",
+            # CLI help coverage must not depend on the live photo writer lease.
+            "pipeline_writer.LOCK_PATH = Path(sys.argv[1])",
+            "sys.argv = sys.argv[2:]",
+            "runpy.run_path(sys.argv[0], run_name='__main__')",
+        ]), str(tmp / "writer.lock"), str(SCRIPT_DIR / "sort_photos.py"), "--help"],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

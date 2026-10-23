@@ -361,9 +361,15 @@ def cache_metrics(
     prepared=None,
     checkpoints=None,
     selected_faces=None,
+    stage_directory=None,
 ) -> dict[str, float | int]:
     faces = (selected_faces if selected_faces is not None
              else select_faces(cache.faces, max_per_person, progress=progress))
+    if stage_directory is not None:
+        import primary_stage_cache
+        with primary_stage_cache.session(db, cache, faces, stage_directory) as (safe_cache, safe_faces, shared):
+            return cache_metrics(db, safe_cache, max_per_person=max_per_person, progress=progress,
+                prepared=prepared, checkpoints=shared, selected_faces=safe_faces)
     if prepared is None:
         from evaluation_profiles import EvaluationProfiles
         prepared = EvaluationProfiles(db)
@@ -401,6 +407,7 @@ def activation_gate(
     checkpoints=None,
     selected_faces=None,
     fail_fast: bool = False,
+    stage_cache_dir: Path | None = None,
 ) -> tuple[bool, dict[str, object]]:
     """Block profile promotion when precision or known-person recall regresses."""
     if require_protected is None:
@@ -460,8 +467,10 @@ def activation_gate(
     from evaluation_profiles import EvaluationProfiles
     prepared = EvaluationProfiles(candidate)
     current = cache_metrics(candidate, cache, progress=progress, prepared=prepared,
-                            checkpoints=checkpoints, selected_faces=selected_faces)
-    prior = current if candidate is incumbent else cache_metrics(incumbent, cache, progress=progress)
+                            checkpoints=checkpoints, selected_faces=selected_faces,
+                            stage_directory=stage_cache_dir)
+    prior = current if candidate is incumbent else cache_metrics(incumbent, cache, progress=progress,
+        stage_directory=stage_cache_dir)
     failures: list[str] = []
     if int(current["incorrect"]) > int(prior["incorrect"]):
         failures.append("new incorrect strict identity accepts")

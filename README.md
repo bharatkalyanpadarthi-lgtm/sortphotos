@@ -340,6 +340,27 @@ discards the affected namespace, while an ordinary interruption retains valid
 work. A per-directory advisory lock prevents concurrent gates. SQLite retains
 the current namespace plus two recent namespaces, reusing freed pages.
 
+Scoring now uses private immutable copies of the selected face inputs. Block
+checks still validate source/reference files and policy versions, without
+rehashing the entire live face cache every 64 cases. The live inputs are fully
+checked before publishing a verdict; changed inputs invalidate the result.
+Profile promotion and recovery share primary-score checkpoints only when the
+model, selected samples, evidence and policy are identical. Independent and
+protected safety checks remain separate and required.
+
+Confirmed-reference lookups can also reuse the SQLite content index across
+processes. Entries are hints: person membership, the full current file version
+and the confirmed content hash must still match. Missing/stale entries fall
+back to ordinary verified lookup. Confirmation enrollment reads/indexes its
+CSV once per batch and writes once only when rows change, preserving manual
+annotations and leaving no-op runs byte-for-byte unchanged.
+
+For an opt-in comparison against another checkout, use
+`validate_daily_performance.py --module-root CHECKOUT --report-dir PRIVATE_DIR`.
+It reads the saved library without ingesting or moving photos, writes derived
+benchmark caches/reports only to the supplied directory, and checks that its
+model, cache and annotation inputs did not change during measurement.
+
 The final gate signature covers decision code/settings, profile provenance,
 annotation/evidence content, tested cached faces/crops, detector configuration,
 and current source/reference versions. Changed inputs require fresh validation;

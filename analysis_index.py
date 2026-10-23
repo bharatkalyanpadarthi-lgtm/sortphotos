@@ -91,6 +91,7 @@ class AnalysisIndex:
                 signature TEXT NOT NULL,
                 sha256 TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS content_versions_sha256_idx ON content_versions(sha256);
             CREATE TABLE IF NOT EXISTS assets (
                 path TEXT PRIMARY KEY,
                 byte_size INTEGER NOT NULL,
@@ -520,6 +521,12 @@ class AnalysisIndex:
         except json.JSONDecodeError:
             return None
         return detections if isinstance(detections, list) else None
+
+    def paths_for_content(self, digest: str) -> list[Path]:
+        """Hints only: callers must validate each candidate's current version."""
+        return [Path(row[0]) for row in self.connection.execute(
+            "SELECT path FROM content_versions WHERE sha256=? "
+            "UNION SELECT path FROM assets WHERE sha256=? ORDER BY path", (digest, digest))]
 
     def content_sha256(self, path: Path) -> str | None:
         try:

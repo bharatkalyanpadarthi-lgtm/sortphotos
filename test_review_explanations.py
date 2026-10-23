@@ -168,7 +168,8 @@ class ReviewExplanationTests(unittest.TestCase):
         self.assertIn('provenance', report['errors'][0])
 
     def test_diagnostic_runs_independent_after_primary_failure_without_enabling(self):
-        inputs = SimpleNamespace(fingerprint='inputs', validate=lambda: None)
+        inputs = SimpleNamespace(fingerprint='inputs', validate=lambda: None,
+            validate_snapshot=lambda: None, snapshot_cache=sorter.CacheState(), snapshot_primary_faces=[])
         matcher = SimpleNamespace(db=secondary.SecondaryIdentityDB())
         with patch.object(review, 'automatic_review_gate_signature', return_value='policy'), \
              patch.object(review.evaluation_runtime, 'GateInputs', return_value=inputs), \

@@ -136,11 +136,11 @@ def selected_faces(item: dict, faces: list) -> list:
     return list(faces) if len(faces) == 1 else []
 
 
-def examples_for_person(path: Path, person: str, people_root: Path) -> dict[Path, dict]:
+def examples_for_person(path: Path, person: str, people_root: Path, *, database=None) -> dict[Path, dict]:
     root = people_root.expanduser().resolve()
     results: dict[Path, dict] = {}
     candidates = None
-    reference_index = ReferenceIndex(progress=None)
+    reference_index = ReferenceIndex(progress=None, database=database)
     for item in load(path)["examples"]:
         if str(item.get("person", "")).casefold() != person.casefold():
             continue
@@ -149,7 +149,8 @@ def examples_for_person(path: Path, person: str, people_root: Path) -> dict[Path
             if candidates is None:
                 person_dir = root / person / "photos"
                 candidates = list(person_dir.rglob("*")) if person_dir.is_dir() else []
-                reference_index = ReferenceIndex(candidates, progress=None)
+                reference_index.close()
+                reference_index = ReferenceIndex(candidates, progress=None, database=database)
             resolved = resolve_record(item, reference_index=reference_index)
         if resolved is None:
             continue
@@ -164,6 +165,7 @@ def examples_for_person(path: Path, person: str, people_root: Path) -> dict[Path
                              and bool(item.get("face_id")))
         if (own_folder or pinned_correction) and resolved.is_file():
             results[resolved] = item
+    reference_index.close()
     return results
 
 
@@ -172,8 +174,12 @@ def paths_for_person(path: Path, person: str, people_root: Path) -> list[Path]:
 
 
 def signature_for_person(path: Path, person: str, people_root: Path) -> str:
+    return signature_for_examples(examples_for_person(path, person, people_root))
+
+
+def signature_for_examples(examples: dict) -> str:
     digest = hashlib.sha256(b"selected-reference-v2\0")
-    for candidate, example in sorted(examples_for_person(path, person, people_root).items()):
+    for candidate, example in sorted(examples.items()):
         try:
             stat = candidate.stat()
         except OSError:

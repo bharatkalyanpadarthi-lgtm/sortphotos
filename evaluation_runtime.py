@@ -16,6 +16,7 @@ import numpy as np
 import content_identity
 import evaluation_dataset
 import benchmark_inputs
+import benchmark_snapshot
 from pipeline_progress import StageProgress, terminal_progress
 from evaluation_checkpoints import BenchmarkCheckpoints
 
@@ -216,6 +217,8 @@ class GateInputs:
         digest.update(self.files.signature(excluding=controls).encode())
         self.fingerprint = digest.hexdigest()
         self.tested_faces = tuple(face for face in all_faces if id(face) in self.tested_ids)
+        self.snapshot_cache, self.snapshot_primary_faces = benchmark_snapshot.freeze_cache(
+            cache, self.tested_faces, primary_faces)
         self.memory_fingerprint = self._memory_signature()
         self.validate()
 
@@ -241,6 +244,18 @@ class GateInputs:
         if (tuple(id(face) for face in self.cache.faces) != self.face_ids
                 or self._memory_signature() != self.memory_fingerprint):
             raise RuntimeError("Safety benchmark cached faces changed during evaluation")
+
+    def validate_snapshot(self):
+        """Block guard for scoring private immutable copies, not live faces.
+
+        Always call validate() before publishing a verdict. Original memory
+        changes cannot contaminate snapshot checkpoints; files/policy changes
+        still invalidate immediately at a block boundary.
+        """
+        self.files.validate()
+        self.original_files.validate()
+        if self.cache.config_fingerprint != self.snapshot_cache.config_fingerprint:
+            raise RuntimeError("Safety benchmark detector changed during evaluation")
 
 
 def evaluate_blocks(items, evaluate, *, checkpoints=None, stage, progress=terminal_progress,
