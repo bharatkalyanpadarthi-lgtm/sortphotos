@@ -3821,8 +3821,33 @@ def filter_existing_person_duplicates(images: list[Path],
     if not person_images:
         return images, [], []
 
-    log.info("Intake duplicate check: indexing %d existing person-folder image(s).",
-             len(person_images))
+    # Equal bytes necessarily have equal size. Enumerate all existing files to
+    # notice outside additions, but fingerprint only possible exact matches.
+    def incoming_version(path: Path) -> tuple[int, int, int, int, int]:
+        st = path.stat()
+        return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+    try:
+        incoming_versions = {path: incoming_version(path) for path in images}
+        candidate_sizes = {version[2] for version in incoming_versions.values()}
+        candidates = []
+        for path in person_images:
+            try:
+                if path.stat().st_size in candidate_sizes:
+                    candidates.append(path)
+            except OSError:
+                # Preserve the existing error handling for inaccessible files.
+                candidates.append(path)
+        if any(incoming_version(path) != version for path, version in incoming_versions.items()):
+            raise OSError("incoming files changed during candidate selection")
+    except OSError:
+        incoming_versions = None
+        candidates = person_images
+        log.warning("Intake duplicate check: input unavailable or changed; using full comparison.")
+
+    log.info("Intake duplicate check: indexing %d existing person-folder image(s); "
+             "%d same-size candidate(s) of %d enumerated.",
+             len(candidates), len(candidates), len(person_images))
     fp_cache = load_fingerprint_cache()
     entries = fp_cache.setdefault("entries", {})
     stats: Counter = Counter()
@@ -3835,7 +3860,7 @@ def filter_existing_person_duplicates(images: list[Path],
     counts = {"exact_file": 0, "same_pixels": 0, "near_visual": 0, "errors": 0}
     index_path = analysis_index_file()
     with analysis_index.AnalysisIndex(index_path) as asset_index:
-        for i, path in enumerate(person_images, start=1):
+        for i, path in enumerate(candidates, start=1):
             fp = image_duplicate_fingerprint(path, entries, stats, asset_index)
             if fp is None:
                 continue
@@ -3843,14 +3868,26 @@ def filter_existing_person_duplicates(images: list[Path],
             nudity_status = duplicate_nudity_status_for_path(path)
             exact.setdefault((nudity_status, file_hash), path)
             exact_statuses_by_hash[file_hash].add(nudity_status)
-            if i % 1000 == 0:
+            if i % 1000 == 0 or i == len(candidates):
                 asset_index.commit()
                 log.info("Intake duplicate check: indexed %d/%d existing image(s).",
-                         i, len(person_images))
+                         i, len(candidates))
 
         log.info("Intake duplicate check: checking %d incoming image(s).", len(images))
         for i, path in enumerate(images, start=1):
+            if incoming_versions is not None:
+                try:
+                    if incoming_version(path) != incoming_versions[path]:
+                        raise RuntimeError(f"Incoming image changed during duplicate check: {path}")
+                except OSError as exc:
+                    raise RuntimeError(f"Incoming image unavailable during duplicate check: {path}") from exc
             fp = image_duplicate_fingerprint(path, entries, stats, asset_index)
+            if incoming_versions is not None:
+                try:
+                    if incoming_version(path) != incoming_versions[path]:
+                        raise RuntimeError(f"Incoming image changed during duplicate check: {path}")
+                except OSError as exc:
+                    raise RuntimeError(f"Incoming image unavailable during duplicate check: {path}") from exc
             if fp is None:
                 counts["errors"] += 1
                 kept.append(path)
@@ -3903,6 +3940,13 @@ def filter_existing_person_duplicates(images: list[Path],
                 asset_index.commit()
                 log.info("Intake duplicate check: checked %d/%d incoming image(s).",
                          i, len(images))
+
+        if incoming_versions is not None:
+            try:
+                if any(incoming_version(path) != version for path, version in incoming_versions.items()):
+                    raise RuntimeError("Incoming images changed during duplicate check; retry safely")
+            except OSError as exc:
+                raise RuntimeError("Incoming image unavailable during duplicate check; retry safely") from exc
 
     save_fingerprint_cache(fp_cache)
     log.info("Intake duplicate fingerprint cache: sqlite=%d, json=%d, misses=%d, "

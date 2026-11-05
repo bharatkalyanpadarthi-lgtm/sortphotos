@@ -201,7 +201,9 @@ def ensure_source_guard_baseline(state: dict) -> dict[str, int]:
     guard["before_csv"] = str(paths["before"])
     guard["after_csv"] = str(paths["after"])
     guard["violations_csv"] = str(paths["violations"])
-    write_source_counts_csv(paths["before"], {str(k): int(v) for k, v in before.items()})
+    # The baseline does not change during a run; recreate its report if removed.
+    if not paths["before"].exists():
+        write_source_counts_csv(paths["before"], {str(k): int(v) for k, v in before.items()})
     return {str(k): int(v) for k, v in before.items()}
 
 

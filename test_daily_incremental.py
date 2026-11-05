@@ -1,6 +1,7 @@
 """Daily efficiency regressions; all libraries, caches and reports are temporary."""
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -9,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -61,7 +62,81 @@ class Fixtures(unittest.TestCase):
             return store.changes(daily_inventory.capture(self.people))
 
 
+class DuplicateCandidateTests(Fixtures):
+    def run_filter(self, incoming, output, fingerprint):
+        index = MagicMock()
+        index.__enter__.return_value = index
+        with patch.object(sorter.analysis_index, "AnalysisIndex", return_value=index), \
+             patch.object(sorter, "image_duplicate_fingerprint", side_effect=fingerprint), \
+             patch.object(sorter, "load_fingerprint_cache", return_value={"entries": {}}), \
+             patch.object(sorter, "save_fingerprint_cache"), \
+             patch.object(sorter, "classified_nudity_status", return_value="safe"):
+            return sorter.filter_existing_person_duplicates(incoming, output)
+
+    def test_size_filter_retains_exact_match_and_skips_other_sizes(self):
+        output = self.root / "sorted"
+        photos = output / "photos_by_person" / "Alice" / "photos"
+        photos.mkdir(parents=True)
+        match, other = photos / "match.jpg", photos / "other.jpg"
+        incoming = self.root / "incoming.jpg"
+        match.write_bytes(b"same")
+        other.write_bytes(b"different length")
+        incoming.write_bytes(b"same")
+        seen = []
+        def fingerprint(path, *args):
+            seen.append(path)
+            return (hashlib.sha256(path.read_bytes()).hexdigest(), "pixels", 0, 1.0)
+        kept, duplicates, _ = self.run_filter([incoming], output, fingerprint)
+        self.assertEqual(kept, [])
+        self.assertEqual(duplicates, [incoming])
+        self.assertIn(match, seen)
+        self.assertNotIn(other, seen)
+
+    def test_changed_input_aborts_before_returning_duplicate_decisions(self):
+        output = self.root / "sorted"
+        photos = output / "photos_by_person" / "Alice" / "photos"
+        photos.mkdir(parents=True)
+        (photos / "match.jpg").write_bytes(b"same")
+        incoming = self.root / "incoming.jpg"
+        incoming.write_bytes(b"same")
+        def fingerprint(path, *args):
+            if path == incoming:
+                path.write_bytes(b"changed")
+            return ("sha", "pixels", 0, 1.0)
+        with self.assertRaisesRegex(RuntimeError, "changed during duplicate check"):
+            self.run_filter([incoming], output, fingerprint)
+
+    def test_externally_added_and_changed_existing_files_are_found(self):
+        output = self.root / "sorted"
+        photos = output / "photos_by_person" / "Alice" / "photos"
+        photos.mkdir(parents=True)
+        existing, incoming = photos / "existing.jpg", self.root / "incoming.jpg"
+        existing.write_bytes(b"other length")
+        incoming.write_bytes(b"same")
+        def fingerprint(path, *args):
+            return (hashlib.sha256(path.read_bytes()).hexdigest(), "pixels", 0, 1.0)
+        self.assertEqual(self.run_filter([incoming], output, fingerprint)[0], [incoming])
+        existing.write_bytes(b"same")
+        self.assertEqual(self.run_filter([incoming], output, fingerprint)[1], [incoming])
+        existing.unlink()
+        (photos / "externally_added.jpg").write_bytes(b"same")
+        self.assertEqual(self.run_filter([incoming], output, fingerprint)[1], [incoming])
+
+
 class InventoryTests(Fixtures):
+    def test_source_guard_reuses_and_restores_baseline_report(self):
+        report = self.root / "before.csv"
+        paths = {"before": report, "after": self.root / "after.csv", "violations": self.root / "violations.csv"}
+        state = {"run_id": "test", "source_guard": {"before": {"Alice": 1}}}
+        with patch.object(daily_runner, "source_guard_paths", return_value=paths), \
+             patch.object(daily_runner, "write_source_counts_csv", wraps=daily_runner.write_source_counts_csv) as write:
+            daily_runner.ensure_source_guard_baseline(state)
+            daily_runner.ensure_source_guard_baseline(state)
+            self.assertEqual(write.call_count, 1)
+            report.unlink()
+            daily_runner.ensure_source_guard_baseline(state)
+            self.assertEqual(write.call_count, 2)
+
     def test_first_baseline_is_full_then_unchanged_is_empty(self):
         self.image()
         self.assertTrue(self.changes()["full"])
