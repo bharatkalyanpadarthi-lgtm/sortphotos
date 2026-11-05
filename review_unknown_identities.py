@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 import uuid
 import webbrowser
@@ -1371,6 +1372,14 @@ def _run_isolated_automatic_sweep_batch(
     """Run one verifier chunk in a clean spawned Python process."""
     result_path = Path(state["output_dir"]) / f".auto_sweep.{uuid.uuid4().hex}.json"
     task_path = result_path.with_suffix(".task.json")
+    import shared_profile_snapshot
+    if not state.get("_shared_profile_snapshot"):
+        snapshot_path = Path(state["_shared_snapshot_dir"]) / "profiles.json"
+        snapshot_data = shared_profile_snapshot.encode(
+            state["identity_db"], state["secondary_matcher"].db,
+            state["review_prototypes"], state["hard_negatives"])
+        state["_shared_profile_snapshot"] = {
+            "path": str(snapshot_path), "sha256": shared_profile_snapshot.write(snapshot_path, snapshot_data)}
     task = {
         "result_path": str(result_path),
         "files": [str(path) for path in files],
@@ -1387,6 +1396,7 @@ def _run_isolated_automatic_sweep_batch(
         "fallback_det_size": int(state["fallback_det_size"]),
         "cluster_eps": float(state["cluster_eps"]),
         "route_unsupported": bool(state.get("route_unsupported", True)),
+        "shared_profile_snapshot": state["_shared_profile_snapshot"],
         "snapshot_binding": {
             "version": 1,
             "gate_signature": str(state.get("auto_review_gate", {}).get("signature", "")),
@@ -1516,6 +1526,18 @@ def daily_decision_comparisons(rows: list[dict], report_path: Path) -> list[dict
 
 
 def run_automatic_sweep(state: dict) -> dict[str, object]:
+    if not state.get("isolate_auto_sweep_batches"):
+        return _run_automatic_sweep(state)
+    with tempfile.TemporaryDirectory(prefix="face-profile-snapshot-") as directory:
+        state["_shared_snapshot_dir"] = directory
+        try:
+            return _run_automatic_sweep(state)
+        finally:
+            state.pop("_shared_snapshot_dir", None)
+            state.pop("_shared_profile_snapshot", None)
+
+
+def _run_automatic_sweep(state: dict) -> dict[str, object]:
     """Scan every pending file once and file all benchmark-gated safe matches.
 
     The interactive page still displays a bounded batch, but safe candidates
@@ -2500,7 +2522,7 @@ def automatic_review_gate_signature(
                         "identity_profiles.py", "secondary_identity_matcher.py", "review_unknown_identities.py",
                         "identity_confirmations.py", "verified_references.py", "benchmark_inputs.py",
                         "evaluation_profiles.py", "evaluation_runtime.py", "evaluation_checkpoints.py",
-                        "benchmark_snapshot.py", "primary_stage_cache.py", "analysis_index.py",
+                        "benchmark_snapshot.py", "shared_profile_snapshot.py", "primary_stage_cache.py", "analysis_index.py",
                         "evaluation_enrollment.py",
                         "sort_photos.py", "recover_no_usable_faces.py", "appearance_profiles.py",
                         "evaluation_dataset.py", "protected_benchmark_assets.py", "benchmark_detection.py", "shadow_evaluation.py",
@@ -3543,12 +3565,18 @@ def run_automatic_sweep_worker(task_path: Path) -> int:
                 or current_policy != binding.get("policy_signature")
                 or current_model != binding.get("model_signature")):
             raise RuntimeError("Automatic sweep snapshot changed; retry with a freshly validated gate")
-        import benchmark_snapshot
-        frozen_primary = benchmark_snapshot.freeze_profile(identity_db)
-        frozen_secondary = secondary_identity_matcher.SnapshotSecondaryMatcher(matcher)
-        frozen_recovery = benchmark_snapshot.FrozenRecoveryProfiles(review_prototypes)
-        frozen_negatives = benchmark_snapshot.freeze_mapping(identity_hard_negatives.vectors_by_person(
-            sort_photos.IDENTITY_HARD_NEGATIVES_FILE))
+        import hashlib
+        import shared_profile_snapshot
+        snapshot = task.get("shared_profile_snapshot")
+        if not isinstance(snapshot, dict) or set(snapshot) != {"path", "sha256"}:
+            raise RuntimeError("Missing shared immutable profile snapshot")
+        live_negatives = identity_hard_negatives.vectors_by_person(sort_photos.IDENTITY_HARD_NEGATIVES_FILE)
+        live_data = shared_profile_snapshot.encode(identity_db, secondary_db, review_prototypes, live_negatives)
+        if hashlib.sha256(live_data).hexdigest() != snapshot["sha256"]:
+            raise RuntimeError("Shared profile snapshot no longer matches live profiles")
+        frozen_primary, frozen_secondary_db, frozen_recovery, frozen_negatives = shared_profile_snapshot.read(
+            Path(snapshot["path"]), str(snapshot["sha256"]))
+        frozen_secondary = secondary_identity_matcher.SnapshotSecondaryMatcher(matcher, profile=frozen_secondary_db)
         if automatic_review_gate_signature(frozen_primary, secondary_db=frozen_secondary.db,
                                            review_prototypes=frozen_recovery) != current_policy:
             raise RuntimeError("Automatic sweep immutable profiles do not match the validated policy")

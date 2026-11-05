@@ -3,6 +3,7 @@
 from collections import defaultdict
 from contextlib import ExitStack
 import json
+import hashlib
 from pathlib import Path
 import queue
 import sqlite3
@@ -20,6 +21,7 @@ import content_identity
 import identity_confirmations
 import review_unknown_identities as review
 import secondary_identity_matcher as secondary
+import shared_profile_snapshot
 import sort_photos as sorter
 
 
@@ -41,7 +43,8 @@ class QuickReviewPerformanceTests(unittest.TestCase):
         self.progress = dict(total=1, reviewed=1, pending=0, confirmed=0,
                              unknown=1, junk=0, deferred=0, temporarily_skipped=0)
 
-    def worker(self, *, accepted=True, replaced=False, build_error=False, binding=None):
+    def worker(self, *, accepted=True, replaced=False, build_error=False, binding=None,
+               snapshot_hash=None, snapshot_read_error=None):
         task = self.root / "task.json"
         result = self.root / "result.json"
         task.write_text(json.dumps(dict(result_path=str(result), output_dir=str(self.root),
@@ -54,6 +57,8 @@ class QuickReviewPerformanceTests(unittest.TestCase):
         payload['snapshot_binding'] = binding if binding is not None else {
             'version': 1, 'gate_signature': 'current-gate',
             'policy_signature': 'current-policy', 'model_signature': 'current-model'}
+        payload['shared_profile_snapshot'] = {'path': str(self.root / 'snapshot.json'),
+            'sha256': snapshot_hash or hashlib.sha256(b'snapshot').hexdigest()}
         task.write_text(json.dumps(payload))
         record = dict(person="Alice", organized_path=str(self.source), content_sha256=self.digest)
         if replaced:
@@ -92,6 +97,9 @@ class QuickReviewPerformanceTests(unittest.TestCase):
             stack.enter_context(patch.object(benchmark_snapshot, "freeze_profile", return_value=self.db))
             stack.enter_context(patch.object(benchmark_snapshot, "FrozenRecoveryProfiles", return_value={}))
             stack.enter_context(patch.object(secondary, "SnapshotSecondaryMatcher", return_value=SimpleNamespace(db=object())))
+            stack.enter_context(patch.object(shared_profile_snapshot, "encode", return_value=b'snapshot'))
+            stack.enter_context(patch.object(shared_profile_snapshot, "read",
+                side_effect=snapshot_read_error, return_value=(self.db, object(), {}, {})))
             batch = stack.enter_context(patch.object(review, "_run_automatic_sweep_batch",
                 return_value=dict(scanned=0, confirmed=0, failed=0)))
             code = review.run_automatic_sweep_worker(task)
@@ -126,6 +134,19 @@ class QuickReviewPerformanceTests(unittest.TestCase):
         self.assertEqual(report['detection_stats']['sqlite_hits'], 1)
         self.assertTrue(self.source.is_file())
 
+    def test_shared_snapshot_directory_is_cleaned_after_failure(self):
+        state = {'isolate_auto_sweep_batches': True}
+        directories = []
+        def fail(current):
+            directories.append(Path(current['_shared_snapshot_dir']))
+            self.assertTrue(directories[0].is_dir())
+            raise RuntimeError('interrupted')
+        with patch.object(review, '_run_automatic_sweep', side_effect=fail):
+            with self.assertRaisesRegex(RuntimeError, 'interrupted'):
+                review.run_automatic_sweep(state)
+        self.assertFalse(directories[0].exists())
+        self.assertNotIn('_shared_snapshot_dir', state)
+
     def test_worker_rejects_replaced_reference_content(self):
         code, _result, _batch = self.worker(replaced=True)
         self.assertEqual(code, 0)
@@ -154,6 +175,18 @@ class QuickReviewPerformanceTests(unittest.TestCase):
             'policy_signature': 'current-policy', 'model_signature': 'current-model'})
         self.assertEqual(code, 0)
         batch.assert_called_once()
+
+    def test_worker_rejects_changed_live_snapshot_before_filing(self):
+        code, result, batch = self.worker(snapshot_hash='0' * 64)
+        self.assertEqual(code, 1)
+        self.assertIn('no longer matches live profiles', result['error'])
+        batch.assert_not_called()
+
+    def test_worker_rejects_corrupted_shared_snapshot_before_filing(self):
+        code, result, batch = self.worker(snapshot_read_error=ValueError('snapshot hash mismatch'))
+        self.assertEqual(code, 1)
+        self.assertIn('snapshot hash mismatch', result['error'])
+        batch.assert_not_called()
 
     def test_reference_exception_closes_index_and_prevents_filing(self):
         code, result, batch = self.worker(build_error=True)

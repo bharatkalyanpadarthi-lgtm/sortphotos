@@ -323,10 +323,10 @@ class SecondaryMatcher:
 class SnapshotSecondaryMatcher:
     """Score against frozen profiles while retaining the live crop cache."""
 
-    def __init__(self, matcher: SecondaryMatcher):
+    def __init__(self, matcher: SecondaryMatcher, *, profile=None):
         import benchmark_snapshot
         self._live = matcher
-        self.db = benchmark_snapshot.freeze_profile(replace(matcher.db, crop_embeddings={}))
+        self.db = profile if profile is not None else benchmark_snapshot.freeze_profile(replace(matcher.db, crop_embeddings={}))
         self._scorer = SecondaryMatcher(self.db)
         self._scorer.embedding = matcher.embedding
 
