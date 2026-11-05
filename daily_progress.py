@@ -11,6 +11,7 @@ STEP_LABELS = {
     "preflight": "Checking storage and safety",
     "video-process": "Processing new videos",
     "process": "Processing new photos",
+    "safe-auto-sweep": "Safely matching remaining unknown faces",
     "structure": "Checking person folders",
     "rename": "Updating photo filenames",
     "exact-dedupe": "Checking exact duplicates (report only)",
@@ -121,6 +122,9 @@ class CommandProgress:
             self.display(f"Warning: {text}")
             return
         if re.match(r"^(?:insufficient_space|low_memory|copy_failed|processing_failed):", text):
+            self.display(text)
+            return
+        if text.startswith(("Daily safe auto-match", "Safe auto-sweep ")):
             self.display(text)
             return
         if "Safety benchmark: reusing unchanged cached result" in text:

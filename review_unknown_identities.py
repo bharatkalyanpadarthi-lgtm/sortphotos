@@ -3573,6 +3573,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run benchmark-gated recovery across every pending file without serving the UI.",
     )
+    parser.add_argument("--daily-auto-sweep", action="store_true",
+                        help="Run only the gated automatic sweep after daily ingest, without opening review.")
     parser.add_argument("--validate-auto-only", action="store_true",
                         help="Validate both matchers without reconciling, filing, or moving photos.")
     parser.add_argument("--host", default="127.0.0.1")
@@ -3582,12 +3584,29 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def run_daily_auto_sweep(state: dict) -> int:
+    if not state.get("auto_review_allowed"):
+        print(f"Daily safe auto-match unavailable: {state.get('auto_review_gate_message', 'safety gate unavailable')}; "
+              "images remain for review.", flush=True)
+        return 0
+    result = run_automatic_sweep(state)
+    if result.get("cached"):
+        print("Daily safe auto-match: already checked; no new files filed.", flush=True)
+        return 0
+    print(f"Daily safe auto-match complete: {result['confirmed']} filed, "
+          f"{result['scanned']} checked, {result['failed']} failed.", flush=True)
+    return 1 if int(result["failed"]) else 0
+
+
 def main() -> int:
     args = parse_args()
     if args.auto_sweep_worker is not None:
         return run_automatic_sweep_worker(args.auto_sweep_worker)
     unknown_root = args.input.expanduser().resolve()
     if not unknown_root.is_dir():
+        if args.daily_auto_sweep and unknown_root.parent.is_dir() and not unknown_root.exists():
+            print("Daily safe auto-match: no unknown identity queue; nothing to check.")
+            return 0
         print(f"ERROR: unknown_identity folder is unavailable: {unknown_root}")
         return 2
     identity_db = sort_photos.load_identity_db()
@@ -3602,6 +3621,7 @@ def main() -> int:
     hard_negatives = identity_hard_negatives.vectors_by_person(hard_negatives_path)
     auto_requested = bool(
         args.auto_safe or args.auto_safe_preview or args.reprocess_pending or args.validate_auto_only
+        or args.daily_auto_sweep
     )
     cache = sort_photos.load_cache()
     print("Preparing shared confirmed-reference index...", flush=True)
@@ -3676,6 +3696,9 @@ def main() -> int:
     gc.collect()
     if auto_requested and secondary_matcher is None:
         auto_gate_message = f"Safe auto-match is off because verifier {secondary_status}."
+    if args.daily_auto_sweep and not auto_allowed:
+        return run_daily_auto_sweep({"auto_review_allowed": False,
+                                     "auto_review_gate_message": auto_gate_message})
     state = {
         "clusters": [],
         "items_by_key": {},
@@ -3732,7 +3755,7 @@ def main() -> int:
         "auto_review_gate": auto_gate,
         "auto_review_gate_message": auto_gate_message,
         "learned_hard_negatives": learned_hard_negatives,
-        "isolate_auto_sweep_batches": bool(args.serve or args.reprocess_pending),
+        "isolate_auto_sweep_batches": bool(args.serve or args.reprocess_pending or args.daily_auto_sweep),
         "batch_loading": False,
         "finishing": False,
         "review_finished": False,
@@ -3740,6 +3763,8 @@ def main() -> int:
         "lock": threading.Lock(),
         "quiet": args.quiet,
     }
+    if args.daily_auto_sweep:
+        return run_daily_auto_sweep(state)
     reconciliation = reconcile_unknown_queue(
         state,
         dry_run=bool(args.reconcile_preview),

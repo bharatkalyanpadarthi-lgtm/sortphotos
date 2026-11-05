@@ -162,6 +162,28 @@ class InventoryTests(Fixtures):
             daily_runner.ensure_source_guard_baseline(state)
             self.assertEqual(write.call_count, 2)
 
+    def test_daily_auto_match_follows_photo_ingest_and_skips_without_it(self):
+        steps = daily_runner.step_list(50)
+        names = [step["name"] for step in steps]
+        self.assertLess(names.index("process"), names.index("safe-auto-sweep"))
+        self.assertLess(names.index("safe-auto-sweep"), names.index("structure"))
+        step = next(step for step in steps if step["name"] == "safe-auto-sweep")
+        self.assertTrue(step.get("mutates", True))
+        self.assertEqual(daily_runner.skip_reason(step, {"steps": {"process": {"status": "skipped"}}}),
+                         "no new photo ingest")
+        self.assertIsNone(daily_runner.skip_reason(step, {"steps": {"process": {"status": "completed"}}}))
+
+    def test_daily_auto_match_requires_gate_and_propagates_failure(self):
+        with patch.object(review, "run_automatic_sweep") as sweep, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(review.run_daily_auto_sweep({"auto_review_allowed": False}), 0)
+            sweep.assert_not_called()
+            sweep.return_value = {"confirmed": 2, "scanned": 3, "failed": 0}
+            self.assertEqual(review.run_daily_auto_sweep({"auto_review_allowed": True}), 0)
+            sweep.return_value = {"confirmed": 2, "scanned": 3, "failed": 0, "cached": True}
+            self.assertEqual(review.run_daily_auto_sweep({"auto_review_allowed": True}), 0)
+            sweep.return_value = {"confirmed": 1, "scanned": 3, "failed": 1}
+            self.assertEqual(review.run_daily_auto_sweep({"auto_review_allowed": True}), 1)
+
     def test_first_baseline_is_full_then_unchanged_is_empty(self):
         self.image()
         self.assertTrue(self.changes()["full"])

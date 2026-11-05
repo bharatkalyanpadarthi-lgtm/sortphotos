@@ -554,6 +554,9 @@ def step_list(batch_size: int) -> list[dict]:
             ],
             "heavy": True,
         },
+        {"name": "safe-auto-sweep", "desc": "Safely file verified unknown faces",
+         "cmd": [py, str(SCRIPT_DIR / "review_unknown_identities.py"), "--daily-auto-sweep"],
+         "heavy": True},
         {"name": "structure", "desc": "Normalize person folder structure",
          "cmd": [py, str(SCRIPT_DIR / "person_structure.py"), "--apply", "--quiet"]},
         {"name": "rename", "desc": "Normalize person filenames with simple stable names",
@@ -607,6 +610,8 @@ def skip_reason(step: dict, state: dict, *, full: bool = False) -> str | None:
     name = step["name"]
     if name == "process" and not tree_contains_media(TO_PROCESS, IMAGE_EXTS):
         return "no new photos"
+    if name == "safe-auto-sweep" and state.get("steps", {}).get("process", {}).get("status") != "completed":
+        return "no new photo ingest"
     if name == "video-process" and not (tree_contains_media(TO_PROCESS, VIDEO_EXTS)
                                        or tree_contains_media(LEGACY_VIDEO_INBOX, VIDEO_EXTS)):
         return "no new videos"
@@ -866,7 +871,7 @@ def print_dry_run(steps: list[dict], before: dict, profile: dict,
         )
         status = "skip: empty inbox" if would_skip else "run"
         if not would_skip:
-            if step["name"] == "process" and not int(before.get("to_process_images", 0)):
+            if step["name"] in {"process", "safe-auto-sweep"} and not int(before.get("to_process_images", 0)):
                 status = "skip: no new photos"
             elif step["name"] == "video-process" and not (int(before.get("to_process_videos", 0))
                                                         + int(before.get("legacy_videos", 0))):
