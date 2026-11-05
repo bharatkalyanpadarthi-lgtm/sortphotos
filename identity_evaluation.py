@@ -362,12 +362,13 @@ def cache_metrics(
     checkpoints=None,
     selected_faces=None,
     stage_directory=None,
+    live_profile=None,
 ) -> dict[str, float | int]:
     faces = (selected_faces if selected_faces is not None
              else select_faces(cache.faces, max_per_person, progress=progress))
     if stage_directory is not None:
         import primary_stage_cache
-        with primary_stage_cache.session(db, cache, faces, stage_directory) as (safe_cache, safe_faces, shared):
+        with primary_stage_cache.session(db, cache, faces, stage_directory, live_profile=live_profile) as (safe_cache, safe_faces, shared):
             return cache_metrics(db, safe_cache, max_per_person=max_per_person, progress=progress,
                 prepared=prepared, checkpoints=shared, selected_faces=safe_faces)
     if prepared is None:
@@ -466,9 +467,19 @@ def activation_gate(
                 validation.cases, cache, force_fresh=fresh, progress=progress))
     from evaluation_profiles import EvaluationProfiles
     prepared = EvaluationProfiles(candidate)
-    current = cache_metrics(candidate, cache, progress=progress, prepared=prepared,
+    import benchmark_snapshot
+    primary_snapshot = benchmark_snapshot.freeze_profile(candidate)
+    primary_prepared = EvaluationProfiles(primary_snapshot)
+    if stage_cache_dir is None:
+        import review_unknown_identities
+        snapshot_signature = review_unknown_identities.automatic_review_gate_signature(primary_snapshot)
+        if review_unknown_identities.automatic_review_gate_signature(candidate) != snapshot_signature:
+            raise RuntimeError("Primary profile changed before evaluation")
+    current = cache_metrics(primary_snapshot, cache, progress=progress, prepared=primary_prepared,
                             checkpoints=checkpoints, selected_faces=selected_faces,
-                            stage_directory=stage_cache_dir)
+                            stage_directory=stage_cache_dir, live_profile=candidate)
+    if stage_cache_dir is None and review_unknown_identities.automatic_review_gate_signature(candidate) != snapshot_signature:
+        raise RuntimeError("Primary profile changed during evaluation")
     prior = current if candidate is incumbent else cache_metrics(incumbent, cache, progress=progress,
         stage_directory=stage_cache_dir)
     failures: list[str] = []

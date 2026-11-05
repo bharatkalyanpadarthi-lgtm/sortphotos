@@ -254,7 +254,7 @@ class BenchmarkInputTests(unittest.TestCase):
              patch.object(review, "evaluate_automatic_policy_benchmark", return_value=(True, {})), \
              patch.object(review.identity_hard_negatives, "vectors_by_person", return_value={}):
             allowed, report, message = review.prepare_automatic_review_gate(
-                object(), SimpleNamespace(faces=[]), SimpleNamespace(db=object()), requested=True,
+                sorter.IdentityDB(), SimpleNamespace(faces=[]), SimpleNamespace(db=object()), requested=True,
                 output_dir=self.root, progress=self.messages.append)
         self.assertFalse(allowed)
         self.assertTrue(report["evaluation_incomplete"])

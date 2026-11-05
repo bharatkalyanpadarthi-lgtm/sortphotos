@@ -27,7 +27,7 @@ import time
 import uuid
 import webbrowser
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from dataclasses import replace
 from http import HTTPStatus
@@ -2477,6 +2477,10 @@ def automatic_review_gate_signature(
     """Fingerprint every input that can change an automatic-review decision."""
     digest = hashlib.sha256()
     parts = {}
+    def json_mapping(value):
+        if isinstance(value, Mapping):
+            return dict(value)
+        raise TypeError(f"Unsupported signature value: {type(value).__name__}")
     def record(name, value):
         value = value.encode() if isinstance(value, str) else value
         digest.update(value)
@@ -2509,7 +2513,7 @@ def automatic_review_gate_signature(
                      if name.startswith("AUTO_PERSON_") and isinstance(value, (str, bool, int, float))},
         "recovery_settings": {name: value for name, value in vars(recover_no_usable_faces).items()
                               if name.startswith("MATCH_") and isinstance(value, (str, bool, int, float))},
-    }, sort_keys=True).encode("utf-8"))
+    }, sort_keys=True, default=json_mapping).encode("utf-8"))
     vectors = hashlib.sha256()
     for person in sorted(identity_db.identities, key=str.casefold):
         vectors.update(person.encode("utf-8"))

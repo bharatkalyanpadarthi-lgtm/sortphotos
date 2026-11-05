@@ -11,6 +11,7 @@ from unittest.mock import patch
 import numpy as np
 
 import evaluation_runtime as runtime
+import benchmark_snapshot
 from evaluation_checkpoints import BenchmarkCheckpoints
 import identity_evaluation as evaluation
 import review_unknown_identities as review
@@ -19,6 +20,32 @@ import sort_photos as sorter
 
 
 class EvaluationRuntimeTests(unittest.TestCase):
+    def test_profile_snapshot_is_deeply_immutable_and_not_aliased(self):
+        vector = np.array([1., 0.], dtype=np.float32)
+        profile = sorter.IdentityDB(identities={'Alice': vector}, prototypes={'Alice': [vector]},
+                                    prototype_sources={'Alice': ['source']})
+        frozen = benchmark_snapshot.freeze_profile(profile)
+        vector[0] = 0.
+        profile.prototype_sources['Alice'].append('other')
+        self.assertEqual(float(frozen.identities['Alice'][0]), 1.)
+        self.assertEqual(frozen.prototype_sources['Alice'], ('source',))
+        with self.assertRaises((AttributeError, TypeError)):
+            frozen.identities = {}
+        with self.assertRaises(TypeError):
+            frozen.identities['Bob'] = vector
+        with self.assertRaises(ValueError):
+            frozen.identities['Alice'].setflags(write=True)
+
+    def test_profile_snapshot_preserves_gate_signature(self):
+        profile = sorter.IdentityDB(identities={'Alice': np.array([1., 0.], dtype=np.float32)},
+                                    source_counts={'Alice': 4}, match_thresholds={'Alice': .2},
+                                    prototype_sources={'Alice': ['a.jpg']})
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / 'missing.json'
+            self.assertEqual(review.automatic_review_gate_signature(profile, hard_negatives_path=missing),
+                             review.automatic_review_gate_signature(benchmark_snapshot.freeze_profile(profile),
+                                                                    hard_negatives_path=missing))
+
     def test_input_change_diagnostics_are_bounded_and_handle_legacy_state(self):
         self.assertEqual(review.benchmark_input_changes(None, {"a": [1]}), [])
         self.assertEqual(review.benchmark_input_changes({"a": [1]}, {"a": [1]}), [])

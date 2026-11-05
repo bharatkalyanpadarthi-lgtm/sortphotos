@@ -1,6 +1,8 @@
 """Private immutable face inputs; never persist or train from these copies."""
 
 import copy
+from dataclasses import fields, is_dataclass, make_dataclass
+from functools import lru_cache
 from types import MappingProxyType
 
 import numpy as np
@@ -46,3 +48,18 @@ def freeze_cache(cache, tested_faces, primary_faces):
     result.faces = tuple(clones[id(face)] for face in tested_faces)
     result.file_signatures = MappingProxyType(dict(getattr(cache, "file_signatures", {})))
     return result, tuple(clones[id(face)] for face in primary_faces)
+
+
+@lru_cache(maxsize=16)
+def _profile_type(profile_type):
+    return make_dataclass(f"Frozen{profile_type.__name__}",
+                          [(field.name, object) for field in fields(profile_type)], frozen=True)
+
+
+def freeze_profile(profile):
+    """Freeze a dataclass profile, including nested vectors and provenance."""
+    if not is_dataclass(profile) or isinstance(profile, type):
+        raise TypeError("Identity profile must be a dataclass instance")
+    frozen_type = _profile_type(type(profile))
+    return frozen_type(**{field.name: _freeze(getattr(profile, field.name))
+                          for field in fields(profile)})

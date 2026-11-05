@@ -8,7 +8,7 @@ from evaluation_checkpoints import BenchmarkCheckpoints
 
 
 @contextmanager
-def session(db, cache, faces, directory):
+def session(db, cache, faces, directory, *, live_profile=None):
     import review_unknown_identities as review
     import identity_hard_negatives
     import sort_photos
@@ -18,6 +18,8 @@ def session(db, cache, faces, directory):
         # A deliberately conservative policy key. Independent model changes
         # do not affect this key; primary evidence/code/source changes do.
         policy = review.automatic_review_gate_signature(db)
+        if live_profile is not None and review.automatic_review_gate_signature(live_profile) != policy:
+            raise RuntimeError("Primary profile changed before evaluation")
         inputs = runtime.GateInputs(cache, db, None, datasets=(),
             evidence_paths=(sort_photos.IDENTITY_HARD_NEGATIVES_FILE,),
             negative_examples=identity_hard_negatives.load(
@@ -28,6 +30,8 @@ def session(db, cache, faces, directory):
             inputs.validate_snapshot()
             if review.automatic_review_gate_signature(db) != policy:
                 raise RuntimeError("Primary benchmark policy changed during evaluation")
+            if live_profile is not None and review.automatic_review_gate_signature(live_profile) != policy:
+                raise RuntimeError("Live primary profile changed during evaluation")
 
         with BenchmarkCheckpoints(directory / "primary_scores.sqlite3", signature) as store:
             store.prune()

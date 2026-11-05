@@ -307,6 +307,15 @@ class SharedPrimaryTests(Fixtures):
         with primary_stage_cache.session(self.db, self.cache, [self.face], self.directory) as (_, _, checkpoints):
             self.assertIsNone(checkpoints.get("before"))
 
+    def test_live_profile_drift_invalidates_immutable_snapshot_work(self):
+        import benchmark_snapshot
+        frozen = benchmark_snapshot.freeze_profile(self.db)
+        with self.assertRaisesRegex(RuntimeError, "Live primary profile changed"):
+            with primary_stage_cache.session(frozen, self.cache, [self.face], self.directory,
+                                             live_profile=self.db) as (_, _, checkpoints):
+                self.db.strict_thresholds["Alice"] = .001
+                checkpoints.put("changed", {"valid": False})
+
     def test_interruption_preserves_completed_immutable_work(self):
         with self.assertRaises(KeyboardInterrupt):
             with primary_stage_cache.session(self.db, self.cache, [self.face], self.directory) as (_, _, checkpoints):
