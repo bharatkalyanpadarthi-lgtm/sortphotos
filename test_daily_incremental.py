@@ -124,6 +124,31 @@ class DuplicateCandidateTests(Fixtures):
 
 
 class InventoryTests(Fixtures):
+    def test_capture_matches_original_paths_and_signatures_for_edge_cases(self):
+        self.image("Alice/photos/a.jpg")
+        self.image("Alice/photos/nude/b.jpg")
+        self.image("Alice/.hidden/ignored.jpg")
+        self.image("Alice/_smart_albums/ignored.jpg")
+        self.image("B Bob/photos/c.jpg")
+        self.image("Ren\u00e9e/photos/a \u00f1.jpg")
+        self.image("_excluded/photos/ignored.jpg")
+        (self.people / "Alice" / "photos" / "empty").mkdir()
+        (self.people / "Alice" / "photos" / "linked.jpg").symlink_to("a.jpg")
+        (self.people / "Alice" / "photos" / "linked_dir").symlink_to("nude", target_is_directory=True)
+        expected = {}
+        for person in sorted(self.people.iterdir()):
+            if person.name.startswith((".", "_")) or not person.is_dir():
+                continue
+            for current, dirs, files in os.walk(person, followlinks=False):
+                dirs[:] = [name for name in dirs if name.casefold() not in daily_inventory.EXCLUDED
+                           and not name.startswith(".")]
+                for path in [Path(current), *(Path(current) / name for name in files if not name.startswith("."))]:
+                    st = path.lstat()
+                    signature = (st.st_mode, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+                    expected[path.relative_to(self.people).as_posix()] = (
+                        person.name, json.dumps(signature, separators=(",", ":")))
+        self.assertEqual(daily_inventory.capture(self.people), expected)
+
     def test_source_guard_reuses_and_restores_baseline_report(self):
         report = self.root / "before.csv"
         paths = {"before": report, "after": self.root / "after.csv", "violations": self.root / "violations.csv"}

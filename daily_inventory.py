@@ -31,6 +31,7 @@ def capture(root: Path) -> dict[str, tuple[str, str]]:
     if not root.is_dir():
         raise OSError(f"Organized destination unavailable: {root}")
     entries = {}
+    root_string = os.fspath(root)
     def failed(error):
         raise error
     for person in sorted(root.iterdir()):
@@ -40,12 +41,15 @@ def capture(root: Path) -> dict[str, tuple[str, str]]:
             dirs[:] = [name for name in dirs if name.casefold() not in EXCLUDED
                        and not name.startswith(".")]
             # Directory membership catches empty folders and external moves too.
-            for path in [Path(current), *(Path(current) / name for name in files
-                                          if not name.startswith("."))]:
-                stat = path.lstat()
+            relative_dir = os.path.relpath(current, root_string)
+            paths = [(current, relative_dir)]
+            paths.extend((os.path.join(current, name), os.path.join(relative_dir, name))
+                         for name in files if not name.startswith("."))
+            for path, relative in paths:
+                stat = os.lstat(path)
                 signature = (stat.st_mode, stat.st_dev, stat.st_ino, stat.st_size,
                              stat.st_mtime_ns, stat.st_ctime_ns)
-                entries[path.relative_to(root).as_posix()] = (
+                entries[Path(relative).as_posix()] = (
                     person.name, json.dumps(signature, separators=(",", ":")))
     return entries
 
