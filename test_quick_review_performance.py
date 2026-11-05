@@ -15,6 +15,7 @@ from unittest.mock import patch
 import numpy as np
 
 import analysis_index
+import benchmark_snapshot
 import content_identity
 import identity_confirmations
 import review_unknown_identities as review
@@ -40,7 +41,7 @@ class QuickReviewPerformanceTests(unittest.TestCase):
         self.progress = dict(total=1, reviewed=1, pending=0, confirmed=0,
                              unknown=1, junk=0, deferred=0, temporarily_skipped=0)
 
-    def worker(self, *, accepted=True, replaced=False, build_error=False):
+    def worker(self, *, accepted=True, replaced=False, build_error=False, binding=None):
         task = self.root / "task.json"
         result = self.root / "result.json"
         task.write_text(json.dumps(dict(result_path=str(result), output_dir=str(self.root),
@@ -49,6 +50,11 @@ class QuickReviewPerformanceTests(unittest.TestCase):
             decisions_path=str(self.root / "decisions.json"), review_dir=str(self.root / "review"),
             junk_dir=str(self.root / "junk"), workers=1, primary_det_size=320,
             fallback_det_size=384, cluster_eps=.4, files=[])))
+        payload = json.loads(task.read_text())
+        payload['snapshot_binding'] = binding if binding is not None else {
+            'version': 1, 'gate_signature': 'current-gate',
+            'policy_signature': 'current-policy', 'model_signature': 'current-model'}
+        task.write_text(json.dumps(payload))
         record = dict(person="Alice", organized_path=str(self.source), content_sha256=self.digest)
         if replaced:
             self.source.write_bytes(b"different content")
@@ -76,11 +82,16 @@ class QuickReviewPerformanceTests(unittest.TestCase):
                 (secondary, "primary_signature", "current"),
                 (secondary, "trusted_snapshot_is_current", True),
                 (secondary, "SecondaryMatcher", object()),
-                (review, "prepare_automatic_review_gate", (accepted, {}, "gate blocked")),
+                (review, "prepare_automatic_review_gate", (accepted, {'signature': 'current-gate'}, "gate blocked")),
+                (review, "automatic_review_gate_signature", 'current-policy'),
+                (review, "review_model_signature", 'current-model'),
                 (review.recover_no_usable_faces, "load_existing_hashes", defaultdict(set)),
             ):
                 stack.enter_context(patch.object(owner, name, return_value=value))
             stack.enter_context(patch.object(review, "build_trusted_review_prototypes", side_effect=build))
+            stack.enter_context(patch.object(benchmark_snapshot, "freeze_profile", return_value=self.db))
+            stack.enter_context(patch.object(benchmark_snapshot, "FrozenRecoveryProfiles", return_value={}))
+            stack.enter_context(patch.object(secondary, "SnapshotSecondaryMatcher", return_value=SimpleNamespace(db=object())))
             batch = stack.enter_context(patch.object(review, "_run_automatic_sweep_batch",
                 return_value=dict(scanned=0, confirmed=0, failed=0)))
             code = review.run_automatic_sweep_worker(task)
@@ -124,6 +135,25 @@ class QuickReviewPerformanceTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("gate blocked", result["error"])
         batch.assert_not_called()
+
+    def test_worker_rejects_cross_process_gate_drift_before_filing(self):
+        code, result, batch = self.worker(binding={'version': 1, 'gate_signature': 'old-gate',
+            'policy_signature': 'current-policy', 'model_signature': 'current-model'})
+        self.assertEqual(code, 1)
+        self.assertIn('snapshot changed', result['error'])
+        batch.assert_not_called()
+
+    def test_worker_rejects_missing_binding_before_filing(self):
+        code, result, batch = self.worker(binding={})
+        self.assertEqual(code, 1)
+        self.assertIn('invalid automatic sweep snapshot binding', result['error'])
+        batch.assert_not_called()
+
+    def test_worker_accepts_matching_cross_process_binding(self):
+        code, result, batch = self.worker(binding={'version': 1, 'gate_signature': 'current-gate',
+            'policy_signature': 'current-policy', 'model_signature': 'current-model'})
+        self.assertEqual(code, 0)
+        batch.assert_called_once()
 
     def test_reference_exception_closes_index_and_prevents_filing(self):
         code, result, batch = self.worker(build_error=True)

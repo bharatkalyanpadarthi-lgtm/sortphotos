@@ -1,6 +1,7 @@
 """Private immutable face inputs; never persist or train from these copies."""
 
 import copy
+from collections.abc import Mapping
 from dataclasses import fields, is_dataclass, make_dataclass
 from functools import lru_cache
 from types import MappingProxyType
@@ -63,3 +64,31 @@ def freeze_profile(profile):
     frozen_type = _profile_type(type(profile))
     return frozen_type(**{field.name: _freeze(getattr(profile, field.name))
                           for field in fields(profile)})
+
+
+def freeze_mapping(value):
+    return _freeze(dict(value))
+
+
+class FrozenRecoveryProfiles(Mapping):
+    __slots__ = ("_values", "_sources")
+
+    def __init__(self, profiles):
+        object.__setattr__(self, "_values", _freeze(dict(profiles)))
+        object.__setattr__(self, "_sources", _freeze(dict(profiles.sources)))
+
+    @property
+    def sources(self):
+        return self._sources
+
+    def __getitem__(self, key):
+        return self._values[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self):
+        return len(self._values)
+
+    def __setattr__(self, key, value):
+        raise AttributeError("Recovery profiles are immutable")

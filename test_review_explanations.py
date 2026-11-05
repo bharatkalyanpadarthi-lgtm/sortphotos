@@ -214,6 +214,7 @@ class ReviewExplanationTests(unittest.TestCase):
         with patch.object(review, 'automatic_review_gate_signature', return_value='policy'), \
              patch.object(review.evaluation_runtime, 'GateInputs', return_value=inputs), \
              patch.object(review.identity_evaluation, 'activation_gate', return_value=(False, {'failures': ['incorrect']})), \
+             patch.object(secondary, 'SnapshotSecondaryMatcher', return_value=matcher), \
              patch.object(review, 'evaluate_automatic_policy_benchmark', return_value=(True, {'strict_single_allowed': True})) as independent:
             allowed, report, _ = review.prepare_automatic_review_gate(
                 self.db, sorter.CacheState(), matcher, requested=True,

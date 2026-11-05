@@ -1387,6 +1387,14 @@ def _run_isolated_automatic_sweep_batch(
         "fallback_det_size": int(state["fallback_det_size"]),
         "cluster_eps": float(state["cluster_eps"]),
         "route_unsupported": bool(state.get("route_unsupported", True)),
+        "snapshot_binding": {
+            "version": 1,
+            "gate_signature": str(state.get("auto_review_gate", {}).get("signature", "")),
+            "policy_signature": automatic_review_gate_signature(
+                state["identity_db"], secondary_db=state["secondary_matcher"].db,
+                review_prototypes=state.get("review_prototypes")),
+            "model_signature": str(state.get("model_signature", "")),
+        },
         "known_destinations": [
             [str(person_key), str(digest), str(destination)]
             for (person_key, digest), destination
@@ -1394,6 +1402,8 @@ def _run_isolated_automatic_sweep_batch(
             if Path(destination).is_file()
         ],
     }
+    if not task["snapshot_binding"]["gate_signature"] or not task["snapshot_binding"]["model_signature"]:
+        raise RuntimeError("Automatic sweep has no validated snapshot binding; refusing to file")
     temporary_task = task_path.with_suffix(task_path.suffix + ".tmp")
     temporary_task.write_text(
         json.dumps(task, indent=2, sort_keys=True) + "\n",
@@ -2697,8 +2707,9 @@ def _prepare_automatic_review_gate(
             if primary_allowed or diagnose_independent:
                 if not primary_allowed:
                     progress("Primary safety check failed; evaluating independent matcher for diagnosis only.")
+                scoring_matcher = secondary_identity_matcher.SnapshotSecondaryMatcher(secondary_matcher)
                 policy_allowed, policy_report = evaluate_automatic_policy_benchmark(
-                    identity_db, inputs.snapshot_cache, secondary_matcher,
+                    identity_db, inputs.snapshot_cache, scoring_matcher,
                     hard_negatives=identity_hard_negatives.vectors_by_person(
                         sort_photos.IDENTITY_HARD_NEGATIVES_FILE),
                     review_prototypes=review_prototypes, progress=progress,
@@ -3522,6 +3533,25 @@ def run_automatic_sweep_worker(task_path: Path) -> int:
         )
         if not allowed:
             raise RuntimeError(gate_message)
+        binding = task.get("snapshot_binding")
+        if not isinstance(binding, dict) or binding.get("version") != 1:
+            raise RuntimeError("Missing or invalid automatic sweep snapshot binding")
+        current_policy = automatic_review_gate_signature(identity_db, secondary_db=secondary_db,
+                                                           review_prototypes=review_prototypes)
+        current_model = review_model_signature(identity_db, sort_photos.IDENTITY_HARD_NEGATIVES_FILE)
+        if (not binding.get("gate_signature") or gate.get("signature") != binding["gate_signature"]
+                or current_policy != binding.get("policy_signature")
+                or current_model != binding.get("model_signature")):
+            raise RuntimeError("Automatic sweep snapshot changed; retry with a freshly validated gate")
+        import benchmark_snapshot
+        frozen_primary = benchmark_snapshot.freeze_profile(identity_db)
+        frozen_secondary = secondary_identity_matcher.SnapshotSecondaryMatcher(matcher)
+        frozen_recovery = benchmark_snapshot.FrozenRecoveryProfiles(review_prototypes)
+        frozen_negatives = benchmark_snapshot.freeze_mapping(identity_hard_negatives.vectors_by_person(
+            sort_photos.IDENTITY_HARD_NEGATIVES_FILE))
+        if automatic_review_gate_signature(frozen_primary, secondary_db=frozen_secondary.db,
+                                           review_prototypes=frozen_recovery) != current_policy:
+            raise RuntimeError("Automatic sweep immutable profiles do not match the validated policy")
         people_root = Path(task["people_root"])
         existing_hashes = recover_no_usable_faces.load_existing_hashes(people_root)
         known_destinations: dict[tuple[str, str], Path] = {}
@@ -3538,7 +3568,7 @@ def run_automatic_sweep_worker(task_path: Path) -> int:
         worker_state = {
             "clusters": [],
             "items_by_key": {},
-            "identity_db": identity_db,
+            "identity_db": frozen_primary,
             "identity_names": sorted(identity_db.identities, key=str.casefold),
             "people_root": people_root,
             "unknown_root": Path(task["unknown_root"]),
@@ -3550,14 +3580,12 @@ def run_automatic_sweep_worker(task_path: Path) -> int:
             "confirmations_path": sort_photos.IDENTITY_CONFIRMATIONS_FILE,
             "evaluation_path": evaluation_enrollment.DEFAULT_PATH,
             "hard_negatives_path": sort_photos.IDENTITY_HARD_NEGATIVES_FILE,
-            "hard_negatives": identity_hard_negatives.vectors_by_person(
-                sort_photos.IDENTITY_HARD_NEGATIVES_FILE
-            ),
+            "hard_negatives": frozen_negatives,
             "model_signature": review_model_signature(
                 identity_db, sort_photos.IDENTITY_HARD_NEGATIVES_FILE
             ),
-            "review_prototypes": review_prototypes,
-            "secondary_matcher": matcher,
+            "review_prototypes": frozen_recovery,
+            "secondary_matcher": frozen_secondary,
             "analysis_index": Path(task["analysis_index"]),
             "existing_hashes": existing_hashes,
             "destinations_by_hash": known_destinations,

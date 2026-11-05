@@ -46,6 +46,21 @@ class EvaluationRuntimeTests(unittest.TestCase):
                              review.automatic_review_gate_signature(benchmark_snapshot.freeze_profile(profile),
                                                                     hard_negatives_path=missing))
 
+    def test_independent_snapshot_freezes_profiles_without_freezing_crop_cache(self):
+        vector = np.array([1., 0.], dtype=np.float32)
+        db = secondary.SecondaryIdentityDB(identities={'Alice': vector}, prototypes={'Alice': [vector]},
+                                           thresholds={'Alice': .2}, crop_embeddings={})
+        live = secondary.SecondaryMatcher(db)
+        live.embedding = lambda _: np.array([1., 0.], dtype=np.float32)
+        frozen = secondary.SnapshotSecondaryMatcher(live)
+        before = frozen.verify(b'crop', 'Alice')
+        vector[:] = [0., 1.]
+        db.thresholds['Alice'] = 0.
+        self.assertEqual(frozen.verify(b'crop', 'Alice'), before)
+        self.assertEqual(float(frozen.db.identities['Alice'][0]), 1.)
+        with self.assertRaises(TypeError):
+            frozen.db.thresholds['Alice'] = 1.
+
     def test_input_change_diagnostics_are_bounded_and_handle_legacy_state(self):
         self.assertEqual(review.benchmark_input_changes(None, {"a": [1]}), [])
         self.assertEqual(review.benchmark_input_changes({"a": [1]}, {"a": [1]}), [])

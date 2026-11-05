@@ -10,7 +10,7 @@ import pickle
 import sys
 import tempfile
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import cv2
@@ -318,6 +318,31 @@ class SecondaryMatcher:
         if self.dirty:
             save(self.db, self.cache_path)
             self.dirty = False
+
+
+class SnapshotSecondaryMatcher:
+    """Score against frozen profiles while retaining the live crop cache."""
+
+    def __init__(self, matcher: SecondaryMatcher):
+        import benchmark_snapshot
+        self._live = matcher
+        self.db = benchmark_snapshot.freeze_profile(replace(matcher.db, crop_embeddings={}))
+        self._scorer = SecondaryMatcher(self.db)
+        self._scorer.embedding = matcher.embedding
+
+    def verify(self, *args, **kwargs):
+        return self._scorer.verify(*args, **kwargs)
+
+    def flush(self):
+        self._live.flush()
+
+    @property
+    def app(self):
+        return self._live.app
+
+    @app.setter
+    def app(self, value):
+        self._live.app = value
 
 
 def build_database(
