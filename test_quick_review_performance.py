@@ -95,6 +95,26 @@ class QuickReviewPerformanceTests(unittest.TestCase):
         self.assertEqual(result["scanned"], 0)
         batch.assert_called_once()
 
+    def test_sweep_writes_reason_and_cache_diagnostics_without_changing_decisions(self):
+        state = {'auto_review_allowed': True, 'auto_review_preview': False,
+                 'unknown_root': self.root, 'decisions_path': self.root / 'decisions.json',
+                 'model_signature': 'model', 'output_dir': self.root,
+                 'auto_review_gate': {'signature': 'gate'}, 'batch_limit': 500}
+        payload = {'confirmed': 0, 'failed': 0, 'routed': {}, 'completed_content_keys': ['digest'],
+                   'detection_stats': {'sqlite_hits': 1}, 'eligible_lanes': {},
+                   'held_diagnostics': [{'path': str(self.source), 'sha256': 'digest',
+                                         'reason_codes': ['weak_confidence']}]}
+        with patch.object(review, 'load_decisions', return_value={}), \
+             patch.object(review.recover_no_usable_faces, 'iter_images', return_value=[self.source]), \
+             patch.object(review, 'automatic_check_allowed', return_value=True), \
+             patch.object(review, 'item_content_sha256', return_value='digest'), \
+             patch.object(review, '_run_automatic_sweep_batch', return_value=payload):
+            result = review.run_automatic_sweep(state)
+        report = json.loads(Path(result['diagnostics_path']).read_text())
+        self.assertEqual(report['reason_counts'], {'weak_confidence': 1})
+        self.assertEqual(report['detection_stats']['sqlite_hits'], 1)
+        self.assertTrue(self.source.is_file())
+
     def test_worker_rejects_replaced_reference_content(self):
         code, _result, _batch = self.worker(replaced=True)
         self.assertEqual(code, 0)

@@ -127,6 +127,11 @@ class CommandProgress:
         if text.startswith(("Daily safe auto-match", "Safe auto-sweep ")):
             self.display(text)
             return
+        if text.startswith("Analyzing unknowns "):
+            match = COUNTER.search(text)
+            if match:
+                self.count("Checking unknown faces", *(int(value.replace(",", "")) for value in match.groups()))
+            return
         if "Safety benchmark: reusing unchanged cached result" in text:
             self.notice("Matching safety check: reusing the saved result.")
             return

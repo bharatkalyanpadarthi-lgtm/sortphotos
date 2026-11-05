@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import json
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -75,6 +76,45 @@ class ReviewExplanationTests(unittest.TestCase):
         item = self.item(verifier=secondary.SecondaryVerification(True, 'Alice', .1, .4))
         self.assertEqual(self.codes(item), {'safety_gate'})
         self.assertEqual(self.codes(item, enabled=True), {'ready'})
+
+    def test_sweep_records_held_reason_without_filing(self):
+        item = self.item(distance=.7)
+        state = {'decisions_path': self.root / 'decisions.json', 'model_signature': 'v1',
+                 'identity_db': self.db, 'workers': 1, 'primary_det_size': 320,
+                 'fallback_det_size': 384, 'hard_negatives': {}, 'cluster_eps': .3,
+                 'route_unsupported': False, 'auto_review_allowed': True,
+                 'auto_review_gate': {'allowed': True, 'strict_single_allowed': True}}
+        with patch.object(review, 'load_decisions', return_value={}), \
+             patch.object(review, 'automatic_check_allowed', return_value=True), \
+             patch.object(review, 'resolved_item', return_value=False), \
+             patch.object(review, 'collect_items', return_value=([item], Counter(sqlite_hits=1), [])), \
+             patch.object(review, 'cluster_items', return_value=[]), \
+             patch.object(review, 'apply_automatic_review', return_value={'confirmed': 0, 'failed': 0}):
+            result = review._run_automatic_sweep_batch(state, [self.path])
+        self.assertEqual(result['detection_stats']['sqlite_hits'], 1)
+        self.assertIn('weak_confidence', result['held_diagnostics'][0]['reason_codes'])
+        self.assertEqual(result['confirmed'], 0)
+        self.assertTrue(self.path.is_file())
+
+    def test_daily_comparison_is_by_content_not_filename(self):
+        report = self.root / 'daily.json'
+        report.write_text(json.dumps({'rows': [{'sha256': 'digest', 'source': 'old.jpg',
+            'status': 'held', 'candidate': 'Alice', 'reason': 'weak'}]}))
+        rows = [{'sha256': 'digest', 'path': 'renamed.jpg', 'candidate': 'Bob',
+                 'reason_codes': ['matcher_disagreement']}]
+        comparisons = review.daily_decision_comparisons(rows, report)
+        self.assertEqual(len(comparisons), 1)
+        self.assertEqual(comparisons[0]['daily_candidate'], 'Alice')
+        self.assertEqual(comparisons[0]['review_candidate'], 'Bob')
+
+    def test_empty_daily_sweep_skips_identity_gate(self):
+        empty = self.root / 'empty'
+        empty.mkdir()
+        args = SimpleNamespace(auto_sweep_worker=None, input=empty, daily_auto_sweep=True)
+        with patch.object(review, 'parse_args', return_value=args), \
+             patch.object(sorter, 'load_identity_db') as load:
+            self.assertEqual(review.main(), 0)
+        load.assert_not_called()
 
     def test_same_name_verifier_rejection_cannot_authorize_dual_or_cluster(self):
         item = self.item(distance=.29, verifier=secondary.SecondaryVerification(False, 'Alice', .25, .5))
@@ -185,6 +225,7 @@ class ReviewExplanationTests(unittest.TestCase):
     def test_validation_only_cli_does_not_reconcile_or_file(self):
         args = SimpleNamespace(auto_sweep_worker=None, input=self.root, auto_safe=False,
                                auto_safe_preview=False, reprocess_pending=False, validate_auto_only=True,
+                               daily_auto_sweep=False,
                                decisions=self.root / 'decisions', output_dir=self.root)
         with patch.object(review, 'parse_args', return_value=args), \
              patch.object(sorter, 'load_identity_db', return_value=self.db), \

@@ -1273,7 +1273,7 @@ def _run_automatic_sweep_batch(state: dict, files: list[Path]) -> dict[str, obje
     retained = {
         str(path) for path in files if resolved_item(decisions, path)
     }
-    items, _stats, unsupported = collect_items(
+    items, detection_stats, unsupported = collect_items(
         files,
         state["identity_db"],
         workers=state["workers"],
@@ -1299,6 +1299,28 @@ def _run_automatic_sweep_batch(state: dict, files: list[Path]) -> dict[str, obje
     state["items_by_key"] = {item.key: item for item in items}
     batch_result = apply_automatic_review(state, clusters)
     decisions = load_decisions(state["decisions_path"])
+    diagnostics = []
+    for item in items:
+        if not item.path.is_file():
+            continue
+        try:
+            reasons = review_reasons.explain(item, state["identity_db"], settings=sys.modules[__name__],
+                gate=state.get("auto_review_gate", {}), enabled=bool(state.get("auto_review_allowed")))
+            codes = [str(reason["code"]) for reason in reasons]
+            if "ready" in codes:
+                codes = ["eligible_not_applied"]
+            diagnostics.append({"path": str(item.path), "key": item.key,
+                                "sha256": item_content_sha256(item.path),
+                                "candidate": item.candidates[0].name if item.candidates else "",
+                                "reason_codes": codes})
+        except Exception as error:  # Diagnostics must never change the filing decision.
+            diagnostics.append({"path": str(item.path), "key": item.key,
+                                "reason_codes": ["diagnostic_unavailable"],
+                                "error": type(error).__name__})
+    for record in unsupported:
+        if record.path.is_file():
+            diagnostics.append({"path": str(record.path), "key": record.key,
+                                "reason_codes": [str(record.queue_kind)]})
     checked_paths = [item.path for item in items] + [
         record.path for record in unsupported if record.queue_kind != "technical_review"
     ]
@@ -1336,6 +1358,9 @@ def _run_automatic_sweep_batch(state: dict, files: list[Path]) -> dict[str, obje
         ] if not int(batch_result["failed"]) else [],
         "routed": dict(routed),
         "destinations": destinations,
+        "detection_stats": dict(detection_stats),
+        "eligible_lanes": dict(batch_result.get("lanes", {})),
+        "held_diagnostics": diagnostics,
     }
 
 
@@ -1459,6 +1484,27 @@ def apply_pending_automatic_cache_deltas(state: dict) -> dict[str, int]:
     }
 
 
+def daily_decision_comparisons(rows: list[dict], report_path: Path) -> list[dict]:
+    """Compare decisions by content, without treating either result as ground truth."""
+    try:
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+        by_hash = {}
+        for row in data.get("rows", []):
+            if isinstance(row, dict) and row.get("sha256"):
+                by_hash.setdefault(str(row["sha256"]), []).append(row)
+        comparisons = []
+        for row in rows:
+            for daily in by_hash.get(str(row.get("sha256", "")), []):
+                comparisons.append({"sha256": row["sha256"], "review_path": row.get("path", ""),
+                    "daily_source": daily.get("source", ""), "daily_status": daily.get("status", ""),
+                    "daily_candidate": daily.get("candidate", "") or daily.get("person", ""),
+                    "daily_reason": daily.get("reason", ""), "review_candidate": row.get("candidate", ""),
+                    "review_reason_codes": row.get("reason_codes", [])})
+        return comparisons
+    except (OSError, ValueError, TypeError, AttributeError):
+        return []
+
+
 def run_automatic_sweep(state: dict) -> dict[str, object]:
     """Scan every pending file once and file all benchmark-gated safe matches.
 
@@ -1537,6 +1583,15 @@ def run_automatic_sweep(state: dict) -> dict[str, object]:
         max(1, int(state.get("batch_limit", 500))),
     )
     routed_total: Counter = Counter()
+    diagnostic_counts: Counter = Counter()
+    detection_totals: Counter = Counter()
+    eligible_lanes: Counter = Counter()
+    diagnostic_rows = []
+    diagnostic_path = (Path(state["output_dir"]) /
+                       f"auto_sweep_diagnostics_{uuid.uuid4().hex}.json") if state.get("output_dir") else None
+    run_id = os.environ.get("PHOTO_PIPELINE_RUN_ID", "")
+    daily_report = (pipeline_paths.SOURCE_REVIEW / "unassigned_intake" / "reports" /
+                    f"{run_id}_identity_recovery.json") if run_id and Path(run_id).name == run_id else None
     batch_total = max(1, (len(pending_files) + batch_size - 1) // batch_size)
     for offset in range(0, len(pending_files), batch_size):
         files = [path for path in pending_files[offset:offset + batch_size] if path.is_file()]
@@ -1548,11 +1603,34 @@ def run_automatic_sweep(state: dict) -> dict[str, object]:
             else _run_automatic_sweep_batch(state, files)
         )
         routed_total.update(batch_result.get("routed", {}))
+        detection_totals.update(batch_result.get("detection_stats", {}))
+        eligible_lanes.update(batch_result.get("eligible_lanes", {}))
+        for row in batch_result.get("held_diagnostics", []):
+            diagnostic_rows.append(row)
+            diagnostic_counts.update(row.get("reason_codes", []))
         result["scanned"] = int(result["scanned"]) + len(files)
         result["confirmed"] = int(result["confirmed"]) + int(batch_result["confirmed"])
         result["failed"] = int(result["failed"]) + int(batch_result["failed"])
         result["batches"] = int(result["batches"]) + 1
         completed_keys.update(batch_result.get("completed_content_keys", []))
+        if diagnostic_path is not None:
+            try:
+                temporary_diagnostics = diagnostic_path.with_suffix(".tmp")
+                temporary_diagnostics.write_text(json.dumps({
+                    "version": 1, "gate_signature": gate_signature,
+                    "model_signature": model_signature,
+                    "scanned": result["scanned"], "confirmed": result["confirmed"],
+                    "failed": result["failed"], "detection_stats": dict(detection_totals),
+                    "eligible_lanes": dict(eligible_lanes),
+                    "reason_counts": dict(diagnostic_counts), "held_items": diagnostic_rows,
+                    "daily_comparisons": daily_decision_comparisons(diagnostic_rows, daily_report)
+                    if daily_report else [],
+                    "note": "Diagnostic reasons may overlap; eligible_not_applied requires investigation.",
+                }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                temporary_diagnostics.replace(diagnostic_path)
+                result["diagnostics_path"] = str(diagnostic_path)
+            except OSError as error:
+                print(f"WARNING: could not save automatic review diagnostics: {error}", flush=True)
         sweep_state.update({
             "version": AUTO_SWEEP_STATE_VERSION,
             "gate_signature": gate_signature,
@@ -1590,6 +1668,8 @@ def run_automatic_sweep(state: dict) -> dict[str, object]:
         elif state.get("cache") is None:
             state["cache"] = sort_photos.load_cache()
     result["routed"] = dict(routed_total)
+    result["detection_stats"] = dict(detection_totals)
+    result["reason_counts"] = dict(diagnostic_counts)
     sweep_state.update({
         "completed_keys": sorted(completed_keys),
         "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -3595,6 +3675,8 @@ def run_daily_auto_sweep(state: dict) -> int:
         return 0
     print(f"Daily safe auto-match complete: {result['confirmed']} filed, "
           f"{result['scanned']} checked, {result['failed']} failed.", flush=True)
+    if result.get("diagnostics_path"):
+        print(f"Daily safe auto-match diagnostics: {result['diagnostics_path']}", flush=True)
     return 1 if int(result["failed"]) else 0
 
 
@@ -3609,6 +3691,9 @@ def main() -> int:
             return 0
         print(f"ERROR: unknown_identity folder is unavailable: {unknown_root}")
         return 2
+    if args.daily_auto_sweep and not recover_no_usable_faces.iter_images(unknown_root):
+        print("Daily safe auto-match: no unknown images to check.", flush=True)
+        return 0
     identity_db = sort_photos.load_identity_db()
     if identity_db is None or not identity_db.identities:
         print("ERROR: identity database is unavailable. Run `face rebuild-id` first.")

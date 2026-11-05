@@ -34,6 +34,10 @@ class ProgressTests(unittest.TestCase):
         self.progress.consume("Primary-match safety benchmark: 6993/6993 (1m 00s)")
         self.assertIn("6,993/6,993 (100%)", self.output[-1])
 
+    def test_unknown_sweep_progress_is_visible(self):
+        self.progress.consume("Analyzing unknowns 50/500: single-face=40 multi-face=10 no-face=0 errors=0")
+        self.assertIn("Checking unknown faces: 50/500 (10%)", self.output[-1])
+
     def test_throttles_fast_updates_but_keeps_completion(self):
         for count in range(2001):
             self.progress.consume(f"Verifying confirmed references: {count}/2000")
