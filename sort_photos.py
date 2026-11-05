@@ -3737,7 +3737,6 @@ def image_duplicate_fingerprint(
     asset_index: analysis_index.AnalysisIndex | None = None,
 ) -> tuple[str, str, int, float] | None:
     try:
-        sig = _fingerprint_signature(path)
         path_key = str(path)
         if asset_index is not None:
             indexed = asset_index.fingerprint(path)
@@ -3750,6 +3749,7 @@ def image_duplicate_fingerprint(
                     indexed.phash,
                     indexed.width / max(1, indexed.height),
                 )
+        sig = _fingerprint_signature(path)
         if cache_entries is not None:
             cached = cache_entries.get(path_key)
             if cached and cached.get("signature") == sig:

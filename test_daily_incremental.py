@@ -29,6 +29,13 @@ import source_manifest
 
 
 class Fixtures(unittest.TestCase):
+    def test_duplicate_sqlite_hit_avoids_redundant_signature_read(self):
+        fingerprint = analysis_index.AssetFingerprint("sha", "pixels", 42, 120, 60)
+        index = SimpleNamespace(fingerprint=lambda path: fingerprint)
+        with patch.object(sorter, "_fingerprint_signature", side_effect=AssertionError("extra stat")):
+            result = sorter.image_duplicate_fingerprint(Path("unused.jpg"), asset_index=index)
+        self.assertEqual(result, ("sha", "pixels", 42, 2.0))
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="face-incremental-test-")
         self.addCleanup(temporary.cleanup)
@@ -648,6 +655,24 @@ class DailyWorkflowTests(Fixtures):
         self.assertEqual(self.run_daily("--resume"), 0)
         self.assertFalse(daily_runner.STATE_FILE.exists())
         self.assertEqual(daily_runner.original_person_counts(), {"Alice": 2})
+
+    def test_final_inventory_includes_changes_after_cache_refresh(self):
+        self.image()
+        self.protect()
+        (self.inbox / "Alice_00002.jpg").write_bytes(b"second")
+        original_worker = self.run_worker
+
+        def worker(command, log_path, *, verbose, step_name):
+            result = original_worker(command, log_path, verbose=verbose, step_name=step_name)
+            if step_name == "integration-audit":
+                (self.people / "Alice" / "photos" / "notes.txt").write_text("late change")
+            return result
+
+        self.worker.side_effect = worker
+        self.assertEqual(self.run_daily(), 0)
+        with daily_inventory.Inventory(self.root / "daily_inventory.sqlite3", self.people, "fixture-policy") as store:
+            changes = store.changes(daily_inventory.capture(self.people))
+        self.assertEqual(changes["people"], [])
 
     def test_final_guard_detects_external_loss_after_readonly_stage(self):
         original = self.image()

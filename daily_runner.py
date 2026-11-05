@@ -1112,7 +1112,8 @@ def main() -> int:
             inventory_entries = daily_inventory.capture(PEOPLE)
         save_state(state)
         if not args.verbose:
-            print(f"  Done ({duration(time.perf_counter() - step_started)}, including safety checks).", flush=True)
+            print(f"  Done ({duration(time.perf_counter() - step_started)} total; "
+                  f"work {elapsed:.1f}s, safety checks {safety_seconds:.1f}s).", flush=True)
 
     print("Finalizing library counts and safety checks...", flush=True)
     after = snapshot()
@@ -1139,6 +1140,8 @@ def main() -> int:
         people_dir=PEOPLE,
     )
     state.setdefault("source_manifest", {})["promoted_manifest_path"] = str(manifest_path)
+    # Publish the final filesystem state, not a snapshot taken before later steps.
+    inventory_entries = daily_inventory.capture(PEOPLE)
     with daily_inventory.open_inventory(STATE_FILE.with_name("daily_inventory.sqlite3"), PEOPLE, inventory_policy()) as inventory:
         inventory.publish(state["run_id"], inventory_entries,
                           None if state["incremental"]["full"] else set(state["incremental"]["people"]))

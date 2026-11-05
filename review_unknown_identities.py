@@ -2481,6 +2481,18 @@ def automatic_review_gate_signature(
     return digest.hexdigest()
 
 
+def benchmark_input_changes(previous, current, limit=8):
+    """Describe file-version changes without altering benchmark validity checks."""
+    if not isinstance(previous, dict):
+        return []
+    changed = sorted(path for path in previous.keys() | current.keys()
+                     if previous.get(path) != current.get(path))
+    details = [f"  Changed benchmark input: {path}" for path in changed[:limit]]
+    if len(changed) > limit:
+        details.append(f"  ... and {len(changed) - limit} more changed input(s).")
+    return details
+
+
 def prepare_automatic_review_gate(
     identity_db: sort_photos.IdentityDB,
     cache: sort_photos.CacheState,
@@ -2584,6 +2596,10 @@ def _prepare_automatic_review_gate(
     reasons = (["no compatible saved safety result"] if not previous_components else
                [key for key, value in signature_components.items() if previous_components.get(key) != value])
     progress("Safety benchmark reason: " + "; ".join(reasons[:4] or ["saved result format changed"]))
+    tracked_files = getattr(inputs, "files", None)
+    input_versions = json.loads(json.dumps(getattr(tracked_files, "versions", {})))
+    for message in benchmark_input_changes(cached.get("input_versions"), input_versions):
+        progress(message)
     output_dir.mkdir(parents=True, exist_ok=True)
     with BenchmarkCheckpoints(output_dir / "benchmark_checkpoints.sqlite3", signature) as store:
         store.prune()
@@ -2628,6 +2644,7 @@ def _prepare_automatic_review_gate(
         "version": AUTO_GATE_CACHE_VERSION,
         "signature": signature,
         "input_components": signature_components,
+        "input_versions": input_versions,
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "allowed": bool(allowed),
         "strict_single_allowed": bool(allowed and policy_report.get("strict_single_allowed")),

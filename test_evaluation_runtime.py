@@ -19,6 +19,13 @@ import sort_photos as sorter
 
 
 class EvaluationRuntimeTests(unittest.TestCase):
+    def test_input_change_diagnostics_are_bounded_and_handle_legacy_state(self):
+        self.assertEqual(review.benchmark_input_changes(None, {"a": [1]}), [])
+        self.assertEqual(review.benchmark_input_changes({"a": [1]}, {"a": [1]}), [])
+        self.assertEqual(review.benchmark_input_changes({"a": [1], "b": [1]},
+                         {"a": [2], "c": [3]}, limit=1),
+                         ["  Changed benchmark input: a", "  ... and 2 more changed input(s)."])
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
