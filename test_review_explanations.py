@@ -244,7 +244,8 @@ class ReviewExplanationTests(unittest.TestCase):
     def test_background_worker_revalidates_gate_before_touching_destinations(self):
         task = self.root / 'task.json'
         result = self.root / 'result.json'
-        task.write_text(json.dumps({'result_path': str(result), 'output_dir': str(self.root)}))
+        task.write_text(json.dumps({'result_path': str(result), 'output_dir': str(self.root),
+                                    'snapshot_binding': {'version': 1, 'gate_signature': 'gate'}}))
         secondary_db = secondary.SecondaryIdentityDB(primary_signature='profile')
         with patch.object(sorter, 'load_identity_db', return_value=self.db), \
              patch.object(sorter, 'load_cache', return_value=sorter.CacheState()), \

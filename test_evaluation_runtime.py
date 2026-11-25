@@ -250,6 +250,20 @@ class EvaluationRuntimeTests(unittest.TestCase):
             self.assertEqual(primary.call_count, 1)
             independent.assert_not_called()
 
+    def test_worker_gate_drift_stops_before_rebenchmarking(self):
+        inputs = SimpleNamespace(fingerprint="new-evidence")
+        with patch.object(review, "automatic_review_gate_signature", return_value="policy"), \
+             patch.object(review.evaluation_runtime, "GateInputs", return_value=inputs), \
+             patch.object(evaluation, "activation_gate") as primary, \
+             patch.object(review, "evaluate_automatic_policy_benchmark") as independent:
+            with self.assertRaises(review.AutomaticSweepSnapshotChanged):
+                review.prepare_automatic_review_gate(self.db, sorter.CacheState(),
+                    SimpleNamespace(db=self.secondary), requested=True, output_dir=self.root,
+                    progress=lambda _: None, expected_signature="earlier-gate")
+        primary.assert_not_called()
+        independent.assert_not_called()
+        self.assertFalse((self.root / "unknown_auto_review_gate.json").exists())
+
     def test_primary_fail_fast_does_not_start_protected_scoring(self):
         metrics = dict(incorrect=1, correct=10, rejected=2, precision=0.9, recall=0.8)
         with patch.object(evaluation, "cache_metrics", return_value=metrics), \

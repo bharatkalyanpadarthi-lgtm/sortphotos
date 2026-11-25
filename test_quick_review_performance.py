@@ -7,6 +7,7 @@ import hashlib
 from pathlib import Path
 import queue
 import sqlite3
+import sys
 import tempfile
 import threading
 from types import SimpleNamespace
@@ -147,6 +148,73 @@ class QuickReviewPerformanceTests(unittest.TestCase):
         self.assertFalse(directories[0].exists())
         self.assertNotIn('_shared_snapshot_dir', state)
 
+    def test_quick_review_reconciles_and_saves_before_building_gate(self):
+        unknown = self.root / "unknown"
+        unknown.mkdir()
+        stale = unknown / "old.jpg"
+        stale.write_bytes(b"fixture")
+        destination = self.root / "specialist.jpg"
+        events = []
+
+        def reconcile(_state, *, dry_run):
+            self.assertFalse(dry_run)
+            stale.rename(destination)
+            _state["cache_dirty"] = True
+            events.append("reconcile")
+            return {"reconciled_routed_multi_face": 1}
+
+        def gate(*args, **kwargs):
+            self.assertFalse(stale.exists())
+            self.assertTrue(destination.exists())
+            events.append("gate")
+            return True, {"signature": "post-cleanup"}, "passed"
+
+        argv = ["review", "--input", str(unknown), "--output-dir", str(self.root),
+                "--decisions", str(self.root / "decisions.json"), "--auto-safe"]
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(sys, "argv", argv))
+            for owner, key, value in (
+                (sorter, "load_identity_db", self.db),
+                (sorter, "load_cache", self.cache),
+                (sorter, "analysis_index_file", self.database),
+                (review, "prepare_secondary_verifier", (object(), "ready")),
+                (review, "build_trusted_review_prototypes", ({}, {})),
+                (review.evaluation_enrollment, "relink_missing_sources", {"missing": 0}),
+                (review, "learn_hard_negatives_from_confirmed_reviews", {}),
+                (review.recover_no_usable_faces, "load_existing_hashes", {}),
+                (review, "review_progress", self.progress),
+                (review, "run_automatic_sweep", {}),
+                (review, "load_next_batch", {}),
+            ):
+                stack.enter_context(patch.object(owner, key, return_value=value))
+            stack.enter_context(patch("face_reference_library.refresh", return_value=self.db))
+            stack.enter_context(patch.object(sorter, "save_cache", side_effect=lambda _: events.append("save")))
+            stack.enter_context(patch.object(review, "reconcile_unknown_queue", side_effect=reconcile))
+            stack.enter_context(patch.object(review, "prepare_automatic_review_gate", side_effect=gate))
+            self.assertEqual(review.main(), 0)
+        self.assertEqual(events, ["reconcile", "save", "gate"])
+
+    def test_snapshot_change_pauses_interactive_sweep_without_filing(self):
+        state = {'auto_review_allowed': True, 'auto_sweep_manual_fallback': True,
+                 'isolate_auto_sweep_batches': True, 'cache': self.cache,
+                 'unknown_root': self.root, 'decisions_path': self.root / 'decisions.json',
+                 'model_signature': 'model', 'output_dir': self.root,
+                 'auto_review_gate': {'signature': 'gate'}}
+        with patch.object(review.recover_no_usable_faces, 'iter_images', return_value=[self.source]), \
+             patch.object(review, 'automatic_check_allowed', return_value=True), \
+             patch.object(review, '_run_isolated_automatic_sweep_batch',
+                          side_effect=review.AutomaticSweepSnapshotChanged('inputs changed')), \
+             patch.object(review, '_run_automatic_sweep_batch') as unguarded:
+            result = review.run_automatic_sweep(state)
+        self.assertTrue(result['paused'])
+        self.assertFalse(state['auto_review_allowed'])
+        self.assertEqual(result['confirmed'], 0)
+        self.assertTrue(self.source.exists())
+        unguarded.assert_not_called()
+        saved = json.loads((self.root / 'unknown_auto_sweep_state.json').read_text())
+        self.assertEqual(saved['status'], 'paused')
+        self.assertEqual(saved['completed_keys'], [])
+
     def test_worker_rejects_replaced_reference_content(self):
         code, _result, _batch = self.worker(replaced=True)
         self.assertEqual(code, 0)
@@ -218,7 +286,8 @@ class QuickReviewPerformanceTests(unittest.TestCase):
             task = self.root / "reference-worker.json"
             result = self.root / "reference-result.json"
             task.write_text(json.dumps(dict(result_path=str(result), output_dir=str(self.root),
-                                           analysis_index=str(self.database))))
+                                           analysis_index=str(self.database),
+                                           snapshot_binding={"version": 1, "gate_signature": "gate"})))
 
             def build(*args, **kwargs):
                 worker = original_build(*args, **kwargs, progress=None)

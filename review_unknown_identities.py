@@ -121,6 +121,10 @@ class ReviewActionConflict(ValueError):
     """Raised when an item already belongs to another active review job."""
 
 
+class AutomaticSweepSnapshotChanged(RuntimeError):
+    """The worker cannot use the parent's verdict for its current inputs."""
+
+
 @dataclass(frozen=True)
 class UnknownItem:
     key: str
@@ -1432,6 +1436,8 @@ def _run_isolated_automatic_sweep_batch(
         payload = {}
     finally:
         result_path.unlink(missing_ok=True)
+    if completed.returncode == 1 and payload.get("error_kind") == "snapshot_changed":
+        raise AutomaticSweepSnapshotChanged(payload["error"])
     if completed.returncode != 0 or payload.get("error"):
         raise RuntimeError(
             f"isolated automatic review batch failed (exit {completed.returncode}): "
@@ -1629,11 +1635,19 @@ def _run_automatic_sweep(state: dict) -> dict[str, object]:
         files = [path for path in pending_files[offset:offset + batch_size] if path.is_file()]
         if not files:
             continue
-        batch_result = (
-            _run_isolated_automatic_sweep_batch(state, files)
-            if state.get("isolate_auto_sweep_batches")
-            else _run_automatic_sweep_batch(state, files)
-        )
+        try:
+            batch_result = (
+                _run_isolated_automatic_sweep_batch(state, files)
+                if isolated_batches else _run_automatic_sweep_batch(state, files)
+            )
+        except AutomaticSweepSnapshotChanged as error:
+            if not state.get("auto_sweep_manual_fallback"):
+                raise
+            message = f"Safe auto-match paused: {error}. Continuing with manual review."
+            state.update(auto_review_allowed=False, auto_review_gate={}, auto_review_gate_message=message)
+            result.update(enabled=False, paused=True)
+            print(message, flush=True)
+            break
         routed_total.update(batch_result.get("routed", {}))
         detection_totals.update(batch_result.get("detection_stats", {}))
         eligible_lanes.update(batch_result.get("eligible_lanes", {}))
@@ -1705,7 +1719,7 @@ def _run_automatic_sweep(state: dict) -> dict[str, object]:
     sweep_state.update({
         "completed_keys": sorted(completed_keys),
         "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "status": "complete",
+        "status": "paused" if result.get("paused") else "complete",
         "last_summary": dict(result),
     })
     if sweep_state_path is not None:
@@ -2619,6 +2633,7 @@ def prepare_automatic_review_gate(
     review_prototypes: dict[str, list[np.ndarray]] | None = None,
     progress=terminal_progress,
     diagnose_independent: bool = False,
+    expected_signature: str | None = None,
 ) -> tuple[bool, dict[str, object], str]:
     """A failed safety evaluation disables auto-filing, not manual review."""
     try:
@@ -2630,7 +2645,9 @@ def prepare_automatic_review_gate(
             return _prepare_automatic_review_gate(
                 identity_db, cache, secondary_matcher, requested=requested,
                 output_dir=output_dir, review_prototypes=review_prototypes, progress=progress,
-                diagnose_independent=diagnose_independent)
+                diagnose_independent=diagnose_independent, expected_signature=expected_signature)
+    except AutomaticSweepSnapshotChanged:
+        raise
     except Exception as error:  # noqa: BLE001
         message = f"Safe auto-match unavailable: {type(error).__name__}: {error}. Manual review remains available."
         progress(message)
@@ -2649,6 +2666,7 @@ def _prepare_automatic_review_gate(
     review_prototypes: dict[str, list[np.ndarray]] | None = None,
     progress=terminal_progress,
     diagnose_independent: bool = False,
+    expected_signature: str | None = None,
 ) -> tuple[bool, dict[str, object], str]:
     """Use a cached full-library safety gate before allowing automatic moves."""
     if not requested:
@@ -2678,6 +2696,8 @@ def _prepare_automatic_review_gate(
         negative_examples=identity_hard_negatives.load(sort_photos.IDENTITY_HARD_NEGATIVES_FILE)["examples"],
         primary_faces=primary_faces)
     signature = hashlib.sha256((policy_signature + inputs.fingerprint).encode()).hexdigest()
+    if expected_signature is not None and signature != expected_signature:
+        raise AutomaticSweepSnapshotChanged("Automatic sweep snapshot changed; retry with a freshly validated gate")
     signature_components["recognition policy"] = policy_signature
     signature_components["selected benchmark images and reference contents"] = inputs.fingerprint
     def validate_inputs(*, full=True):
@@ -3548,23 +3568,24 @@ def run_automatic_sweep_worker(task_path: Path) -> int:
                 confirmations_path=sort_photos.IDENTITY_CONFIRMATIONS_FILE,
                 reference_index=reference_index,
             )
+        binding = task.get("snapshot_binding")
+        if not isinstance(binding, dict) or binding.get("version") != 1 or not binding.get("gate_signature"):
+            raise RuntimeError("Missing or invalid automatic sweep snapshot binding")
         matcher = secondary_identity_matcher.SecondaryMatcher(secondary_db)
         allowed, gate, gate_message = prepare_automatic_review_gate(
             identity_db, cache, matcher, requested=True,
             output_dir=Path(task["output_dir"]), review_prototypes=review_prototypes,
+            expected_signature=binding["gate_signature"],
         )
         if not allowed:
             raise RuntimeError(gate_message)
-        binding = task.get("snapshot_binding")
-        if not isinstance(binding, dict) or binding.get("version") != 1:
-            raise RuntimeError("Missing or invalid automatic sweep snapshot binding")
         current_policy = automatic_review_gate_signature(identity_db, secondary_db=secondary_db,
                                                            review_prototypes=review_prototypes)
         current_model = review_model_signature(identity_db, sort_photos.IDENTITY_HARD_NEGATIVES_FILE)
         if (not binding.get("gate_signature") or gate.get("signature") != binding["gate_signature"]
                 or current_policy != binding.get("policy_signature")
                 or current_model != binding.get("model_signature")):
-            raise RuntimeError("Automatic sweep snapshot changed; retry with a freshly validated gate")
+            raise AutomaticSweepSnapshotChanged("Automatic sweep snapshot changed; retry with a freshly validated gate")
         import hashlib
         import shared_profile_snapshot
         snapshot = task.get("shared_profile_snapshot")
@@ -3659,6 +3680,8 @@ def run_automatic_sweep_worker(task_path: Path) -> int:
                 os.fsync(handle.fileno())
             temporary_delta.replace(delta_path)
             payload["cache_delta"] = str(delta_path)
+    except AutomaticSweepSnapshotChanged as error:
+        payload = {"error": str(error), "error_kind": "snapshot_changed"}
     except BaseException as error:  # noqa: BLE001
         payload = {"error": f"{type(error).__name__}: {error}"}
 
@@ -3763,31 +3786,43 @@ def main() -> int:
     if not (args.validate_auto_only or args.reconcile_preview or args.reconcile_only or args.auto_safe_preview):
         import face_reference_library
         identity_db = face_reference_library.refresh(identity_db, pipeline_paths.PEOPLE_ROOT)
-    hard_negatives = identity_hard_negatives.vectors_by_person(hard_negatives_path)
     auto_requested = bool(
         args.auto_safe or args.auto_safe_preview or args.reprocess_pending or args.validate_auto_only
         or args.daily_auto_sweep
     )
     cache = sort_photos.load_cache()
-    print("Preparing shared confirmed-reference index...", flush=True)
-    reference_index = identity_confirmations.ReferenceIndex(faces_by_source=_faces_by_source(cache),
-        database=sort_photos.analysis_index_file())
-    secondary_matcher, secondary_status = prepare_secondary_verifier(
-        identity_db,
-        cache,
-        requested=auto_requested,
-        reference_index=reference_index,
-    )
-    review_prototypes, trusted_review_counts = build_trusted_review_prototypes(
-        identity_db,
-        cache,
-        confirmations_path=sort_photos.IDENTITY_CONFIRMATIONS_FILE,
-        reference_index=reference_index,
-    )
-    reference_index.close()
     decisions_path = args.decisions.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    analysis_index_path = sort_photos.analysis_index_file()
+    queue_state = {
+        "people_root": pipeline_paths.PEOPLE_ROOT,
+        "unknown_root": unknown_root,
+        "unassigned_root": unknown_root.parent,
+        "decisions_path": decisions_path,
+        "junk_dir": pipeline_paths.SOURCE_REVIEW / "ready_to_delete" / "unknown_identity_junk_dashboard",
+        "replay_dir": pipeline_paths.SOURCE_REVIEW / "ready_to_delete" / "confirmed_unknown_identity_replays",
+        "model_signature": review_model_signature(identity_db, hard_negatives_path),
+        "cache": cache,
+        "cache_dirty": False,
+    }
+    reconciliation = Counter()
+    if not (args.validate_auto_only or args.daily_auto_sweep):
+        # Replays can move benchmark sources and remove cached faces. Finish
+        # those changes before preparing profiles or authorizing any worker.
+        reconciliation = reconcile_unknown_queue(queue_state, dry_run=bool(args.reconcile_preview))
+        if queue_state["cache_dirty"]:
+            sort_photos.save_cache(cache)
+            queue_state["cache_dirty"] = False
+
+    print("Preparing shared confirmed-reference index...", flush=True)
+    with identity_confirmations.ReferenceIndex(faces_by_source=_faces_by_source(cache),
+                                                database=analysis_index_path) as reference_index:
+        secondary_matcher, secondary_status = prepare_secondary_verifier(
+            identity_db, cache, requested=auto_requested, reference_index=reference_index)
+        review_prototypes, trusted_review_counts = build_trusted_review_prototypes(
+            identity_db, cache, confirmations_path=sort_photos.IDENTITY_CONFIRMATIONS_FILE,
+            reference_index=reference_index)
     if args.validate_auto_only:
         allowed, gate, message = prepare_automatic_review_gate(
             identity_db, cache, secondary_matcher, requested=True, output_dir=output_dir,
@@ -3809,7 +3844,6 @@ def main() -> int:
             print(f"Held: {failure}", flush=True)
         print("Validation only: no photos filed, moved, or deleted.", flush=True)
         return 0 if allowed else 1
-    analysis_index_path = sort_photos.analysis_index_file()
     relink_stats = evaluation_enrollment.relink_missing_sources(
         analysis_index_path=analysis_index_path,
         people_root=pipeline_paths.PEOPLE_ROOT,
@@ -3823,10 +3857,7 @@ def main() -> int:
         review_prototypes=review_prototypes,
         state_path=output_dir / "confirmed_review_learning_state.json",
     ) if auto_requested else {"available": False, "learned": 0}
-    if int(learned_hard_negatives.get("learned", 0)):
-        hard_negatives = identity_hard_negatives.vectors_by_person(
-            hard_negatives_path
-        )
+    hard_negatives = identity_hard_negatives.vectors_by_person(hard_negatives_path)
     auto_allowed, auto_gate, auto_gate_message = prepare_automatic_review_gate(
         identity_db,
         cache,
@@ -3845,26 +3876,17 @@ def main() -> int:
         return run_daily_auto_sweep({"auto_review_allowed": False,
                                      "auto_review_gate_message": auto_gate_message})
     state = {
+        **queue_state,
         "clusters": [],
         "items_by_key": {},
         "identity_db": identity_db,
         "identity_names": sorted(identity_db.identities, key=str.casefold),
-        "people_root": pipeline_paths.PEOPLE_ROOT,
-        "unknown_root": unknown_root,
-        "unassigned_root": unknown_root.parent,
         "output_dir": output_dir,
         "session_path": output_dir / DEFAULT_SESSION.name,
         "summary": {},
-        "decisions_path": decisions_path,
         "review_dir": pipeline_paths.SOURCE_REVIEW
         / "ready_to_delete"
         / "confirmed_unknown_identity_dashboard",
-        "junk_dir": pipeline_paths.SOURCE_REVIEW
-        / "ready_to_delete"
-        / "unknown_identity_junk_dashboard",
-        "replay_dir": pipeline_paths.SOURCE_REVIEW
-        / "ready_to_delete"
-        / "confirmed_unknown_identity_replays",
         "confirmations_path": sort_photos.IDENTITY_CONFIRMATIONS_FILE,
         "evaluation_path": evaluation_enrollment.DEFAULT_PATH,
         "hard_negatives_path": hard_negatives_path,
@@ -3883,8 +3905,6 @@ def main() -> int:
         ),
         "destinations_by_hash": {},
         "next_indexes": {},
-        "cache": cache,
-        "cache_dirty": False,
         "identity_dirty": False,
         "temporarily_skipped": set(),
         "batch_number": 0,
@@ -3901,6 +3921,7 @@ def main() -> int:
         "auto_review_gate_message": auto_gate_message,
         "learned_hard_negatives": learned_hard_negatives,
         "isolate_auto_sweep_batches": bool(args.serve or args.reprocess_pending or args.daily_auto_sweep),
+        "auto_sweep_manual_fallback": args.serve,
         "batch_loading": False,
         "finishing": False,
         "review_finished": False,
@@ -3910,14 +3931,7 @@ def main() -> int:
     }
     if args.daily_auto_sweep:
         return run_daily_auto_sweep(state)
-    reconciliation = reconcile_unknown_queue(
-        state,
-        dry_run=bool(args.reconcile_preview),
-    )
     state["reconciliation"] = dict(reconciliation)
-    if state.get("cache_dirty"):
-        sort_photos.save_cache(state["cache"])
-        state["cache_dirty"] = False
     decisions = load_decisions(decisions_path)
     initial_progress = review_progress(state, decisions)
 

@@ -257,7 +257,8 @@ class FaceReferenceTests(unittest.TestCase):
     def test_review_preview_and_validation_never_refresh_references(self):
         import review_unknown_identities as review
         flags = dict(validate_auto_only=False, reconcile_preview=False, reconcile_only=False,
-                     auto_safe_preview=False, auto_safe=False, reprocess_pending=False)
+                     auto_safe_preview=False, auto_safe=False, reprocess_pending=False,
+                     daily_auto_sweep=False)
         for flag in [None, 'validate_auto_only', 'reconcile_preview', 'reconcile_only', 'auto_safe_preview']:
             args = SimpleNamespace(input=self.refs, auto_sweep_worker=None,
                                    **(flags | ({flag: True} if flag else {})))

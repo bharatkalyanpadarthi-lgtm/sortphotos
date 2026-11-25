@@ -357,7 +357,8 @@ class IntegrationTests(ReferenceFixtures, unittest.TestCase):
 
     def test_gate_progress_distinguishes_cached_and_new_evaluations(self):
         import review_unknown_identities as review
-        matcher = SimpleNamespace(db=object())
+        import secondary_identity_matcher as secondary
+        matcher = secondary.SecondaryMatcher(secondary.SecondaryIdentityDB())
         messages = []
         with patch.object(review, "automatic_review_gate_signature", return_value="unchanged"), \
              patch.object(review.evaluation_runtime, "GateInputs", return_value=SimpleNamespace(fingerprint="inputs", validate=lambda: None,
