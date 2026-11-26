@@ -617,7 +617,9 @@ def skip_reason(step: dict, state: dict, *, full: bool = False) -> str | None:
         return "no new videos"
     plan = state.get("incremental", {})
     if name in SCOPED_STEPS and not plan.get("full", True) and not plan.get("people"):
-        if name != "advanced-dedupe" or ADV_REPORT.exists():
+        # Intake and review moves can leave stale cache paths even when no
+        # person folder changed. An empty scope checks paths without detection.
+        if name != "cache-rehydrate" and (name != "advanced-dedupe" or ADV_REPORT.exists()):
             return "no changed people or folders"
     if name == "unknown-triage":
         import unknown_triage
@@ -876,6 +878,8 @@ def print_dry_run(steps: list[dict], before: dict, profile: dict,
             elif step["name"] == "video-process" and not (int(before.get("to_process_videos", 0))
                                                         + int(before.get("legacy_videos", 0))):
                 status = "skip: no new videos"
+            elif step["name"] == "cache-rehydrate" and not full_maintenance:
+                status = "check cached paths; detect in changed folders only"
             elif step["name"] in SCOPED_STEPS and not full_maintenance:
                 status = "changed folders only (full baseline on first run)"
             elif step["name"] == "unknown-triage":
@@ -1115,8 +1119,6 @@ def main() -> int:
         state["steps"][step["name"]] = {"status": "completed", "started_at": started_at,
             "finished_at": int(time.time()), "worker_seconds": round(elapsed, 3),
             "safety_seconds": round(safety_seconds, 3)}
-        if step["name"] == "cache-rehydrate":
-            inventory_entries = daily_inventory.capture(PEOPLE)
         save_state(state)
         if not args.verbose:
             print(f"  Done ({duration(time.perf_counter() - step_started)} total; "

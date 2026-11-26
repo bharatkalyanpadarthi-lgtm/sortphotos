@@ -385,6 +385,25 @@ class CacheReuseTests(Fixtures):
         self.save.assert_not_called()
         self.worker.assert_not_called()
 
+    def test_empty_people_scope_prunes_archived_intake_without_detection(self):
+        original = self.image()
+        intake = self.root / "incoming.jpg"
+        intake.write_bytes(b"unassigned")
+        for path, label in ((original, "Alice"), (intake, None)):
+            self.cache.file_signatures[str(path)] = sorter.file_signature(path)
+            self.cache.faces.append(self.cached_face(path, label=label))
+        self.seed_index(intake, [self.cache.faces[-1]])
+        review = intake.rename(self.root / "review.jpg")
+
+        self.assertEqual(self.refresh(people=set()), 0)
+        self.assertEqual(set(self.cache.file_signatures), {str(original)})
+        self.assertEqual([face.src_str for face in self.cache.faces], [str(original)])
+        self.assertEqual(review.read_bytes(), b"unassigned")
+        self.save.assert_called_once()
+        self.assertEqual(self.refresh(people=set()), 0)
+        self.save.assert_called_once()
+        self.worker.assert_not_called()
+
     def test_verified_copy_reuses_detection_even_when_source_has_gone(self):
         source = self.root / "source.jpg"
         source.write_bytes(b"original")
@@ -777,6 +796,46 @@ class DailyWorkflowTests(Fixtures):
         self.assertEqual(self.run_daily("--resume"), 0)
         self.assertFalse(daily_runner.STATE_FILE.exists())
         self.assertEqual(daily_runner.original_person_counts(), {"Alice": 2})
+
+    def test_review_only_intake_and_saved_audit_retry_check_cache_paths(self):
+        self.image()
+        self.protect()
+        (self.inbox / "Alice_00002.jpg").write_bytes(b"second")
+        self.assertEqual(self.run_daily(), 0)
+        self.calls.clear()
+
+        intake = self.inbox / "unassigned.jpg"
+        review = self.review / "unassigned.jpg"
+        intake.write_bytes(b"review")
+        original_worker = self.run_worker
+        fail_audit = True
+
+        def worker(command, log_path, *, verbose, step_name):
+            if step_name == "process":
+                self.calls.append((step_name, None))
+                intake.rename(review)
+                return 0
+            if step_name == "integration-audit" and fail_audit:
+                return 1
+            return original_worker(command, log_path, verbose=verbose, step_name=step_name)
+
+        self.worker.side_effect = worker
+        self.assertEqual(self.run_daily(), 1)
+        self.assertIn(("cache-rehydrate", set()), self.calls)
+        self.assertFalse(any(name == "structure" for name, _scope in self.calls))
+        self.assertEqual(daily_runner.load_state()["incremental"]["people"], [])
+
+        # Simulate a checkpoint written by the version that skipped cleanup.
+        checkpoint = daily_runner.load_state()
+        checkpoint["steps"]["cache-rehydrate"] = {"status": "skipped"}
+        daily_runner.save_state(checkpoint)
+        self.calls.clear()
+        fail_audit = False
+        self.assertEqual(self.run_daily("--resume"), 0)
+        self.assertEqual(self.calls, [("preflight", None), ("cache-rehydrate", set()), ("integration-audit", None)])
+        self.assertEqual(review.read_bytes(), b"review")
+        self.assertEqual(daily_runner.original_person_counts(), {"Alice": 2})
+        self.assertFalse(daily_runner.STATE_FILE.exists())
 
     def test_final_inventory_includes_changes_after_cache_refresh(self):
         self.image()
